@@ -1,0 +1,11 @@
+[tasks.dev]
+description = "Fast deterministic local validation"
+run = "python3 tools/validate.py dev"
+
+[tasks.affected]
+description = "Changed-file validation with safe unit-test fallback"
+run = "python3 tools/validate.py affected"
+
+[tasks.release]
+description = "Full deterministic release-readiness validation"
+run = "python3 tools/validate.py release"

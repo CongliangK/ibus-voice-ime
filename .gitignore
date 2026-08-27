@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-qwen-asr/
+.venv-mimo-asr/
+.mamba-python312/
+.micromamba-root/
+venv/
+ENV/
+
+# Local environment/config
+.env
+.env.*
+*.local
+.pi/
+.zcode/
+
+# Runtime/user data
+*.log
+*.pid
+*.sock
+*.tmp
+*.bak
+.DS_Store
+
+# Large vendored LLM runtime/model artifacts
+/vendor/llama.cpp/
+/vendor/micromamba/
+/vendor/MiMo-V2.5-ASR/
+/vendor/models/
+
+# rime-ice (雾凇拼音) large dictionaries — downloaded via scripts/setup-rime-ice.sh
+# Vendored Rime runtime (lib + luna schemas + build) IS tracked; only the
+# large rime-ice cn_dicts/tencent (~17MB) + zhwiki/moegirl are excluded.
+/vendor/rime/share/rime-data/cn_dicts/
+/vendor/rime/share/rime-data/zhwiki.dict.yaml
+/vendor/rime/share/rime-data/moegirl.dict.yaml
+/vendor/rime/share/rime-data/*.luna-bak
+# rime-ice 编译产物（*.table.bin 可达 60MB+）由 setup-rime-ice.sh 生成，不入 git
+# 保留原 luna/cangjie 等的 build（git 跟踪），只排除 rime-ice 系列的 build 产物
+/vendor/rime/build/rime_ice.*
+/vendor/rime/build/double_pinyin*.*
+/vendor/rime/build/melt_eng.*
+/vendor/rime/build/radical_pinyin.*
+/vendor/rime/build/t9.*
+
+# Audio/transcription artifacts
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+recordings/
+audio/
+
+# Build/package artifacts (root-level Python packaging output)
+/build/
+/dist/
+*.egg-info/
+
+# Editor/OS
+.vscode/
+.idea/
+*~
+
+# AI assistant local configs (not part of the public project)
+.claude/
+.gitnexus/
+CLAUDE.md
+AGENTS.md

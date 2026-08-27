@@ -1,0 +1,12 @@
+# Optional voice backend. Install inside a venv with --system-site-packages
+# so the engine can still import gi.repository.IBus from system packages.
+faster-whisper
+# Required when HTTP(S)_PROXY/ALL_PROXY points to a SOCKS proxy; used by
+# huggingface_hub/httpx when faster-whisper downloads models.
+httpx[socks]
+
+# NVIDIA CUDA runtime libraries for faster-whisper/CTranslate2 GPU STT.
+# These make libcublas.so.12 / libcudnn.so.9 available inside the project venv.
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*
+nvidia-cuda-nvrtc-cu12

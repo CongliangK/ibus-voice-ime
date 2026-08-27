@@ -1,0 +1,7 @@
+# rime_ice.custom.yaml
+# 雾凇拼音的个性化定制占位文件。
+#
+# 模糊音经实测效果不佳（候选污染严重），已禁用。如需启用，参考
+# rime_ice.schema.yaml 中注释的 derive 规则，在下方 speller/algebra 补充。
+
+patch: {}
