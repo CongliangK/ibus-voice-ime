@@ -71,15 +71,70 @@ def _pcm_rms_s16le(data: bytes) -> float:
     return (total / len(samples)) ** 0.5
 
 
+_ALSA_CARD_TOKENS: "set[str] | None" = None
+
+
+def _alsa_card_tokens() -> "set[str] | None":
+    """本机 ALSA 采集卡的 index/name 集合（缓存；无法解析时返回 None）。
+
+    `arecord -l` 的每个条目形如 ``card 1: M2 [MOTU M2], device 0: ...``，
+    同时收集 index（"1"）与 name（"M2"），用于校验 plughw:NAME,0 这类
+    设备串在当前机器上是否存在。解析失败/无 arecord 时返回 None，表示
+    调用方应放行设备串不做校验（保持旧行为）。
+    """
+    global _ALSA_CARD_TOKENS
+    if _ALSA_CARD_TOKENS is not None:
+        return _ALSA_CARD_TOKENS
+    tokens: set[str] = set()
+    try:
+        proc = subprocess.run(
+            ["arecord", "-l"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5
+        )
+        for line in proc.stdout.splitlines():
+            # card 1: M2 [MOTU M2], device 0: USB Audio [USB Audio]
+            marker = line.find("card ")
+            if marker < 0:
+                continue
+            rest = line[marker + len("card "):]
+            comma = rest.find(":")
+            if comma <= 0:
+                continue
+            index = rest[:comma].strip()
+            after = rest[comma + 1:]
+            name = after.split(",")[0].split("[")[0].strip()
+            if index:
+                tokens.add(index)
+            if name:
+                tokens.add(name)
+    except Exception:
+        return None
+    _ALSA_CARD_TOKENS = tokens
+    return tokens
+
+
 def _arecord_device_args() -> list[str]:
-    """VOICE_IME_ARECORD_DEVICE → arecord -D 参数（空=系统默认源）。
+    """VOICE_IME_ARECORD_DEVICE → arecord -D 参数（空/default=系统默认源）。
 
     直采指定设备（如 plughw:M2,0）不受系统默认源漂移影响（默认源被蓝牙
     抢占等，见 scripts/bt-play-restore.py）；M2 是 48k 设备，必须用 plughw
     前缀（自动重采样到 16k），不能写 hw:M2,0。
+
+    通用性：hw/plughw 设备串若在当前机器上不存在（换机器/换声卡后残留的
+    配置），记录一条日志并回退系统默认源，而不是让录音直接失败。
     """
     device = os.environ.get("VOICE_IME_ARECORD_DEVICE", "").strip()
-    return ["-D", device] if device else []
+    if not device or device == "default":
+        return []
+    if device.startswith(("hw:", "plughw:")):
+        token = device.split(":", 1)[1].split(",")[0].strip()
+        tokens = _alsa_card_tokens()
+        if tokens is not None and token and token not in tokens:
+            _log(
+                f"VOICE_IME_ARECORD_DEVICE={device} 在本机不存在"
+                f"（可用采集卡：{sorted(tokens)}），已回退系统默认录音源"
+            )
+            return []
+    return ["-D", device]
 
 
 def _record_wav_vad(path: str, max_seconds: int) -> None:

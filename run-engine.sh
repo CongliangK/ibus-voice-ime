@@ -74,9 +74,10 @@ export VOICE_IME_AUDIO_NOISE_PROFILE_MS="${VOICE_IME_AUDIO_NOISE_PROFILE_MS:-400
 #   rnnoise = 陷波 + RNNoise(bd)（ffmpeg arnndn，模型 vendor/models/rnnoise/，
 #             由 scripts/fetch-rnnoise-model.sh 下载）；缺件自动降级 notch
 export VOICE_IME_DENOISE_TIER="${VOICE_IME_DENOISE_TIER:-rnnoise}"
-# 录音直采设备：绕开系统默认源（防默认源漂移/蓝牙抢占）。M2 为 48k 设备须
-# plughw（自动重采样 16k）；设为 "default" 回到系统默认源。
-export VOICE_IME_ARECORD_DEVICE="${VOICE_IME_ARECORD_DEVICE:-plughw:M2,0}"
+# 录音直采设备：默认走系统默认源（PipeWire/Pulse 兼容性最好）。想绕开默认源
+# 漂移（蓝牙抢占等）可设为指定 ALSA 卡，如 plughw:M2,0（48k 设备须 plughw
+# 前缀自动重采样 16k，不能写 hw:M2,0）；设备不存在时引擎会自动回退默认源。
+export VOICE_IME_ARECORD_DEVICE="${VOICE_IME_ARECORD_DEVICE:-default}"
 export VOICE_IME_VOICE_MODE="${VOICE_IME_VOICE_MODE:-dictation}"
 export VOICE_IME_AUTO_PUNCTUATION="${VOICE_IME_AUTO_PUNCTUATION:-0}"
 export VOICE_IME_AUTO_PUNCT_LEVEL="${VOICE_IME_AUTO_PUNCT_LEVEL:-aggressive}"
@@ -150,9 +151,9 @@ export VOICE_IME_LLM_CONSERVATIVE_MAX_RATIO="${VOICE_IME_LLM_CONSERVATIVE_MAX_RA
 export VOICE_IME_LLAMA_PORT="${VOICE_IME_LLAMA_PORT:-18080}"
 export VOICE_IME_LLAMA_CTX_SIZE="${VOICE_IME_LLAMA_CTX_SIZE:-2048}"
 
-# faster-whisper GPU STT diagnostic defaults.  Runtime transcription is locked
-# to MiMo cloud ASR above; these values are kept only for explicit diagnostic
-# scripts/manual experiments outside the IBus engine.
+# faster-whisper GPU STT diagnostic defaults.  Runtime transcription defaults
+# to the local Qwen3-ASR sidecar above; these values are kept only for
+# explicit diagnostic scripts/manual experiments outside the IBus engine.
 export VOICE_IME_WHISPER_MODEL="${VOICE_IME_WHISPER_MODEL:-small}"
 export VOICE_IME_WHISPER_DEVICE="${VOICE_IME_WHISPER_DEVICE:-cuda}"
 export VOICE_IME_WHISPER_DEVICE_INDEX="${VOICE_IME_WHISPER_DEVICE_INDEX:-0}"

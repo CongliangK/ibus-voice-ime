@@ -24,7 +24,9 @@ coverage map yet.
 
 ## Local and GitHub parity
 
-Local and GitHub validation both use `mise run release`. The workflow is
-read-only and does not install, start, or contact ASR/LLM services. Python
-minor versions may differ between local and GitHub runners; gates must remain
-stdlib-only unless a future task pins tools in `mise.toml`.
+Local validation uses `mise run release` (or `python3 tools/validate.py release`
+directly); GitHub runs the same `tools/validate.py release` gate across a
+Python version matrix (3.10 / 3.12 / 3.13 — 3.10 is the code syntax floor).
+The workflow is read-only and does not install, start, or contact ASR/LLM
+services. Gates must remain stdlib-only unless a future task pins tools in
+`mise.toml`.

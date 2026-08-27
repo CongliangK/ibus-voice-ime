@@ -1,10 +1,64 @@
 # IBus 自定义语音输入法原型
 
-位置：`~/ibus-voice-ime`
+Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇拼音），语音输入按 `Ctrl+Alt+V` 说话、识别后直接上屏，支持本地 Qwen3-ASR / 云端 MiMo / 火山引擎等多种识别后端。
 
-## 安装/启用
+## 项目状态与已测试环境（请先读）
 
-本项目现在会使用内置 Rime 运行时：`vendor/rime/`。如需重新生成内置运行时：
+**这是一个个人项目，只在我自己的机器上完整验证过，未做广泛的发行版适配。** 具体来说：
+
+- **已验证环境**：Fedora 44 Workstation + GNOME（Wayland）、x86_64、NVIDIA RTX 4080（本地 ASR）、PipeWire 音频栈、MOTU M2 USB 声卡。
+- **未验证**：其他发行版（Ubuntu / Arch / Debian…）、其他桌面环境（KDE / X11 / sway…）、ARM 架构、无 NVIDIA GPU 的本地识别。理论上 IBus + GNOME + PipeWire 的组合都能跑，但作者没有实测；在任何机器上遇到问题欢迎提 issue 反馈。
+- 仓库内置的 librime 二进制（`vendor/rime/lib/`）复制自 Fedora x86_64 系统，其他环境可能因 glibc/架构不匹配加载失败——届时改用系统 librime 即可（见「故障排查」）。
+- 文档中出现的 `plughw:M2,0` 是作者声卡的直采配置**示例**，其他机器不需要也不适用；录音默认走系统默认音源，配置的直采设备不存在时会自动回退。
+
+## 环境要求
+
+| 组件 | 必需性 | 说明 |
+|---|---|---|
+| IBus | 必需 | 输入法框架本体（Fedora 默认自带） |
+| GNOME 桌面 | 强烈建议 | 安装脚本的输入源注册、全局热键均按 GNOME 设计；其他桌面需手工配置组件与热键 |
+| Python ≥ 3.10 | 必需 | 引擎本体 |
+| PyGObject（`gi` + IBus 内省） | 必需 | Fedora：`sudo dnf install python3-gobject ibus` |
+| alsa-utils（`arecord`） | 必需 | 录音主链路 |
+| PipeWire（`pw-record`）+ ffmpeg | 建议 | arecord 失败时的兜底录音链路 |
+| sox | 建议 | 录音预处理（高通/陷波/归一化），缺失时自动跳过 |
+| OpenCC | 建议 | 语音结果繁→简兜底转换 |
+| NVIDIA GPU | 本地 ASR 需要 | Qwen3-ASR 1.7B bf16 约需 4GB+ 显存；无 GPU 请用云端后端 |
+
+新机器上先跑环境自检（FAIL 项需解决，WARN 项为可选/降级提示）：
+
+```bash
+./scripts/check-environment.sh            # 全量
+./scripts/check-environment.sh --no-gpu   # 只关心键盘输入链路时
+```
+
+## 快速开始
+
+```bash
+git clone https://github.com/CongliangK/ibus-voice-ime.git
+cd ibus-voice-ime
+./scripts/check-environment.sh     # 环境自检，按提示解决 FAIL 项
+
+./install.sh                       # 注册 IBus 组件 + GNOME 输入源/热键
+
+# 选一个语音识别后端（二选一）：
+./scripts/setup-qwen-asr.sh        # 本地 Qwen3-ASR（默认后端，需 NVIDIA GPU）
+# 或：VOICE_IME_MIMO_API_KEY='tp-xxxxx' ./scripts/switch-mimo-cloud-asr.sh cn
+
+ibus restart                       # 或重新登录
+# Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音
+```
+
+可选：如需 faster-whisper 兜底后端，创建带系统包的 venv 并安装依赖（引擎检测到 `.venv` 会优先使用）：
+
+```bash
+python3 -m venv .venv --system-site-packages
+.venv/bin/pip install -r requirements-asr.txt
+```
+
+## 安装/启用（细节）
+
+本项目使用内置 Rime 运行时：`vendor/rime/`。如需重新生成内置运行时：
 
 ```bash
 cd ~/ibus-voice-ime
@@ -20,7 +74,7 @@ cd ~/ibus-voice-ime
 ./scripts/setup-rime-ice.sh --no-zhwiki --no-moegirl   # 只要雾凇核心词库
 ```
 
-未运行 setup 时，引擎会自动回退到内置的 `luna_pinyin_simp`，不会崩溃。
+未部署雾凇时，引擎会自动回退到内置的 `luna_pinyin_simp`，不会崩溃。
 
 安装/更新 IBus 组件：
 
@@ -334,11 +388,10 @@ export VOICE_IME_VAD_FALLBACK_FIXED=1
 
 ### 录音设备与降噪链
 
-录音可直采指定设备（绕开系统默认源，防默认源被蓝牙等抢占），默认 `plughw:M2,0`
-（MOTU M2 声卡；M2 为 48k 设备，`plughw` 前缀自动重采样到 16k，不能写 `hw:M2,0`）：
+录音默认走**系统默认音源**（PipeWire/Pulse 兼容性最好，开箱即用）。如需绕开默认源漂移（蓝牙抢占等），可直采指定 ALSA 卡，例如作者的 MOTU M2（`plughw:M2,0`；M2 为 48k 设备，`plughw` 前缀自动重采样到 16k，不能写 `hw:M2,0`）。设备名用 `arecord -l` 查询；配置的设备不存在时引擎会记录日志并自动回退系统默认源，不会直接失败：
 
 ```bash
-export VOICE_IME_ARECORD_DEVICE="plughw:M2,0"   # 空值或 "default" = 系统默认源
+export VOICE_IME_ARECORD_DEVICE="plughw:M2,0"   # 示例：直采 MOTU M2；空值/"default" = 系统默认源（默认）
 ```
 
 录音 WAV 送 ASR 前经过分级降噪链（`VOICE_IME_DENOISE_TIER`，默认 `rnnoise`）：
@@ -459,6 +512,30 @@ pi
 热词直传处理「发音对但模型不敢输出」的词；第3列替换层处理「发音相近但模型听错」的词（如 Rim→Rime）。替换层只匹配独立的整词（中英文/标点/空格为边界），不会误伤 `Rims`/`XRim` 这类子串。可用 `VOICE_IME_VOICE_REPLACEMENTS=0` 关闭替换层。
 
 如果希望这些变量对 IBus 生效，可以写入 `~/.profile`、`~/.config/environment.d/*.conf`，或用 `systemctl --user set-environment ...` 后重启 IBus。
+
+## 故障排查
+
+第一步永远是环境自检 + 看引擎日志：
+
+```bash
+./scripts/check-environment.sh
+tail -f ~/.local/share/ibus-voice-ime/engine.log
+```
+
+常见问题：
+
+- **内置 librime 加载失败 / 键盘无候选**：`vendor/rime/lib/` 的二进制是 Fedora x86_64 上构建的，其他发行版可能 glibc 过旧或架构不符。改用系统 librime（Fedora：`sudo dnf install librime`；Ubuntu/Arch 用对应包名）：
+  ```bash
+  export VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1        # Debian 系在 /usr/lib/x86_64-linux-gnu/
+  export VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data
+  export VOICE_IME_RIME_STAGING_DIR=~/.local/share/ibus-voice-ime/rime-build
+  ```
+- **语音输入没反应 / 录音失败**：`arecord -l` 确认有采集卡；日志出现「已回退系统默认录音源」属正常降级；确认没有其他程序独占麦克风。
+- **首次按 Ctrl+Alt+V 后等很久**：Qwen3-ASR sidecar 首次启动要把模型加载进显存，视盘速 30 秒到数分钟；之后有常驻/预热机制。
+- **无 NVIDIA GPU**：本地后端不可用，切换云端：`./scripts/switch-mimo-cloud-asr.sh cn`（小米 MiMo）或 `./scripts/switch-volc-bigmodel-asr.sh`（火山引擎豆包），均需自备 API Key。
+- **非 GNOME 桌面**：`install.sh` 的 gsettings 输入源注册与热键脚本不适用。手工集成思路：运行 `engine.py --xml` 生成组件描述文件放进 IBus 扫描路径（`IBUS_COMPONENT_PATH`），热键用桌面自己的全局快捷键机制调 `voice-toggle.sh`。
+- **Ctrl+Alt+V 在某些终端/应用无效**：部分工具链不把该组合键转发给 IBus，安装脚本已注册 GNOME 全局快捷键兜底；其他桌面需自行绑定。
+- **候选质量一般**：跑 `./scripts/setup-rime-ice.sh` 部署雾凇拼音大词库；不跑则回退内置 `luna_pinyin_simp`。
 
 ## 卸载
 

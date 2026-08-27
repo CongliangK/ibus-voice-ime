@@ -11,10 +11,18 @@ permissions:
 jobs:
   release-readiness:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 = 代码语法下限（PEP 604 联合类型），3.13 = 开发者日常版本；
+        # 中间版本抽样，验证引擎与测试在通用 Python 环境下可运行。
+        python: ["3.10", "3.12", "3.13"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Install mise
-        uses: jdx/mise-action@v2
+      - name: Set up Python ${{ matrix.python }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
       - name: Run release gate
-        run: mise run release
+        run: python tools/validate.py release
