@@ -533,6 +533,8 @@ tail -f ~/.local/share/ibus-voice-ime/error.log           # 引擎错误日志
 tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sidecar（模型加载/CUDA 问题在这里）
 ```
 
+日志默认保留**最近 1000 行**（引擎启动时与写入过程中自动裁剪，防止长期使用日志无限增长；报 bug 时直接附上整个文件即可）。可用 `VOICE_IME_LOG_KEEP_LINES=N` 调整，设为 `0` 关闭裁剪。
+
 常见问题：
 
 - **内置 librime 加载失败 / 键盘无候选**：`vendor/rime/lib/` 的二进制是 Fedora x86_64 上构建的（需 glibc ≥ 2.38），其他环境加载失败时**引擎会自动回退系统 librime**并在日志中说明；若系统也没装，安装后重启输入法即可（Fedora：`sudo dnf install librime`；Debian/Ubuntu：`sudo apt install librime`）。显式指定时把以下三行写进 `~/.config/environment.d/ibus-voice-ime.conf`（临时试验也可在启动前 export，引擎对显式设置继承优先）：

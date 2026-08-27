@@ -132,6 +132,10 @@ def log_error(message: str) -> None:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+        # 长会话内的日志洪水治理：错误路径本身就低频，顺手做保留最近 N 行。
+        from ibus_voice_ime.log_trim import trim_to_last_lines
+
+        trim_to_last_lines(log_path)
     except Exception:
         pass
 

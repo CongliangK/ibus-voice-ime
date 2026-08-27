@@ -13,6 +13,27 @@ fi
 
 LOG_DIR="$HOME/.local/share/ibus-voice-ime"
 mkdir -p "$LOG_DIR"
+
+# 日志保留策略：每次引擎启动把日志裁剪到最近 N 行（默认 1000，防止日志洪水；
+# 运行中的追加侧裁剪见 log_trim 模块）。VOICE_IME_LOG_KEEP_LINES=0 可关闭。
+trim_log() {
+  local file="$1" keep lines tmp
+  [[ -f "$file" ]] || return 0
+  keep="${VOICE_IME_LOG_KEEP_LINES:-1000}"
+  [[ "$keep" =~ ^[0-9]+$ ]] || keep=1000
+  [[ "$keep" -gt 0 ]] || return 0
+  lines="$(wc -l < "$file")"
+  [[ "$lines" -gt $((keep * 2)) ]] || return 0
+  tmp="$(mktemp)"
+  if tail -n "$keep" "$file" > "$tmp"; then
+    mv "$tmp" "$file"
+  else
+    rm -f "$tmp"
+  fi
+}
+trim_log "$LOG_DIR/engine.log"
+trim_log "$LOG_DIR/error.log"
+
 exec >> "$LOG_DIR/engine.log" 2>&1
 
 # Source the persisted user environment (written by install.sh and the

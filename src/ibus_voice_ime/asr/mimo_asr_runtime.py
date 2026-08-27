@@ -10,6 +10,8 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+
+from ibus_voice_ime.log_trim import trim_to_last_lines
 from pathlib import Path
 from typing import Any
 
@@ -163,6 +165,7 @@ def ensure_server() -> str:
     log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "mimo-asr-server.log"
+    trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
     cmd = [
         _python(),
         str(Path(__file__).resolve().parent / "mimo_asr_server.py"),

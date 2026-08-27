@@ -14,6 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ibus_voice_ime.log_trim import trim_to_last_lines
 from ibus_voice_ime.memory import voice_terms
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -214,6 +215,7 @@ def _ensure_server_locked() -> str:
     log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "qwen-asr-server.log"
+    trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
     cmd = [
         _python(),
         str(Path(__file__).resolve().parent / "qwen_asr_server.py"),
@@ -281,6 +283,10 @@ def transcribe(wav_path: str) -> str:
     result: dict[str, Any] = json.loads(body)
     if result.get("error"):
         raise RuntimeError(str(result["error"]))
+    # 日志保留：sidecar 常驻进程的日志只在 spawn 时裁剪，重负载长会话期间
+    # 由识别路径顺手兜底（廉价 stat，超阈值才重写）。
+    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    trim_to_last_lines(log_dir / "qwen-asr-server.log")
     return str(result.get("text") or "").strip()
 
 
