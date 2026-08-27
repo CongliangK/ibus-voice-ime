@@ -227,8 +227,8 @@ def _request_options() -> dict[str, Any]:
 
     Defaults are tuned for a Chinese-English mixed dictation IME:
     - enable_punc + enable_itn on (punctuation + number normalization)
-    - enable_ddc off (local text_postprocess already handles fillers; DDC could
-      alter intended content)
+    - enable_ddc on by default (cloud-side semantic smoothing; voice.py
+      suppresses the local filler layer when DDC is active)
     - no language pin (empty = best Mandarin/English/dialect mixing)
     - corpus.context hotwords from the shared voice dictionary
     """

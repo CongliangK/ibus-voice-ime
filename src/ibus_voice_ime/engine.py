@@ -200,40 +200,49 @@ def _voice_ipc_server() -> None:
             while True:
                 conn, _addr = server.accept()
                 with conn:
-                    raw = conn.recv(128).decode("utf-8", "ignore").strip().lower()
-                    target = _FOCUSED_ENGINE
-                    if raw in {"", "toggle", "hotkey", "voice"}:
-                        if not _engine_can_receive_ipc(target):
-                            log_error(f"IPC 语音请求失败：没有可用焦点引擎 command={raw!r}")
-                            conn.sendall(b"NO_FOCUS\n")
-                        else:
-                            GLib.idle_add(target._handle_voice_hotkey)
-                            conn.sendall(b"OK\n")
-                    elif raw in {"paste-prepare", "clipboard-prepare", "ime-paste-prepare"}:
-                        if not _engine_can_receive_ipc(target):
-                            log_error(f"IPC 粘贴准备请求失败：没有可用焦点引擎 command={raw!r}")
-                            conn.sendall(b"NO_FOCUS\n")
-                        else:
-                            GLib.idle_add(target._show_clipboard_paste_status)
-                            conn.sendall(b"OK\n")
-                    elif raw.startswith("paste-file "):
-                        if not _engine_can_receive_ipc(target):
-                            log_error(f"IPC 粘贴文件请求失败：没有可用焦点引擎 command={raw[:80]!r}")
-                            conn.sendall(b"NO_FOCUS\n")
-                        else:
-                            GLib.idle_add(target._handle_clipboard_file_paste, raw.split(" ", 1)[1])
-                            conn.sendall(b"OK\n")
-                    elif raw in {"paste", "clipboard", "clipboard-paste", "ime-paste"}:
-                        if not _engine_can_receive_ipc(target):
-                            log_error(f"IPC 粘贴请求失败：没有可用焦点引擎 command={raw!r}")
-                            conn.sendall(b"NO_FOCUS\n")
-                        else:
-                            GLib.idle_add(target._handle_clipboard_paste_request, "ipc")
-                            conn.sendall(b"OK\n")
-                    else:
-                        conn.sendall(b"ERROR unknown command\n")
+                    try:
+                        _serve_ipc_connection(conn)
+                    except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                        # 单个坏客户端（连接后立即关闭等）不能杀死整个 accept
+                        # 循环——否则 GNOME 全局热键兜底链路会静默失效。
+                        log_error(f"IPC 单连接处理失败（已忽略，服务继续）：{exc}")
     except Exception:
         log_error("语音 IPC 启动失败\n" + traceback.format_exc())
+
+
+def _serve_ipc_connection(conn) -> None:
+    raw = conn.recv(128).decode("utf-8", "ignore").strip().lower()
+    target = _FOCUSED_ENGINE
+    if raw in {"", "toggle", "hotkey", "voice"}:
+        if not _engine_can_receive_ipc(target):
+            log_error(f"IPC 语音请求失败：没有可用焦点引擎 command={raw!r}")
+            conn.sendall(b"NO_FOCUS\n")
+        else:
+            GLib.idle_add(target._handle_voice_hotkey)
+            conn.sendall(b"OK\n")
+    elif raw in {"paste-prepare", "clipboard-prepare", "ime-paste-prepare"}:
+        if not _engine_can_receive_ipc(target):
+            log_error(f"IPC 粘贴准备请求失败：没有可用焦点引擎 command={raw!r}")
+            conn.sendall(b"NO_FOCUS\n")
+        else:
+            GLib.idle_add(target._show_clipboard_paste_status)
+            conn.sendall(b"OK\n")
+    elif raw.startswith("paste-file "):
+        if not _engine_can_receive_ipc(target):
+            log_error(f"IPC 粘贴文件请求失败：没有可用焦点引擎 command={raw[:80]!r}")
+            conn.sendall(b"NO_FOCUS\n")
+        else:
+            GLib.idle_add(target._handle_clipboard_file_paste, raw.split(" ", 1)[1])
+            conn.sendall(b"OK\n")
+    elif raw in {"paste", "clipboard", "clipboard-paste", "ime-paste"}:
+        if not _engine_can_receive_ipc(target):
+            log_error(f"IPC 粘贴请求失败：没有可用焦点引擎 command={raw!r}")
+            conn.sendall(b"NO_FOCUS\n")
+        else:
+            GLib.idle_add(target._handle_clipboard_paste_request, "ipc")
+            conn.sendall(b"OK\n")
+    else:
+        conn.sendall(b"ERROR unknown command\n")
 
 
 def make_component() -> IBus.Component:
@@ -244,7 +253,7 @@ def make_component() -> IBus.Component:
         version="0.1.0",
         license="MIT",
         author="local user",
-        homepage="https://example.local/ibus-voice-ime",
+        homepage="https://github.com/CongliangK/ibus-voice-ime",
         command_line=exec_cmd,
         textdomain="ibus-voice-ime",
     )
@@ -275,7 +284,7 @@ def component_xml() -> str:
   <version>0.1.0</version>
   <author>local user</author>
   <license>MIT</license>
-  <homepage>https://example.local/ibus-voice-ime</homepage>
+  <homepage>https://github.com/CongliangK/ibus-voice-ime</homepage>
   <textdomain>ibus-voice-ime</textdomain>
   <engines>
     <engine>
@@ -1335,8 +1344,8 @@ class VoiceCustomEngine(IBus.Engine):
             self._show_aux("🎙️ 正在处理上一段语音……")
             return
         self._flush_composition_before_voice()
-        max_seconds = int(os.environ.get("VOICE_IME_MAX_RECORD_SECONDS", "120"))
-        rms_full_scale = float(os.environ.get("VOICE_IME_OVERLAY_RMS_FULL_SCALE", "3000"))
+        max_seconds = _env_int("VOICE_IME_MAX_RECORD_SECONDS", 120)
+        rms_full_scale = _env_float("VOICE_IME_OVERLAY_RMS_FULL_SCALE", 3000.0)
         try:
             session = audio_session.AudioSession(max_seconds=max_seconds, rms_full_scale=rms_full_scale)
             session.start()
@@ -1418,10 +1427,10 @@ class VoiceCustomEngine(IBus.Engine):
         if not self._voice_env_enabled("VOICE_IME_TOGGLE_SILENCE_AUTO_STOP", True):
             return
         now = time.monotonic()
-        threshold = float(os.environ.get("VOICE_IME_TOGGLE_SOUND_LEVEL", "0.04"))
-        min_seconds = float(os.environ.get("VOICE_IME_TOGGLE_MIN_RECORD_SECONDS", "0.8"))
-        silence_seconds = float(os.environ.get("VOICE_IME_TOGGLE_SILENCE_SECONDS", "2.5"))
-        no_speech_timeout = float(os.environ.get("VOICE_IME_TOGGLE_NO_SPEECH_TIMEOUT", "8"))
+        threshold = _env_float("VOICE_IME_TOGGLE_SOUND_LEVEL", 0.04)
+        min_seconds = _env_float("VOICE_IME_TOGGLE_MIN_RECORD_SECONDS", 0.8)
+        silence_seconds = _env_float("VOICE_IME_TOGGLE_SILENCE_SECONDS", 2.5)
+        no_speech_timeout = _env_float("VOICE_IME_TOGGLE_NO_SPEECH_TIMEOUT", 8.0)
         if level >= threshold:
             self._voice_seen_sound = True
             self._voice_last_sound_at = now
@@ -1489,7 +1498,17 @@ class VoiceCustomEngine(IBus.Engine):
 
     def _voice_processing_detail(self, llm: bool = False) -> str:
         if llm and llm_postprocess.enabled():
-            return os.environ.get("VOICE_IME_LLM_MODEL", "qwen2.5:7b-instruct")
+            return os.environ.get("VOICE_IME_LLM_MODEL", "qwen3.5-0.8b")
+        backend = os.environ.get("VOICE_IME_ASR_BACKEND", "qwen3-asr").strip().lower()
+        if backend in {"qwen", "qwen3", "qwen3-asr", "qwen-asr"}:
+            model = os.environ.get("VOICE_IME_QWEN_ASR_MODEL", "1.7b")
+            return f"Qwen3-ASR {model}"
+        if backend in {"mimo-cloud", "mimo-cloud-asr"}:
+            return f"MiMo 云端 {os.environ.get('VOICE_IME_MIMO_CLOUD_ASR_MODEL', 'mimo-v2.5-asr')}"
+        if backend in {"volc", "volc-bigmodel", "volc-bigmodel-asr"}:
+            return "火山引擎 bigmodel ASR"
+        if backend == "mimo-asr":
+            return "MiMo-V2.5-ASR 本地"
         model = os.environ.get("VOICE_IME_WHISPER_MODEL", "large-v3")
         device = os.environ.get("VOICE_IME_WHISPER_DEVICE", "cuda")
         compute = os.environ.get("VOICE_IME_WHISPER_COMPUTE", "float16")

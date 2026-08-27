@@ -1,3 +1,7 @@
+> 历史文档：本文写于项目以 faster-whisper 为默认 STT 后端的阶段。
+> 现状：默认后端是本地 Qwen3-ASR（见 README「语音输入」），faster-whisper 仅作为
+> 诊断/兜底后端保留（`./setup-asr.sh` 可切换）。文中"Fedora 43"为写作时环境。
+
 # GPU STT 调研与落地方案
 
 ## 结论

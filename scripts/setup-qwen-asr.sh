@@ -6,7 +6,16 @@ VENV="$ROOT_DIR/.venv-qwen-asr"
 MODELS_DIR="${VOICE_IME_QWEN_ASR_MODELS_DIR:-$ROOT_DIR/vendor/models/qwen3-asr}"
 PYTHON_BIN="${VOICE_IME_QWEN_ASR_SETUP_PYTHON:-$(command -v python3)}"
 ENABLE_NOW="${VOICE_IME_ENABLE_QWEN_ASR:-1}"
-DEFAULT_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-0.6b}"
+DEFAULT_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
+case "${DEFAULT_MODEL,,}" in
+  0.6|0.6b|qwen3-asr-0.6b) DEFAULT_MODEL=0.6b ;;
+  1.7|1.7b|qwen3-asr-1.7b) DEFAULT_MODEL=1.7b ;;
+  *)
+    echo "无效的 VOICE_IME_QWEN_ASR_MODEL：$DEFAULT_MODEL（支持 0.6b / 1.7b）" >&2
+    exit 2
+    ;;
+esac
+DEFAULT_MODEL_DIR="$MODELS_DIR/Qwen3-ASR-$( [[ "${DEFAULT_MODEL}" == "1.7b" ]] && echo 1.7B || echo 0.6B )"
 
 mkdir -p "$MODELS_DIR"
 
@@ -68,15 +77,17 @@ if [[ "$ENABLE_NOW" != "0" ]]; then
   # Remove stale Qwen ASR lines then append current config.
   if [[ -f "$ENV_FILE" ]]; then
     TMP="$(mktemp)"
-    grep -vE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD_ASR|PYTORCH_CUDA_ALLOC_CONF)' "$ENV_FILE" > "$TMP" || true
+    grep -vE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD_ASR|VOICE_IME_VOLC_BIGMODEL_ASR|PYTORCH_CUDA_ALLOC_CONF)' "$ENV_FILE" > "$TMP" || true
     mv "$TMP" "$ENV_FILE"
   fi
   cat >> "$ENV_FILE" <<EOF_ENV
 VOICE_IME_ASR_BACKEND=qwen3-asr
 VOICE_IME_QWEN_ASR=1
 VOICE_IME_MIMO_ASR=0
+VOICE_IME_MIMO_CLOUD_ASR=0
+VOICE_IME_VOLC_BIGMODEL_ASR=0
 VOICE_IME_QWEN_ASR_MODEL=$DEFAULT_MODEL
-VOICE_IME_QWEN_ASR_MODEL_PATH=$MODELS_DIR/Qwen3-ASR-0.6B
+VOICE_IME_QWEN_ASR_MODEL_PATH=$DEFAULT_MODEL_DIR
 VOICE_IME_QWEN_ASR_PYTHON=$VENV/bin/python
 VOICE_IME_QWEN_ASR_HOST=127.0.0.1
 VOICE_IME_QWEN_ASR_PORT=18081
@@ -93,8 +104,10 @@ EOF_ENV
     VOICE_IME_ASR_BACKEND=qwen3-asr \
     VOICE_IME_QWEN_ASR=1 \
     VOICE_IME_MIMO_ASR=0 \
+    VOICE_IME_MIMO_CLOUD_ASR=0 \
+    VOICE_IME_VOLC_BIGMODEL_ASR=0 \
     "VOICE_IME_QWEN_ASR_MODEL=$DEFAULT_MODEL" \
-    "VOICE_IME_QWEN_ASR_MODEL_PATH=$MODELS_DIR/Qwen3-ASR-0.6B" \
+    "VOICE_IME_QWEN_ASR_MODEL_PATH=$DEFAULT_MODEL_DIR" \
     "VOICE_IME_QWEN_ASR_PYTHON=$VENV/bin/python" \
     VOICE_IME_QWEN_ASR_HOST=127.0.0.1 \
     VOICE_IME_QWEN_ASR_PORT=18081 \
@@ -113,13 +126,8 @@ Qwen3-ASR 配置完成。
   1.7B: $MODELS_DIR/Qwen3-ASR-1.7B
   Python: $VENV/bin/python
 
-默认启用 0.6B。切换 1.7B：
-  export VOICE_IME_QWEN_ASR_MODEL_PATH=$MODELS_DIR/Qwen3-ASR-1.7B
-  export VOICE_IME_QWEN_ASR_MODEL=1.7b
-  ibus restart
+当前启用 $DEFAULT_MODEL（已写入 environment.d）。切换档位：
+  ./scripts/switch-qwen-asr.sh 1.7b    # 或 0.6b
 
-回退 faster-whisper：
-  export VOICE_IME_ASR_BACKEND=faster-whisper
-  export VOICE_IME_QWEN_ASR=0
-  export VOICE_IME_MIMO_ASR=0
+切到云端/其他后端：./scripts/switch-mimo-cloud-asr.sh cn / ./scripts/switch-volc-bigmodel-asr.sh
 EOF

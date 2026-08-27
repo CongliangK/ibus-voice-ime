@@ -173,12 +173,29 @@ class RimeService:
 
     @classmethod
     def _initialize(cls) -> None:
-        libname = os.environ.get("VOICE_IME_RIME_LIBRARY", _vendored_library())
+        explicit = os.environ.get("VOICE_IME_RIME_LIBRARY", "").strip()
+        libname = explicit or _vendored_library()
         _preload_vendored_dependencies()
         try:
             cls._lib = ctypes.CDLL(libname, mode=ctypes.RTLD_GLOBAL)
         except OSError as exc:
-            raise RimeError(f"无法加载 librime：{exc}") from exc
+            # 内置 librime 为 Fedora x86_64 构建；在其他发行版/架构（glibc 过旧等）
+            # 会加载失败。用户未显式指定库时，自动回退系统 librime（需安装发行版
+            # 的 librime 包），而不是让键盘输入直接不可用。
+            if not explicit and libname != "librime.so.1":
+                try:
+                    cls._lib = ctypes.CDLL("librime.so.1", mode=ctypes.RTLD_GLOBAL)
+                    print(
+                        f"[ibus-voice-ime] 内置 librime 加载失败（{exc}），已回退系统 librime",
+                        flush=True,
+                    )
+                except OSError:
+                    raise RimeError(
+                        f"无法加载 librime：{exc}（内置库加载失败且未找到系统 librime；"
+                        "请安装发行版的 librime 包，或设置 VOICE_IME_RIME_LIBRARY 指向可用的 librime.so.1）"
+                    ) from exc
+            else:
+                raise RimeError(f"无法加载 librime：{exc}") from exc
 
         cls._lib.rime_get_api.restype = ctypes.POINTER(RimeApi)
         api_ptr = cls._lib.rime_get_api()

@@ -19,6 +19,12 @@ exec >> "$LOG_DIR/engine.log" 2>&1
 # scripts/switch-*-asr.sh helpers) so the engine always reflects the user's
 # chosen ASR/IME configuration, even when ibus-daemon was respawned with a
 # stale session environment.  Lines are simple KEY=VALUE and safe to source.
+# RIME 四键继承优先：调用方显式 export 的救援配置（如非 Fedora 机器改用系统
+# librime：VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1）不被文件旧值覆盖。
+_INHERITED_RIME_LIBRARY="${VOICE_IME_RIME_LIBRARY:-}"
+_INHERITED_RIME_SHARED_DATA_DIR="${VOICE_IME_RIME_SHARED_DATA_DIR:-}"
+_INHERITED_RIME_STAGING_DIR="${VOICE_IME_RIME_STAGING_DIR:-}"
+_INHERITED_RIME_USER_DATA_DIR="${VOICE_IME_RIME_USER_DATA_DIR:-}"
 ENV_CONF="$HOME/.config/environment.d/ibus-voice-ime.conf"
 if [[ -r "$ENV_CONF" ]]; then
   set -a
@@ -26,6 +32,10 @@ if [[ -r "$ENV_CONF" ]]; then
   source "$ENV_CONF"
   set +a
 fi
+[[ -n "$_INHERITED_RIME_LIBRARY" ]] && export VOICE_IME_RIME_LIBRARY="$_INHERITED_RIME_LIBRARY"
+[[ -n "$_INHERITED_RIME_SHARED_DATA_DIR" ]] && export VOICE_IME_RIME_SHARED_DATA_DIR="$_INHERITED_RIME_SHARED_DATA_DIR"
+[[ -n "$_INHERITED_RIME_STAGING_DIR" ]] && export VOICE_IME_RIME_STAGING_DIR="$_INHERITED_RIME_STAGING_DIR"
+[[ -n "$_INHERITED_RIME_USER_DATA_DIR" ]] && export VOICE_IME_RIME_USER_DATA_DIR="$_INHERITED_RIME_USER_DATA_DIR"
 
 # Keep the keyboard engine private to this project.  Users may override these
 # explicitly, but by default we do not read system/user Rime installations.
@@ -63,7 +73,7 @@ export VOICE_IME_AUDIO_PREPROCESS="${VOICE_IME_AUDIO_PREPROCESS:-1}"
 export VOICE_IME_AUDIO_NORMALIZE="${VOICE_IME_AUDIO_NORMALIZE:-1}"
 export VOICE_IME_AUDIO_HIGHPASS="${VOICE_IME_AUDIO_HIGHPASS:-1}"
 export VOICE_IME_AUDIO_DENOISE="${VOICE_IME_AUDIO_DENOISE:-0}"
-export VOICE_IME_AUDIO_HIGHPASS_FREQ="${VOICE_IME_AUDIO_HIGHPASS_FREQ:-100}"
+export VOICE_IME_AUDIO_HIGHPASS_FREQ="${VOICE_IME_AUDIO_HIGHPASS_FREQ:-80}"
 export VOICE_IME_AUDIO_NORMALIZE_HEADROOM="${VOICE_IME_AUDIO_NORMALIZE_HEADROOM:-3}"
 export VOICE_IME_AUDIO_DENOISE_AMOUNT="${VOICE_IME_AUDIO_DENOISE_AMOUNT:-0.3}"
 export VOICE_IME_AUDIO_NOISE_PROFILE_MS="${VOICE_IME_AUDIO_NOISE_PROFILE_MS:-400}"

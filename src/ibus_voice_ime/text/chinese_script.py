@@ -66,6 +66,9 @@ def _load_lib():
     return lib
 
 
+_OPENCC_DEGRADE_LOGGED = False
+
+
 def _open_handle(config: str) -> int | None:
     config = str(Path(config).expanduser())
     if config in _OPENCC_HANDLES:
@@ -117,7 +120,17 @@ def normalize(text: str, *, mode: str | None = None) -> str:
     if not config:
         return text
     converted = _convert_opencc(text, config)
-    return converted if converted is not None else text
+    if converted is None:
+        global _OPENCC_DEGRADE_LOGGED
+        if not _OPENCC_DEGRADE_LOGGED:
+            _OPENCC_DEGRADE_LOGGED = True
+            print(
+                "[ibus-voice-ime] OpenCC 不可用或配置缺失，繁简转换跳过（原文直通）。"
+                "Fedora 可安装：sudo dnf install opencc",
+                flush=True,
+            )
+        return text
+    return converted
 
 
 __all__ = ["normalize"]

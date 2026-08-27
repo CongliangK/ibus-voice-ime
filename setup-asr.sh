@@ -66,10 +66,10 @@ VOICE_IME_RIME_LIBRARY=$ROOT_DIR/vendor/rime/lib/librime.so.1
 VOICE_IME_RIME_SHARED_DATA_DIR=$ROOT_DIR/vendor/rime/share/rime-data
 VOICE_IME_RIME_STAGING_DIR=$ROOT_DIR/vendor/rime/build
 VOICE_IME_RIME_USER_DATA_DIR=$HOME/.local/share/ibus-voice-ime/rime-user
-VOICE_IME_ASR_BACKEND=mimo-cloud-asr
+VOICE_IME_ASR_BACKEND=faster-whisper
 VOICE_IME_QWEN_ASR=0
 VOICE_IME_MIMO_ASR=0
-VOICE_IME_MIMO_CLOUD_ASR=1
+VOICE_IME_MIMO_CLOUD_ASR=0
 VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
 VOICE_IME_MIMO_CLOUD_ASR_MODEL=mimo-v2.5-asr
 VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE=auto
@@ -98,8 +98,8 @@ VOICE_IME_VOICE_MODE=dictation
 VOICE_IME_VOICE_COMMANDS=1
 VOICE_IME_AUTO_PUNCTUATION=0
 VOICE_IME_LLM_POSTPROCESS=0
-VOICE_IME_LLM_INTERNAL=1
-VOICE_IME_LLM_RERANK=1
+VOICE_IME_LLM_INTERNAL=0
+VOICE_IME_LLM_RERANK=0
 VOICE_IME_LLM_BASE_URL=http://127.0.0.1:18080/v1
 VOICE_IME_LLM_API_KEY=local
 VOICE_IME_LLM_MODEL=qwen3.5-0.8b
@@ -114,10 +114,10 @@ systemctl --user set-environment \
   "VOICE_IME_RIME_SHARED_DATA_DIR=$ROOT_DIR/vendor/rime/share/rime-data" \
   "VOICE_IME_RIME_STAGING_DIR=$ROOT_DIR/vendor/rime/build" \
   "VOICE_IME_RIME_USER_DATA_DIR=$HOME/.local/share/ibus-voice-ime/rime-user" \
-  VOICE_IME_ASR_BACKEND=mimo-cloud-asr \
+  VOICE_IME_ASR_BACKEND=faster-whisper \
   VOICE_IME_QWEN_ASR=0 \
   VOICE_IME_MIMO_ASR=0 \
-  VOICE_IME_MIMO_CLOUD_ASR=1 \
+  VOICE_IME_MIMO_CLOUD_ASR=0 \
   VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1 \
   VOICE_IME_MIMO_CLOUD_ASR_MODEL=mimo-v2.5-asr \
   VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE=auto \
@@ -146,14 +146,14 @@ systemctl --user set-environment \
   VOICE_IME_VOICE_COMMANDS=1 \
   VOICE_IME_AUTO_PUNCTUATION=0 \
   VOICE_IME_LLM_POSTPROCESS=0 \
-  VOICE_IME_LLM_INTERNAL=1 \
-  VOICE_IME_LLM_RERANK=1 \
+  VOICE_IME_LLM_INTERNAL=0 \
+  VOICE_IME_LLM_RERANK=0 \
   VOICE_IME_LLM_BASE_URL=http://127.0.0.1:18080/v1 \
   VOICE_IME_LLM_API_KEY=local \
   VOICE_IME_LLM_MODEL=qwen3.5-0.8b \
   VOICE_IME_LLM_CANDIDATES=3 2>/dev/null || true
-pkill -f '[q]wen_asr_server.py' 2>/dev/null || true
-pkill -f '[m]imo_asr_server.py' 2>/dev/null || true
+pkill -f 'python.*[q]wen_asr_server\.py' 2>/dev/null || true
+pkill -f 'python.*[m]imo_asr_server\.py' 2>/dev/null || true
 IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" ibus write-cache >/dev/null 2>&1 || true
 "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" || true
 
@@ -178,11 +178,12 @@ ASR 依赖安装完成。可选环境变量：
   VOICE_IME_VAD_AUTO_STOP=1                        fixed 模式启用简易静音自动停止
   VOICE_IME_VOICE_MODE=dictation|literal|markdown|prompt|command
   VOICE_IME_AUTO_PUNCTUATION=0                    本地自动补标点已禁用
-  VOICE_IME_LLM_POSTPROCESS=1                      启用 LLM 后处理
-  VOICE_IME_LLM_INTERNAL=1                          默认使用输入法内置 llama.cpp sidecar
+  VOICE_IME_LLM_POSTPROCESS=1                      实验功能：LLM 后处理（当前被引擎强制关闭，需改代码启用，见 README「LLM 后处理」）
+  VOICE_IME_LLM_INTERNAL=1                          实验功能：输入法内置 llama.cpp sidecar（同上，默认关闭）
   VOICE_IME_LLM_BASE_URL=http://127.0.0.1:18080/v1 内置 OpenAI-compatible 地址
   VOICE_IME_LLM_MODEL=qwen3.5-0.8b
-默认 STT：MiMo 云端 ASR（mimo-v2.5-asr @ token-plan-cn）；本地 faster-whisper 兜底已安装为 $ASR_WHISPER_MODEL / $ASR_WHISPER_DEVICE:$ASR_WHISPER_DEVICE_INDEX / $ASR_WHISPER_COMPUTE；LLM 默认关闭，可运行 scripts/setup-llm.sh 启用。
+本脚本把语音后端切换为 faster-whisper（$ASR_WHISPER_MODEL / $ASR_WHISPER_DEVICE:$ASR_WHISPER_DEVICE_INDEX / $ASR_WHISPER_COMPUTE）。
+切回默认本地 Qwen3-ASR：./scripts/switch-qwen-asr.sh；切云端：./scripts/switch-mimo-cloud-asr.sh cn。
 EOF
 IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" \
 LD_LIBRARY_PATH="$ROOT_DIR/vendor/rime/lib${CUDA_PIP_LIB_PATH:+:$CUDA_PIP_LIB_PATH}${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -190,10 +191,10 @@ VOICE_IME_RIME_LIBRARY="$ROOT_DIR/vendor/rime/lib/librime.so.1" \
 VOICE_IME_RIME_SHARED_DATA_DIR="$ROOT_DIR/vendor/rime/share/rime-data" \
 VOICE_IME_RIME_STAGING_DIR="$ROOT_DIR/vendor/rime/build" \
 VOICE_IME_RIME_USER_DATA_DIR="$HOME/.local/share/ibus-voice-ime/rime-user" \
-VOICE_IME_ASR_BACKEND=mimo-cloud-asr \
+VOICE_IME_ASR_BACKEND=faster-whisper \
 VOICE_IME_QWEN_ASR=0 \
 VOICE_IME_MIMO_ASR=0 \
-VOICE_IME_MIMO_CLOUD_ASR=1 \
+VOICE_IME_MIMO_CLOUD_ASR=0 \
 VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1 \
 VOICE_IME_MIMO_CLOUD_ASR_MODEL=mimo-v2.5-asr \
 VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE=auto \
@@ -222,10 +223,10 @@ VOICE_IME_VOICE_MODE=dictation \
 VOICE_IME_VOICE_COMMANDS=1 \
 VOICE_IME_AUTO_PUNCTUATION=0 \
 VOICE_IME_LLM_POSTPROCESS=0 \
-VOICE_IME_LLM_INTERNAL=1 \
-VOICE_IME_LLM_RERANK=1 \
+VOICE_IME_LLM_INTERNAL=0 \
+VOICE_IME_LLM_RERANK=0 \
 VOICE_IME_LLM_BASE_URL=http://127.0.0.1:18080/v1 \
 VOICE_IME_LLM_API_KEY=local \
 VOICE_IME_LLM_MODEL=qwen3.5-0.8b \
 VOICE_IME_LLM_CANDIDATES=3 \
-ibus-daemon -drx --replace --panel disable --cache refresh || ibus restart || true
+ibus-daemon -drx --replace --panel disable --cache refresh >/dev/null 2>&1 || "$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null 2>&1 || true

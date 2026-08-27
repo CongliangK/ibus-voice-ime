@@ -15,13 +15,17 @@ from ibus_voice_ime.text import text_postprocess  # noqa: E402
 class CjkLatinSpaceTest(unittest.TestCase):
     def setUp(self) -> None:
         # Default behavior is on (remove CJK<->Latin boundary spaces).
-        self._saved = os.environ.get("VOICE_IME_CJK_LATIN_SPACE")
+        self._saved = (
+            "VOICE_IME_CJK_LATIN_SPACE",
+            os.environ.get("VOICE_IME_CJK_LATIN_SPACE"),
+        )
 
     def tearDown(self) -> None:
-        if self._saved is None:
-            os.environ.pop("VOICE_IME_CJK_LATIN_SPACE", None)
+        key, value = self._saved
+        if value is None:
+            os.environ.pop(key, None)
         else:
-            os.environ[self._saved] = self._saved
+            os.environ[key] = value
 
     def test_removes_cjk_latin_boundary(self) -> None:
         self.assertEqual(

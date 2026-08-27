@@ -24,6 +24,7 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 | sox | 建议 | 录音预处理（高通/陷波/归一化），缺失时自动跳过 |
 | OpenCC | 建议 | 语音结果繁→简兜底转换 |
 | NVIDIA GPU | 本地 ASR 需要 | Qwen3-ASR 1.7B bf16 约需 4GB+ 显存；无 GPU 请用云端后端 |
+| glibc ≥ 2.38 | 内置 librime 需要 | 仓库内置的 librime 二进制在 Fedora 39+/Ubuntu 24.04+ 可直接用；更老的系统上引擎会自动回退系统 librime（安装 librime 包即可），见「故障排查」 |
 
 新机器上先跑环境自检（FAIL 项需解决，WARN 项为可选/降级提示）：
 
@@ -236,7 +237,7 @@ export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 默认是 toggle 模式：按一次开始录音，再按一次停止录音、识别并提交到当前光标位置。状态弹窗默认关闭。现在语音流水线是：
 
 ```text
-录音 wav -> STT 初稿 -> 规则清理 -> 可选 LLM 重排/润色 -> 提交到当前光标
+录音 wav -> STT 初稿 -> 规则清理 ->（LLM 重排为实验功能，默认禁用）-> 提交到当前光标
 ```
 
 默认 STT 后端是本地 `Qwen3-ASR` sidecar（0.6B / 1.7B，默认 1.7B）：模型从 `vendor/models/qwen3-asr/` 加载，首次语音时由 engine 进程自动拉起本地 HTTP sidecar（端口 18081，bf16，cuda:0）。如需切换模型：
@@ -253,7 +254,7 @@ export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 ```
 API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要写入文档或提交到仓库。
 
-本原型支持六种 STT 后端：
+本原型支持七种 STT 后端：
 
 1. `VOICE_IME_ASR_CMD` 自定义命令，命令 stdout 作为识别文本。例：
    ```bash
@@ -261,7 +262,7 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
    ```
 2. `Qwen3-ASR` sidecar（推荐用于测试 2026 新中文/多语 ASR）：
    ```bash
-   ./scripts/setup-qwen-asr.sh   # 下载 Qwen3-ASR-0.6B 和 1.7B，并默认启用 0.6B
+   ./scripts/setup-qwen-asr.sh   # 下载 Qwen3-ASR-0.6B 和 1.7B，并默认启用 1.7B（两档都下，方便切换）
    # 快速切换测试：
    ./scripts/switch-qwen-asr.sh 0.6b
    ./scripts/switch-qwen-asr.sh 1.7b
@@ -271,7 +272,7 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
    ./scripts/setup-mimo-asr.sh   # 下载 XiaomiMiMo/MiMo-V2.5-ASR 和 MiMo-Audio-Tokenizer，并默认启用
    ./scripts/switch-mimo-asr.sh
    ```
-4. `MiMo 云端 ASR / Token Plan`（默认，OpenAI-compatible API，避免本地大模型显存占用）：
+4. `MiMo 云端 ASR / Token Plan`（OpenAI-compatible API，避免本地大模型显存占用，适合无 NVIDIA GPU 的机器）：
    ```bash
    # Token Plan 中国集群；也可用 sgp / ams / payg / 完整 Base URL
    VOICE_IME_MIMO_API_KEY='tp-xxxxx' ./scripts/switch-mimo-cloud-asr.sh cn
@@ -371,7 +372,7 @@ GPU 验证：
 ```bash
 cd ~/ibus-voice-ime
 ./scripts/check-gpu-stt.sh
-# 可选验证真实默认模型：VOICE_IME_WHISPER_MODEL=large-v3 ./scripts/check-gpu-stt.sh
+# 如需用大模型验证 GPU 链路：VOICE_IME_WHISPER_MODEL=large-v3 ./scripts/check-gpu-stt.sh
 ```
 
 `fixed` 模式可选启用简易静音自动停止，开始说话后静音约 1 秒自动结束；如果 VAD 录音失败会回退到固定时长录音：
@@ -438,11 +439,13 @@ export VOICE_IME_CHINESE_SCRIPT=traditional # 可选：简体转繁体
 
 默认使用系统配置 `/usr/share/opencc/t2s.json`；如需自定义可设置 `VOICE_IME_OPENCC_T2S_CONFIG=/path/to/t2s.json`。LLM 后处理开启时，也会被提示默认输出简体中文，但最终仍以 OpenCC 兜底转换为准。
 
-### LLM 后处理 / 重排
+### LLM 后处理 / 重排（实验功能，当前已禁用）
 
-LLM 后处理默认关闭：默认提交 MiMo ASR + 规则清理后的文本，不再额外交给 LLM 改写，也不做本地自动补标点。显式启用后只把 STT 文本发给 LLM，不发送音频；LLM 失败时默认回退提交 STT/规则清理后的文本。
+**现状声明**：LLM 后处理是实验功能，当前被引擎**强制关闭**——`run-engine.sh` 在启动时无条件设置 `VOICE_IME_LLM_POSTPROCESS=0 / VOICE_IME_LLM_INTERNAL=0 / VOICE_IME_LLM_RERANK=0`，且 `llm_postprocess.enabled()` 硬编码返回 False。也就是说：设置环境变量开启不了它，`scripts/setup-llm.sh` 安装的 llama.cpp sidecar 不会被语音流程调用。默认链路是 **Qwen3-ASR + 规则清理**后直接提交。
 
-默认方案已改为输入法内置管理的 `llama.cpp` sidecar：首次需要安装/配置 `llama-server` 和 GGUF 模型，之后 IBus 进程会在需要 LLM 时自动拉起本地服务。模型选择：ModelScope `Qwen/Qwen3.5-0.8B`；由于 `llama.cpp` 需要 GGUF，安装脚本默认下载对应的 GGUF 量化仓库。
+这样设计的原因：实测小模型后处理会改坏原始听写内容（改词、吞字、加不存在的内容），确定性规则清理已覆盖绝大多数脏数据。要真正启用需修改引擎代码解除强制关闭并自担改写质量风险（`src/ibus_voice_ime/asr/voice.py` 的 postprocess 链、`run-engine.sh` 的 Strict policy 段、`text/llm_postprocess.py` 的 `enabled()`）。
+
+实验用的基础设施仍然保留：内置管理的 `llama.cpp` sidecar（`llama-server` + GGUF 模型，ModelScope `Qwen/Qwen3.5-0.8B`），`./scripts/setup-llm.sh` 可完成安装与预置。
 
 ```bash
 cd ~/ibus-voice-ime
@@ -465,7 +468,7 @@ export VOICE_IME_LLM_TIMEOUT=4
 export VOICE_IME_LLM_FALLBACK_RAW=1      # 仅在接口错误/超时时回退，不参与正常文本选择
 ```
 
-如果已经有 Ollama、LM Studio 或其它 OpenAI-compatible 服务，也可以显式关闭内置 sidecar：
+实验时如果已经有 Ollama、LM Studio 或其它 OpenAI-compatible 服务，也可以不用内置 sidecar：
 
 ```bash
 export VOICE_IME_LLM_INTERNAL=0
@@ -474,7 +477,7 @@ export VOICE_IME_LLM_API_KEY=ollama
 export VOICE_IME_LLM_MODEL=your-model
 ```
 
-当前默认思路是先不启用 LLM 后处理，避免小模型改坏原始听写内容。若手动设置 `VOICE_IME_LLM_POSTPROCESS=1`，才会使用轻量提示词让 LLM 做最小清理和标点补全。
+再强调一次：仅设置 `VOICE_IME_LLM_POSTPROCESS=1` 不会生效（引擎会覆盖回 0）；见本节开头的现状声明。
 
 模式配置：
 
@@ -522,9 +525,17 @@ pi
 tail -f ~/.local/share/ibus-voice-ime/engine.log
 ```
 
+日志一共有三处，按问题层次查：
+
+```bash
+tail -f ~/.local/share/ibus-voice-ime/engine.log          # 引擎主日志（键盘/录音/提交链路）
+tail -f ~/.local/share/ibus-voice-ime/error.log           # 引擎错误日志
+tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sidecar（模型加载/CUDA 问题在这里）
+```
+
 常见问题：
 
-- **内置 librime 加载失败 / 键盘无候选**：`vendor/rime/lib/` 的二进制是 Fedora x86_64 上构建的，其他发行版可能 glibc 过旧或架构不符。改用系统 librime（Fedora：`sudo dnf install librime`；Ubuntu/Arch 用对应包名）：
+- **内置 librime 加载失败 / 键盘无候选**：`vendor/rime/lib/` 的二进制是 Fedora x86_64 上构建的（需 glibc ≥ 2.38），其他环境加载失败时**引擎会自动回退系统 librime**并在日志中说明；若系统也没装，安装后重启输入法即可（Fedora：`sudo dnf install librime`；Debian/Ubuntu：`sudo apt install librime`）。显式指定时把以下三行写进 `~/.config/environment.d/ibus-voice-ime.conf`（临时试验也可在启动前 export，引擎对显式设置继承优先）：
   ```bash
   export VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1        # Debian 系在 /usr/lib/x86_64-linux-gnu/
   export VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data

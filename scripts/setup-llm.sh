@@ -152,7 +152,7 @@ persist_env() {
     mv "$tmp" "$env_file"
   fi
   cat >> "$env_file" <<EOF_ENV
-VOICE_IME_LLM_POSTPROCESS=1
+VOICE_IME_LLM_POSTPROCESS=0
 VOICE_IME_LLM_INTERNAL=1
 VOICE_IME_LLM_TRUST_OUTPUT=1
 VOICE_IME_LLM_RERANK=0
@@ -174,7 +174,7 @@ EOF_ENV
 
   systemctl --user set-environment \
     "IBUS_COMPONENT_PATH=$ibus_component_path" \
-    VOICE_IME_LLM_POSTPROCESS=1 \
+    VOICE_IME_LLM_POSTPROCESS=0 \
     VOICE_IME_LLM_INTERNAL=1 \
     VOICE_IME_LLM_TRUST_OUTPUT=1 \
     VOICE_IME_LLM_RERANK=0 \
@@ -206,6 +206,8 @@ LLM 内置推理配置完成。
   服务地址：http://$HOST:$PORT/v1
   API 模型名：$MODEL_ALIAS
 
-启用方式：重启 IBus 后使用语音输入；首次 LLM 后处理会自动拉起 llama-server。
-如需立即重启：ibus restart
+注意：LLM 后处理当前为实验功能，引擎侧默认强制关闭（run-engine.sh 的
+VOICE_IME_LLM_POSTPROCESS=0 / llm_postprocess.enabled() 硬编码 False）。
+本脚本只完成依赖安装与 sidecar 预置；如需真正启用，需修改引擎代码解除
+强制关闭并自担改写质量风险（详见 README「LLM 后处理」一节）。
 EOF

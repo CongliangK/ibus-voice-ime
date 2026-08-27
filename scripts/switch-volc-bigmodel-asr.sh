@@ -66,11 +66,13 @@ if [[ "$USE_BWS_KEY" == "1" ]]; then
   systemctl --user set-environment "VOICE_IME_VOLC_API_KEY_SECRET=$BWS_SECRET_NAME" 2>/dev/null || true
   systemctl --user unset-environment VOICE_IME_VOLC_API_KEY VOLC_BIGMODEL_API_KEY VOLC_ASR_API_KEY 2>/dev/null || true
 else
-  systemctl --user set-environment "VOICE_IME_VOLC_API_KEY=$API_KEY" 2>/dev/null || true
+  # 手动提供的 Key 只注入本次 spawn 的 ibus-daemon（下方 export）；
+  # 不写入 systemd user manager 环境，避免明文 Key 对整个用户会话可见。
+  systemctl --user unset-environment VOICE_IME_VOLC_API_KEY VOLC_BIGMODEL_API_KEY VOLC_ASR_API_KEY 2>/dev/null || true
 fi
 
-pkill -f '[m]imo_asr_server.py' 2>/dev/null || true
-pkill -f '[q]wen_asr_server.py' 2>/dev/null || true
+pkill -f 'python.*[m]imo_asr_server\.py' 2>/dev/null || true
+pkill -f 'python.*[q]wen_asr_server\.py' 2>/dev/null || true
 if [[ "$USE_BWS_KEY" == "1" ]]; then
   unset VOICE_IME_VOLC_API_KEY VOLC_BIGMODEL_API_KEY VOLC_ASR_API_KEY
 else
@@ -96,7 +98,7 @@ VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID="$RESOURCE_ID" \
 VOICE_IME_VOLC_BIGMODEL_MODEL_NAME="$MODEL_NAME" \
 VOICE_IME_AUTO_PUNCTUATION="${VOICE_IME_AUTO_PUNCTUATION:-0}" \
 VOICE_IME_LLM_POSTPROCESS="${VOICE_IME_SWITCH_LLM_POSTPROCESS:-0}" \
-VOICE_IME_LLM_INTERNAL="${VOICE_IME_SWITCH_LLM_INTERNAL:-1}" \
+VOICE_IME_LLM_INTERNAL="${VOICE_IME_SWITCH_LLM_INTERNAL:-0}" \
 VOICE_IME_LLM_TRUST_OUTPUT="${VOICE_IME_SWITCH_LLM_TRUST_OUTPUT:-1}" \
 VOICE_IME_LLM_RERANK="${VOICE_IME_SWITCH_LLM_RERANK:-0}" \
 VOICE_IME_LLM_CANDIDATES="${VOICE_IME_SWITCH_LLM_CANDIDATES:-1}" \
@@ -104,7 +106,7 @@ VOICE_IME_LLM_BASE_URL="${VOICE_IME_SWITCH_LLM_BASE_URL:-http://127.0.0.1:18080/
 VOICE_IME_LLM_API_KEY="${VOICE_IME_SWITCH_LLM_API_KEY:-local}" \
 VOICE_IME_LLM_MODEL="${VOICE_IME_SWITCH_LLM_MODEL:-qwen3.5-0.8b}" \
 VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$HOME/.local/share/ibus-voice-ime/llm.jsonl}" \
-ibus-daemon -drx --replace --panel disable --cache refresh >/dev/null 2>&1 || ibus restart >/dev/null 2>&1 || true
+"$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null || true
 sleep 1
 ibus engine voice-custom >/dev/null 2>&1 || true
 

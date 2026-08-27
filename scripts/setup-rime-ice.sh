@@ -54,7 +54,7 @@ if [[ ! -f "$LIB_DIR/librime.so.1" ]]; then
 fi
 # 确保 librime-lua 插件就位（雾凇拼音依赖 lua_translator/lua_processor）
 if [[ ! -f "$LIB_DIR/rime-plugins/librime-lua.so" ]]; then
-  for ps in /usr/lib64/rime-plugins /usr/lib/rime-plugins; do
+  for ps in /usr/lib64/rime-plugins /usr/lib/rime-plugins /usr/lib/x86_64-linux-gnu/rime-plugins; do
     if [[ -f "$ps/librime-lua.so" ]]; then
       mkdir -p "$LIB_DIR/rime-plugins"
       cp -a "$ps/librime-lua.so" "$LIB_DIR/rime-plugins/"
@@ -62,8 +62,9 @@ if [[ ! -f "$LIB_DIR/rime-plugins/librime-lua.so" ]]; then
     fi
   done
 fi
-if [[ ! -f "$LIB_DIR/liblua-"*.so ]]; then
-  for ll in /usr/lib64/liblua-*.so /lib64/liblua-*.so /usr/lib/liblua-*.so /lib/liblua-*.so; do
+# Debian 的 liblua 命名为 liblua5.4.so.0（无连字符），用 liblua*.so* 覆盖两种命名。
+if ! compgen -G "$LIB_DIR/liblua*.so*" >/dev/null; then
+  for ll in /usr/lib64/liblua-*.so /lib64/liblua-*.so /usr/lib/liblua-*.so /lib/liblua-*.so /usr/lib/x86_64-linux-gnu/liblua*.so*; do
     [[ -f "$ll" ]] && cp -a "$ll" "$LIB_DIR/" && break
   done
 fi

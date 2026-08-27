@@ -6,7 +6,6 @@ keeps a lightweight RMS level for the status overlay.
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import tempfile
@@ -56,10 +55,12 @@ class AudioSession:
         self.wav_path = str(Path(self._tmpdir_obj.name) / "record.wav")
         cmd = ["arecord", "-q", "-t", "raw", "-f", "S16_LE", "-r", "16000", "-c", "1"]
         # VOICE_IME_ARECORD_DEVICE：直采指定设备（如 plughw:M2,0），不受系统默认源
-        # 漂移影响（默认源被蓝牙抢占等，见 scripts/bt-play-restore.py）。
-        device = os.environ.get("VOICE_IME_ARECORD_DEVICE", "").strip()
-        if device:
-            cmd[1:1] = ["-D", device]
+        # 漂移影响（默认源被蓝牙抢占等，见 scripts/bt-play-restore.py）。设备串
+        # 复用 voice._arecord_device_args 的存在性校验：配置残留自其他机器时自动
+        # 回退系统默认源，而不是让 toggle 录音直接失败。
+        from ibus_voice_ime.asr.voice import _arecord_device_args
+
+        cmd[1:1] = _arecord_device_args()
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except FileNotFoundError as exc:

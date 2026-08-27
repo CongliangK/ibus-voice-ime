@@ -6,7 +6,7 @@ if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3)"
 fi
 
-# Defaults match the IBus runtime. Use tiny by default here so the check is fast;
+# Same env knobs as the IBus runtime; only the model defaults to tiny so the check is fast;
 # pass VOICE_IME_WHISPER_MODEL=small/medium/... to validate another model.
 export VOICE_IME_WHISPER_MODEL="${VOICE_IME_WHISPER_MODEL:-tiny}"
 export VOICE_IME_WHISPER_DEVICE="${VOICE_IME_WHISPER_DEVICE:-cuda}"

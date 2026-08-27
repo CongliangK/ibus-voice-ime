@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -18,9 +19,12 @@ from ibus_voice_ime.memory import voice_terms
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18081
-DEFAULT_MODEL_ALIAS = "0.6b"
+DEFAULT_MODEL_ALIAS = "1.7b"
 _PROCESS: subprocess.Popen | None = None
 _PROCESS_KEY: tuple[str, int, str] | None = None
+# 录音开始的预热线程与停止后的识别线程可能并发首拉 sidecar；不加锁会双拉
+# 进程，输家死于端口冲突并报出假错误（实际幸存方健康）。
+_ENSURE_LOCK = threading.Lock()
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -145,7 +149,43 @@ def _log(message: str) -> None:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
 
+def _log_tail(log_file: Path, lines: int = 15) -> str:
+    """最后几行日志，用于把失败原因带进用户可见的错误信息。"""
+    try:
+        content = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(content[-lines:]).strip()
+    except Exception:
+        return ""
+
+
+def _humanize_transcribe_error(code: int, detail: str) -> str:
+    """把 sidecar 的英文 500 转成带补救指引的中文信息。"""
+    markers = (
+        "no Qwen3-ASR model is active",
+        "CUDA",
+        "cuda",
+        "No module named",
+        "torch",
+        "OSError",
+    )
+    if code == 500 and any(m in detail for m in markers):
+        return (
+            f"Qwen3-ASR 识别失败：模型未能在 GPU 上加载（{detail[:200]}）。\n"
+            "常见原因与处理：\n"
+            "  1. 模型未下载 → 运行 ./scripts/setup-qwen-asr.sh\n"
+            "  2. 无 NVIDIA GPU / CUDA 不可用 → 切云端后端：./scripts/switch-mimo-cloud-asr.sh cn\n"
+            "  3. sidecar 依赖缺失 → 重跑 ./scripts/setup-qwen-asr.sh\n"
+            "完整日志：~/.local/share/ibus-voice-ime/qwen-asr-server.log"
+        )
+    return f"Qwen3-ASR HTTP {code}: {detail}"
+
+
 def ensure_server() -> str:
+    with _ENSURE_LOCK:
+        return _ensure_server_locked()
+
+
+def _ensure_server_locked() -> str:
     global _PROCESS, _PROCESS_KEY
     url = base_url()
     key = (_host(), _port(), model_id())
@@ -159,6 +199,17 @@ def ensure_server() -> str:
 
     if _PROCESS is not None and _PROCESS.poll() is None and _PROCESS_KEY == key:
         return url
+
+    # 首装常见问题前置检查：模型目录不存在时 sidecar 会假装健康、识别时才
+    # 报错；在这里早失败并给出补救命令。
+    mid = key[2]
+    mid_path = Path(mid).expanduser()
+    if mid_path.is_absolute() and not mid_path.is_dir():
+        raise RuntimeError(
+            f"Qwen3-ASR 模型目录不存在：{mid}\n"
+            "请先运行 ./scripts/setup-qwen-asr.sh 下载模型，"
+            "或用 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端后端（无需 GPU）。"
+        )
 
     log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -189,7 +240,11 @@ def ensure_server() -> str:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _PROCESS.poll() is not None:
-            raise RuntimeError(f"Qwen3-ASR sidecar 启动失败，详见日志：{log_file}")
+            tail = _log_tail(log_file)
+            raise RuntimeError(
+                f"Qwen3-ASR sidecar 启动失败（退出码 {_PROCESS.returncode}）。\n"
+                f"{tail}\n完整日志：{log_file}"
+            )
         if is_ready():
             _log(f"ASR Qwen3-ASR sidecar ready: {url}")
             return url
@@ -217,7 +272,12 @@ def transcribe(wav_path: str) -> str:
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"Qwen3-ASR HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(_humanize_transcribe_error(exc.code, detail)) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Qwen3-ASR sidecar 连接失败（{exc}）：服务可能已崩溃或未监听。"
+            "详见 ~/.local/share/ibus-voice-ime/qwen-asr-server.log"
+        ) from exc
     result: dict[str, Any] = json.loads(body)
     if result.get("error"):
         raise RuntimeError(str(result["error"]))

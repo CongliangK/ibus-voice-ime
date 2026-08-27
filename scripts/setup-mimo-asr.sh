@@ -13,6 +13,24 @@ MODEL_MAX_MEMORY="${VOICE_IME_MIMO_ASR_MODEL_MAX_MEMORY:-cuda:0=8GiB,cpu=64GiB}"
 MODEL_OFFLOAD_FOLDER="${VOICE_IME_MIMO_ASR_MODEL_OFFLOAD_FOLDER:-$HOME/.local/share/ibus-voice-ime/mimo-offload}"
 PYTORCH_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
+# --proxy http://127.0.0.1:7890 ：GitHub 克隆 / pip 安装走代理（ModelScope 下载保持直连）。
+PROXY_URL=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --proxy)
+      [[ $# -ge 2 ]] || { echo "--proxy 需要参数" >&2; exit 2; }
+      PROXY_URL="$2"
+      shift 2 ;;
+    *) echo "未知参数：$1" >&2; exit 2 ;;
+  esac
+done
+GIT_PROXY_ARGS=()
+PIP_PROXY_ARGS=()
+if [[ -n "$PROXY_URL" ]]; then
+  GIT_PROXY_ARGS=(-c "http.proxy=$PROXY_URL" -c "https.proxy=$PROXY_URL")
+  PIP_PROXY_ARGS=(--proxy "$PROXY_URL")
+fi
+
 mkdir -p "$MODELS_DIR" "$(dirname "$SRC_DIR")" "$MODEL_OFFLOAD_FOLDER"
 
 if [[ ! -x "$VENV/bin/python" ]]; then
@@ -33,7 +51,8 @@ EOF_NOTE
 
 if [[ ! -d "$SRC_DIR/.git" ]]; then
   echo "克隆 XiaomiMiMo/MiMo-V2.5-ASR 源码：$SRC_DIR"
-  git clone --depth 1 https://github.com/XiaomiMiMo/MiMo-V2.5-ASR.git "$SRC_DIR"
+  # 网络不通可加：./scripts/setup-mimo-asr.sh --proxy http://127.0.0.1:7890
+  git clone --depth 1 "${GIT_PROXY_ARGS[@]}" https://github.com/XiaomiMiMo/MiMo-V2.5-ASR.git "$SRC_DIR"
 else
   echo "更新 MiMo-V2.5-ASR 源码：$SRC_DIR"
   git -C "$SRC_DIR" pull --ff-only || true
@@ -101,7 +120,20 @@ PY
 "$PIP" install -U modelscope "huggingface-hub>=0.26.0,<1.0"
 
 if [[ "$INSTALL_FLASH_ATTN" != "0" ]]; then
-  "$PIP" install 'https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp312-cp312-linux_x86_64.whl'
+  # wheel 文件名按 venv 的 Python 版本动态拼接（cp312/cp313/…）。
+  PY_TAG="$("$PY" -c 'import sys; print(f"cp{sys.version_info[0]}{sys.version_info[1]}")')"
+  FLASH_ATTN_URL="https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-${PY_TAG}-${PY_TAG}-linux_x86_64.whl"
+  if ! "$PIP" install "${PIP_PROXY_ARGS[@]}" "$FLASH_ATTN_URL"; then
+    cat >&2 <<'EOF_FLASH_WARN'
+警告：flash-attn 预编译 wheel 安装失败（Python 版本/架构/torch 版本不匹配，或 GitHub 直连不通）。
+MiMo-Audio-Tokenizer 会导入 flash_attn，未安装时验证/运行会失败。
+可选补救：
+  1. 查看是否有匹配版本：https://github.com/Dao-AILab/flash-attention/releases
+  2. 源码编译：.venv-mimo-asr/bin/pip install flash-attn --no-build-isolation
+  3. 走代理重跑：./scripts/setup-mimo-asr.sh --proxy http://127.0.0.1:7890
+EOF_FLASH_WARN
+    exit 1
+  fi
 else
   cat <<'EOF_FLASH'
 跳过 flash-attn 安装。注意：MiMo-Audio-Tokenizer 会导入 flash_attn；如未安装，验证/运行会失败。
@@ -146,13 +178,15 @@ if [[ "$ENABLE_NOW" != "0" ]]; then
   mkdir -p "$(dirname "$ENV_FILE")" "$MODEL_OFFLOAD_FOLDER"
   if [[ -f "$ENV_FILE" ]]; then
     TMP="$(mktemp)"
-    grep -vE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|PYTORCH_CUDA_ALLOC_CONF)' "$ENV_FILE" > "$TMP" || true
+    grep -vE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD_ASR|VOICE_IME_VOLC_BIGMODEL_ASR|PYTORCH_CUDA_ALLOC_CONF)' "$ENV_FILE" > "$TMP" || true
     mv "$TMP" "$ENV_FILE"
   fi
   cat >> "$ENV_FILE" <<EOF_ENV
 VOICE_IME_ASR_BACKEND=mimo-asr
 VOICE_IME_QWEN_ASR=0
 VOICE_IME_MIMO_ASR=1
+VOICE_IME_MIMO_CLOUD_ASR=0
+VOICE_IME_VOLC_BIGMODEL_ASR=0
 VOICE_IME_MIMO_ASR_MODEL_PATH=$MODELS_DIR/MiMo-V2.5-ASR
 VOICE_IME_MIMO_ASR_TOKENIZER_PATH=$MODELS_DIR/MiMo-Audio-Tokenizer
 VOICE_IME_MIMO_ASR_SOURCE=$SRC_DIR
@@ -173,6 +207,8 @@ EOF_ENV
     VOICE_IME_ASR_BACKEND=mimo-asr \
     VOICE_IME_QWEN_ASR=0 \
     VOICE_IME_MIMO_ASR=1 \
+    VOICE_IME_MIMO_CLOUD_ASR=0 \
+    VOICE_IME_VOLC_BIGMODEL_ASR=0 \
     "VOICE_IME_MIMO_ASR_MODEL_PATH=$MODELS_DIR/MiMo-V2.5-ASR" \
     "VOICE_IME_MIMO_ASR_TOKENIZER_PATH=$MODELS_DIR/MiMo-Audio-Tokenizer" \
     "VOICE_IME_MIMO_ASR_SOURCE=$SRC_DIR" \
@@ -199,7 +235,5 @@ MiMo-ASR 配置完成。
 启用/重启：
   ./scripts/switch-mimo-asr.sh
 
-回退 faster-whisper：
-  export VOICE_IME_ASR_BACKEND=faster-whisper
-  export VOICE_IME_MIMO_ASR=0
+切到其他后端：./scripts/switch-qwen-asr.sh [0.6b|1.7b] / ./scripts/switch-mimo-cloud-asr.sh cn
 EOF

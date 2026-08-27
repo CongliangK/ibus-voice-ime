@@ -17,8 +17,9 @@ Denoise tiers (``VOICE_IME_DENOISE_TIER``, 2026-08-26 实测定案，结论来�
 
 * ``none``    — 旧行为原样保留（highpass + 可选 sox noisered + normalize）。
 * ``notch``   — 纯 sox：highpass 80 + 50/100/150Hz 工频陷波 + normalize（零新
-  依赖，默认档；稳态 -39dB@50Hz，语音频段零损耗。注意：验收陷波深度必须用
-  尾部 RMS——时域峰值会被 IIR 滤波器的起始瞬态支配而严重低估衰减）。
+  依赖；出厂默认档是 rnnoise——见 run-engine.sh，本模块在无 wrapper 环境下的
+  fallback 才是 notch。稳态 -39dB@50Hz，语音频段零损耗。注意：验收陷波深度必须
+  用尾部 RMS——时域峰值会被 IIR 滤波器的起始瞬态支配而严重低估衰减）。
 * ``rnnoise`` — ffmpeg：陷波 + RNNoise(bd)（arnndn 仅 ffmpeg 提供，模型在
   vendor/models/rnnoise/，由 scripts/fetch-rnnoise-model.sh 下载），再 sox
   normalize；缺 ffmpeg/模型/失败时自动降级为 notch 档（fail-safe 分级降级）。
@@ -147,7 +148,7 @@ def _build_effect_chain(in_path: str, profile_path: str | None,
         if _env_bool("VOICE_IME_AUDIO_HIGHPASS", True):
             freq = max(20, _env_int("VOICE_IME_AUDIO_HIGHPASS_FREQ", 100))
             effects += ["highpass", str(freq)]
-        if _env_bool("VOICE_IME_AUDIO_DENOISE", True) and profile_path:
+        if _env_bool("VOICE_IME_AUDIO_DENOISE", False) and profile_path:
             amount = min(1.0, max(0.0, _env_float("VOICE_IME_AUDIO_DENOISE_AMOUNT", 0.3)))
             effects += ["noisered", profile_path, f"{amount:.3f}"]
     else:
@@ -177,7 +178,7 @@ def _make_noise_profile(in_path: str, tmpdir: str) -> str | None:
     The recording's opening usually contains ambient noise before the user
     starts speaking, which is a good enough fingerprint for light denoise.
     """
-    if not _env_bool("VOICE_IME_AUDIO_DENOISE", True):
+    if not _env_bool("VOICE_IME_AUDIO_DENOISE", False):
         return None
     profile_ms = max(50, _env_int("VOICE_IME_AUDIO_NOISE_PROFILE_MS", 400))
     profile_path = str(Path(tmpdir) / "noise.prof")

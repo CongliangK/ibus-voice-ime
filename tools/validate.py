@@ -60,6 +60,16 @@ def changed_files() -> list[str]:
     names = set(git_lines(["diff", "--name-only"]))
     names.update(git_lines(["diff", "--cached", "--name-only"]))
     names.update(git_lines(["ls-files", "--others", "--exclude-standard"]))
+    if not names:
+        # Clean tree (changes already committed): fall back to the last commit,
+        # then to a full scan — an empty check set would silently reduce the
+        # gate to unit tests only.
+        try:
+            names.update(git_lines(["diff", "--name-only", "HEAD~1..HEAD"]))
+        except RuntimeError:
+            pass
+        if not names:
+            names.update(repo_files())
     return sorted(path for path in names if project_path(path))
 
 

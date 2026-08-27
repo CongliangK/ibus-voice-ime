@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 import inspect
 import threading
@@ -142,6 +143,7 @@ class ModelManager:
         self._interval = max(0.5, float(check_interval))
         self._lock = threading.RLock()
         self._last_activity = time.monotonic()
+        self._load_error: str = ""  # last acquire_for_inference failure, exposed via /health
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -171,6 +173,11 @@ class ModelManager:
     def touch(self) -> None:
         self._last_activity = time.monotonic()
 
+    @property
+    def load_error(self) -> str:
+        """Last model-load failure (empty string when the last acquire succeeded)."""
+        return self._load_error
+
     # ---- request path ----------------------------------------------------
     def acquire_for_inference(self) -> None:
         """Make the best model live on the GPU and ready to infer.
@@ -182,7 +189,11 @@ class ModelManager:
         try:
             self._ensure_active_locked()
             self._last_activity = time.monotonic()
+            self._load_error = ""
         except Exception as exc:  # never let model management crash a request
+            # 记录失败原因供 /health 与 /transcribe 500 暴露：模型未下载 / 无 CUDA /
+            # 依赖缺失等首装常见问题不能只留在日志里。
+            self._load_error = f"{type(exc).__name__}: {exc}"[:300]
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
                   f"Qwen3-ASR acquire_for_inference failed, best-effort: {exc}", flush=True)
 
@@ -551,7 +562,9 @@ class Handler(BaseHTTPRequestHandler):
             if _MANAGER is not None:
                 _MANAGER.touch()
             active_id = _MANAGER.active_id if _MANAGER is not None else _MODEL_ID
-            _send_json(self, 200, {"status": "ok", "model": active_id})
+            loaded = (_MANAGER.active_model() if _MANAGER is not None else _MODEL) is not None
+            error = _MANAGER.load_error if _MANAGER is not None else ""
+            _send_json(self, 200, {"status": "ok", "model": active_id, "loaded": loaded, "error": error})
             return
         _send_json(self, 404, {"error": "not found"})
 
@@ -603,6 +616,29 @@ def main() -> None:
 
     global _MODEL_ID, _MANAGER
     _MODEL_ID = args.model
+
+    # 首装常见问题前置检查：本地模型路径不存在 / venv 缺 qwen_asr 依赖。
+    # 早失败 + 可读错误，让 runtime 的 poll 分支给出正确指引，而不是服务
+    # 假装健康、识别时才报英文 500。
+    model_path = Path(args.model).expanduser()
+    if model_path.is_absolute() and not model_path.is_dir():
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 错误：模型目录不存在：{args.model}\n"
+            "请先运行 ./scripts/setup-qwen-asr.sh 下载模型，"
+            "或用 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端后端。",
+            flush=True,
+        )
+        sys.exit(2)
+    try:
+        import qwen_asr  # noqa: F401
+    except Exception as exc:
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 错误：当前 Python 无法导入 qwen_asr（{exc}）。\n"
+            "请用 setup-qwen-asr.sh 创建的 .venv-qwen-asr 运行本服务"
+            "（VOICE_IME_QWEN_ASR_PYTHON 指向该 venv 的 python）。",
+            flush=True,
+        )
+        sys.exit(2)
 
     # Resolve the primary model and, if its sibling size is also on disk, a
     # secondary so the manager can auto-downgrade on VRAM pressure.  Loading is

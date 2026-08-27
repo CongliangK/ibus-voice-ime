@@ -4,8 +4,8 @@
 The engine calls `record_and_transcribe()` in a worker thread.
 ASR policy: default to the local Qwen3-ASR sidecar (1.7B).  Backend selection
 follows VOICE_IME_ASR_BACKEND / VOICE_IME_QWEN_ASR and falls through to the
-local MiMo sidecar, MiMo cloud ASR, a custom command, faster-whisper, or vosk
-in that order.
+local MiMo sidecar, MiMo cloud ASR, Volcano Engine bigmodel ASR, a custom
+command, faster-whisper, or vosk in that order.
 
 After ASR, the transcript is normalized only by deterministic local rules.
 LLM post-processing is intentionally disabled and must not run.

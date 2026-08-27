@@ -32,9 +32,9 @@ echo "==> 复制 Rime 数据"
 copy_dir_contents /usr/share/rime-data "$DATA_DIR"
 
 # librime-lua 插件（雾凇拼音等现代方案的 lua_translator/lua_processor 依赖）
-# 默认在 /usr/lib64/rime-plugins 或 /usr/lib/rime-plugins
+# Fedora 在 /usr/lib64/rime-plugins；Debian/Ubuntu 的 multiarch 在 /usr/lib/x86_64-linux-gnu/rime-plugins
 PLUGIN_SRC=""
-for candidate in /usr/lib64/rime-plugins /usr/lib/rime-plugins; do
+for candidate in /usr/lib64/rime-plugins /usr/lib/rime-plugins /usr/lib/x86_64-linux-gnu/rime-plugins; do
   if [[ -d "$candidate" ]]; then
     PLUGIN_SRC="$candidate"
     break
@@ -71,7 +71,7 @@ fi
 
 echo "==> 复制 librime 及运行依赖"
 main_lib=""
-for candidate in /usr/lib64/librime.so.1 /usr/lib/librime.so.1 /lib64/librime.so.1 /lib/librime.so.1; do
+for candidate in /usr/lib64/librime.so.1 /usr/lib/librime.so.1 /lib64/librime.so.1 /lib/librime.so.1 /usr/lib/x86_64-linux-gnu/librime.so.1; do
   if [[ -f "$candidate" ]]; then
     main_lib="$candidate"
     break
@@ -93,7 +93,8 @@ done < <(ldd "$main_lib" | awk '/=> \/.*\.so/ {print $3} /^\s*\/.*\.so/ {print $
 copy_lib "$main_lib"
 
 # librime-lua 插件的运行时依赖 liblua（雾凇拼音的 lua_translator/lua_processor 需要）
-for lua_lib in /usr/lib64/liblua-*.so /usr/lib/liblua-*.so /lib64/liblua-*.so /lib/liblua-*.so; do
+# Debian 命名为 liblua5.4.so.0（无连字符），用 liblua*.so* 覆盖两种命名。
+for lua_lib in /usr/lib64/liblua-*.so /usr/lib/liblua-*.so /lib64/liblua-*.so /lib/liblua-*.so /usr/lib/x86_64-linux-gnu/liblua*.so*; do
   [[ -f "$lua_lib" ]] && copy_lib "$lua_lib"
 done
 

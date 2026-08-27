@@ -104,9 +104,12 @@ PY
     ok "内置 librime 运行时可加载"
   else
     fail "内置 librime 无法加载：${RIME_LOAD#FAIL: }。内置库为 x86_64 Fedora 构建，"
-    echo "         在其他发行版/架构上可改用系统 librime（安装 librime 后设置）："
-    echo "         export VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1"
-    echo "         export VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data"
+    echo "         引擎会自动尝试回退系统 librime（安装 librime 后重启输入法即可）："
+    echo "           Fedora: sudo dnf install librime   Debian/Ubuntu: sudo apt install librime"
+    echo "         也可显式指定（写入 ~/.config/environment.d/ibus-voice-ime.conf 持久生效）："
+    echo "           Fedora:   VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1"
+    echo "           Debian系: VOICE_IME_RIME_LIBRARY=/usr/lib/x86_64-linux-gnu/librime.so.1"
+    echo "           VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data"
   fi
 else
   warn "vendor/rime/lib/librime.so.1 不存在（可能未完整 clone）；可用 scripts/vendor-rime-runtime.sh 重新生成"
