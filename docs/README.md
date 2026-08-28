@@ -11,6 +11,7 @@
 | [self-developed.md](self-developed.md) | 自主研发部分：自研代码清单与复用的第三方组件边界 |
 | [validation.md](validation.md) | 测试平台与验证门禁：实测环境、CI、本地门禁与单元测试覆盖 |
 | [limitations.md](limitations.md) | 目前的不足：适配性、硬件门槛、功能与工程层面的客观局限 |
+| [paste-postmortem.md](paste-postmortem.md) | Ctrl+Alt+P 粘贴失效复盘（2026-08-28）：Wayland 剪贴板读取引发焦点抖动的根因、三检查点排查方法与修复 |
 
 ## 一句话了解本项目
 

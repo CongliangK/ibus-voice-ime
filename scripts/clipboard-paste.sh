@@ -82,6 +82,10 @@ def env_float(name: str, default: float) -> float:
 
 
 def notify(message: str) -> None:
+    # 诊断开关：GNOME 通知横幅疑似会在弹出瞬间引发输入上下文焦点抖动
+    # （FocusOut/In 级联杀掉引擎实例），VOICE_IME_CLIPBOARD_NOTIFY=0 关闭验证。
+    if not env_bool("VOICE_IME_CLIPBOARD_NOTIFY", True):
+        return
     try:
         subprocess.Popen(
             ["notify-send", "-t", "1200", "自定义语音输入法", message],
@@ -107,21 +111,7 @@ def env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
 
 
-def recover_engine_async() -> None:
-    if not env_bool("VOICE_IME_CLIPBOARD_RECOVER_ENGINE", True):
-        return
-    delay = max(0.0, env_float("VOICE_IME_CLIPBOARD_RECOVER_DELAY_SECONDS", 2.0))
-    command = (
-        f"sleep {delay}; "
-        "ibus engine xkb:us::eng >/dev/null 2>&1 || true; "
-        "sleep 0.12; "
-        f"ibus engine {ENGINE_NAME} >/dev/null 2>&1 || true"
-    )
-    try:
-        subprocess.Popen(["bash", "-lc", command], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        log(f"scheduled engine recovery delay={delay}")
-    except Exception as exc:
-        log(f"schedule engine recovery failed: {exc}")
+runtime_dir = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "ibus-voice-ime"
 
 
 try:
@@ -143,7 +133,9 @@ runtime_dir.mkdir(parents=True, exist_ok=True)
 text_path = runtime_dir / "clipboard-paste.txt"
 text_path.write_text(content, encoding="utf-8")
 os.chmod(text_path, 0o600)
-log(f"clipboard prepared len={len(content)}, source={source}, details={details}, path={text_path}")
+# CP1 检查点：剪贴板→暂存文件。指纹与引擎侧 CP2/CP3a 对照可确认内容在
+# 助手→引擎的传递中完好无损（诊断入口：scripts/diagnose-paste.sh）。
+log(f"CP1 通过：剪贴板已写暂存文件 {clipboard_paste.content_fingerprint(content)} source={source}, details={details}, path={text_path}")
 
 notify("📋 正在粘贴……")
 # Return from the GNOME shortcut helper as quickly as possible.  The engine will
@@ -161,6 +153,4 @@ if not ok:
     log(f"failed: {message}")
     print(message, file=sys.stderr)
     sys.exit(1 if message == "NO_FOCUS" else 2)
-
-recover_engine_async()
 PY

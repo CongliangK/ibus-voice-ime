@@ -194,52 +194,26 @@ export VOICE_IME_ENGLISH_USER_DICT=~/.local/share/ibus-voice-ime/english.json
 
 热键：`Ctrl+Alt+P`。
 
-默认安装会把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./scripts/clipboard-paste.sh`。脚本只负责读取桌面剪贴板、显示“📋 正在粘贴……”通知，并把准备好的文本写入用户运行目录，然后立刻通过输入法 IPC 通知 `engine.py` 并退出；`engine.py`（位于 `src/ibus_voice_ime/`）再等待约 1 秒，让焦点像 `Ctrl+Alt+V` 语音链路一样回到网页输入框，随后走语音识别结果同款 `_commit_voice_result()` / IBus `commit_text()` 提交路径。输入法内部的 direct `Ctrl+Alt+P` 处理默认关闭，避免 GNOME 全局快捷键和 IBus 同时处理同一次按键导致输入法状态异常。脚本提交后默认会延迟短暂切到英文输入源再切回 `voice-custom`，自动恢复少数网页导致的 IBus 状态损坏。
+粘贴只有一条链路：默认安装把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./scripts/clipboard-paste.sh`。脚本读取桌面剪贴板（**xclip 经 XWayland 优先**，wl-paste/GTK/xsel 逐级回退）、显示"📋 正在粘贴……"通知、把文本写入暂存文件后立刻通过输入法 IPC（`paste-file`）通知 `engine.py` 并退出；`engine.py` 等待约 300ms（与语音提交同节奏）后走语音识别结果同款 `commit_text()` 提交路径，光标附近显示「📋 正在粘贴……」辅助提示条（与「正在录音」同一 IBus 通道）。依赖：`sudo dnf install xclip`（X11 回退工具无需手动安装）。
 
-旧的外部虚拟键盘粘贴链路仍保留为 `./scripts/keyboard-paste.sh`：它不走浏览器 `paste` 事件，也不依赖 IBus `commit_text()`；它会读取剪贴板，然后通过 Linux `/dev/uinput` 创建一个虚拟键盘，逐字模拟真实键盘输入。可在遇到不接受 IBus commit 的网页/应用时手动作为兜底使用。
+> **为什么 xclip 优先**：Fedora 44 GNOME (Wayland) 下，粘贴瞬间新建的原生 Wayland 剪贴板客户端（wl-paste）会触发 compositor 级输入上下文焦点抖动（FocusOut 风暴 + 引擎实例重建），随后的 `commit_text` 投递全部静默丢失——这是该功能自某次系统升级后失效的根因；语音链路不碰剪贴板，故从未受影响。XWayland 的剪贴板转发由常驻 X 服务承担，读取不新建 Wayland 客户端（实测零抖动）。
 
 使用步骤：
 
 1. 正常复制一段文本。
 2. 切到目标网页/应用输入框，并确保光标在输入框内。
-3. 按 `Ctrl+Alt+P`，等待约 1 秒后由输入法一次性提交剪贴板文本。
+3. 按 `Ctrl+Alt+P`，约半秒后由输入法一次性提交剪贴板文本。
 
-检查虚拟键盘兜底链路权限：
-
-```bash
-cd ~/ibus-voice-ime
-./scripts/keyboard-paste.sh --check
-```
-
-如果提示无法写入 `/dev/uinput`，可临时授权：
-
-```bash
-sudo modprobe uinput
-sudo setfacl -m u:$USER:rw /dev/uinput
-```
+粘贴链路故障排查：`./scripts/diagnose-paste.sh` 按三个检查点（剪贴板→暂存文件 / 文件→引擎 / 引擎→应用）逐段定位，并在引擎→应用一段用单行/多行、200ms/1000ms 延迟做差分测试，自动给出结论。
 
 常用配置：
 
 ```bash
-export VOICE_IME_INTERNAL_CLIPBOARD_HOTKEY=0          # 默认关闭 IBus 内部 Ctrl+Alt+P，避免和 GNOME 全局快捷键重复触发
-export VOICE_IME_CLIPBOARD_RECOVER_ENGINE=1           # 粘贴后自动切换输入源再切回，恢复少数网页导致的 IBus 状态异常
-export VOICE_IME_CLIPBOARD_RECOVER_DELAY_SECONDS=2.0  # 自动恢复输入源的延迟，应晚于粘贴提交
-export VOICE_IME_CLIPBOARD_ACTIVATE_DELAY_SECONDS=0.25 # IPC 不可达、激活 voice-custom 后等待可用的秒数
-export VOICE_IME_CLIPBOARD_PREPARE_DELAY_SECONDS=1.0  # 外部脚本显示“正在粘贴”并等待焦点稳定的秒数
-export VOICE_IME_CLIPBOARD_PREPARE_DELAY_MS=1000      # 同上，毫秒配置；设置后优先于 seconds
-export VOICE_IME_CLIPBOARD_PREPARE_HINT_MS=1200       # “正在粘贴”提示显示时长
-export VOICE_IME_CLIPBOARD_COMMIT_DELAY_MS=300        # 读取剪贴板后额外提交延迟
+export VOICE_IME_CLIPBOARD_PREPARE_DELAY_SECONDS=0.3  # 提交前等待（默认与语音同节奏）
+export VOICE_IME_CLIPBOARD_PREPARE_DELAY_MS=300       # 同上，毫秒配置；设置后优先于 seconds
+export VOICE_IME_CLIPBOARD_NOTIFY=1                   # 触发时的桌面通知开关（诊断用）
 export VOICE_IME_CLIPBOARD_MAX_CHARS=20000            # 最大提交字符数
-
-# 仅用于手动运行 ./scripts/keyboard-paste.sh 兜底链路：
-export VOICE_IME_KEYBOARD_PASTE_DELAY_MS=1000
-export VOICE_IME_KEYBOARD_PASTE_MODE=smart
-export VOICE_IME_KEYBOARD_PASTE_TYPING_ENGINE=xkb:us::eng
-export VOICE_IME_KEYBOARD_PASTE_KEY_DELAY_MS=4
-export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 ```
-
-外部虚拟键盘逐字输入脚本仍保留为 `./scripts/keyboard-paste.sh`，仅作为不接受 IBus commit 的手动兜底。
 
 ## 语音输入
 

@@ -8,21 +8,23 @@ handlers because the target app receives normal IME committed text rather than a
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
 import subprocess
-from typing import Any
 
 _DEFAULT_HOTKEYS = ("p",)
 
 
 def hotkey_letters() -> tuple[str, ...]:
-    """Return configured Ctrl+Alt+letter clipboard-paste hotkeys.
+    """Return configured Ctrl+Alt+letter clipboard-paste hotkey letters.
 
-    Accepts values such as ``Ctrl+Alt+P`` or simply ``p`` from
-    ``VOICE_IME_CLIPBOARD_HOTKEYS``.  ``VOICE_IME_CLIPBOARD_HOTKEY`` is kept as
-    a single-hotkey convenience alias.
+    粘贴触发现在只有 GNOME 全局快捷键一条路（scripts/clipboard-paste.sh），
+    引擎不再拦截按键；这个解析仅存的消费者是 voice_hotkey 的 raw 热键去重
+    （避免 Ctrl+Alt+B 配置撞上 Ctrl+Alt+P）。接受 ``Ctrl+Alt+P`` 或 ``p`` 形式
+    的 ``VOICE_IME_CLIPBOARD_HOTKEYS``（``VOICE_IME_CLIPBOARD_HOTKEY`` 为单键
+    兼容别名）。
     """
     raw = os.environ.get("VOICE_IME_CLIPBOARD_HOTKEYS") or os.environ.get("VOICE_IME_CLIPBOARD_HOTKEY") or ""
     letters: list[str] = []
@@ -36,20 +38,18 @@ def hotkey_letters() -> tuple[str, ...]:
     return tuple(letters or _DEFAULT_HOTKEYS)
 
 
-def hotkey_label() -> str:
-    return " / ".join(f"Ctrl+Alt+{letter.upper()}" for letter in hotkey_letters())
+def content_fingerprint(content: str) -> str:
+    """粘贴链路检查点共用的内容指纹：sha1 前 8 位 + 行数 + 字符数。
 
-
-def matches_ctrl_alt_letter(namespace: Any, keyval: int, state: int, control_mask: int, alt_mask: int) -> bool:
-    """Return whether a key event matches a configured paste hotkey."""
-    if not ((int(state) & int(control_mask)) and (int(state) & int(alt_mask))):
-        return False
-    for letter in hotkey_letters():
-        lower = getattr(namespace, f"KEY_{letter}", None)
-        upper = getattr(namespace, f"KEY_{letter.upper()}", None)
-        if keyval == lower or keyval == upper:
-            return True
-    return False
+    CP1（clipboard-paste.sh 写暂存文件）、CP2（引擎 paste-check / paste-file
+    读回）、CP3a（commit_text 调用）各自独立计算同一份指纹；跨进程对照指纹
+    即可确认内容在每一跳完好、行数一致（多行是否被破坏在这一眼可见）。
+    """
+    if not content:
+        return "sha=<empty> lines=0 len=0"
+    digest = hashlib.sha1(content.encode("utf-8")).hexdigest()[:8]
+    lines = content.count("\n") + 1
+    return f"sha={digest} lines={lines} len={len(content)}"
 
 
 def read_clipboard_text() -> str:
@@ -61,15 +61,18 @@ def read_clipboard_text() -> str:
 def read_clipboard_text_with_source() -> tuple[str, str, str]:
     """Read text and return diagnostic source details.
 
-    Prefer ``wl-paste`` under Wayland.  GTK clipboard reads from inside an IBus
-    engine can report an empty string or block on some focused clients, while
-    ``wl-paste`` reads the compositor clipboard directly.  Keep GTK and X11
-    tools as fallbacks.
+    Prefer ``xclip`` through XWayland when ``DISPLAY`` is available: on GNOME
+    Wayland（Fedora 44+）, a fresh native Wayland clipboard client
+    (``wl-paste``) triggers compositor input-context focus flicker that
+    silently drops the following IME commit——Ctrl+Alt+P 粘贴自系统升级后
+    静默失效的根因（2026-08-28 排查定案）。XWayland 的选择转发由常驻 X
+    服务承担，读取不新建 Wayland 客户端（实测零 FocusOut）。X11 不可用时
+    回退 wl-paste / GTK / xsel。
     """
     readers = [
+        ("xclip", _read_xclip),
         ("wl-paste", _read_wl_paste),
         ("gtk", _read_gtk_clipboard),
-        ("xclip", _read_xclip),
         ("xsel", _read_xsel),
     ]
     details: list[str] = []
@@ -130,6 +133,8 @@ def _read_wl_paste() -> str | None:
 
 
 def _read_xclip() -> str | None:
+    if not os.environ.get("DISPLAY"):
+        return None
     return _read_command(["xclip", "-selection", "clipboard", "-o"])
 
 

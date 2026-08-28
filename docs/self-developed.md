@@ -45,10 +45,10 @@ MiMo Token Plan（OpenAI-compatible）与火山豆包 bigmodel（异步提交 + 
 
 在 Rime 自身用户词库之外的确定性候选记忆：中文「输入码 → 已提交词」按频率/新近度排序为 `常用` 候选；英文 token 词库（Enter 提交即记忆，前缀召回）；三列式语音自定义词典（标准词/别名/常见误识别）的统一读取与分发。
 
-### 10. 剪贴板粘贴链路（clipboard_paste.py、keyboard_type_clipboard.py、scripts/voice-toggle.sh、scripts/clipboard-paste.sh、scripts/keyboard-paste.sh）
+### 10. 剪贴板粘贴链路（clipboard_paste.py、scripts/clipboard-paste.sh、scripts/diagnose-paste.sh）
 
-- **主链路**：GNOME 全局热键 → 外部脚本读剪贴板 + 「正在粘贴」通知 → Unix socket IPC 通知引擎 → 引擎等待焦点回稳后走与语音结果**同款** `commit_text()` 提交路径 → 自动切输入源恢复被网页弄坏的 IBus 状态。
-- **兜底链路**：`/dev/uinput` 虚拟键盘逐字键入，用于不接受 IBus commit 的场景（`--check` 自检权限）。
+- **唯一链路**：GNOME 全局热键 → 外部脚本读剪贴板（xclip 经 XWayland 优先，见 [paste-postmortem.md](paste-postmortem.md)）+ 「正在粘贴」通知 → Unix socket IPC（`paste-file`）通知引擎 → 引擎约 300ms 后走与语音结果**同款** `commit_text()` 提交路径。
+- **三检查点诊断**：`scripts/diagnose-paste.sh` 按「剪贴板→暂存文件 / 文件→引擎 / 引擎→应用」逐段定位，CP1/CP2/CP3a 日志带统一内容指纹（`clipboard_paste.content_fingerprint`），CP3 另有单行/多行、200ms/1000ms 差分用例与 dbus-monitor 总线观测。
 - 引擎侧 IPC 服务器（per-connection 异常隔离）也在此实现。
 
 ### 11. 工程化设施

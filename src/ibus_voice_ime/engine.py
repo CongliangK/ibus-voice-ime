@@ -236,27 +236,32 @@ def _serve_ipc_connection(conn) -> None:
             # 与上面同款 idle 分发；额外传 raw=True 表示「原文语音输入」。
             GLib.idle_add(target._handle_voice_hotkey, True)
             conn.sendall(b"OK\n")
-    elif raw in {"paste-prepare", "clipboard-prepare", "ime-paste-prepare"}:
-        if not _engine_can_receive_ipc(target):
-            log_error(f"IPC 粘贴准备请求失败：没有可用焦点引擎 command={raw!r}")
-            conn.sendall(b"NO_FOCUS\n")
-        else:
-            GLib.idle_add(target._show_clipboard_paste_status)
-            conn.sendall(b"OK\n")
     elif raw.startswith("paste-file "):
         if not _engine_can_receive_ipc(target):
             log_error(f"IPC 粘贴文件请求失败：没有可用焦点引擎 command={raw[:80]!r}")
             conn.sendall(b"NO_FOCUS\n")
         else:
-            GLib.idle_add(target._handle_clipboard_file_paste, raw.split(" ", 1)[1])
+            rest = raw[len("paste-file ") :].strip()
+            # 可选第三段 delay_ms：诊断脚本用它做时序二分（对齐语音路径的
+            # 200ms、复现默认的 1000ms 等）。不带该参数时行为与旧协议一致。
+            path_arg, _, extra = rest.partition(" ")
+            delay_arg = int(extra) if extra.isdigit() else None
+            GLib.idle_add(target._handle_clipboard_file_paste, path_arg, delay_arg)
             conn.sendall(b"OK\n")
-    elif raw in {"paste", "clipboard", "clipboard-paste", "ime-paste"}:
-        if not _engine_can_receive_ipc(target):
-            log_error(f"IPC 粘贴请求失败：没有可用焦点引擎 command={raw!r}")
-            conn.sendall(b"NO_FOCUS\n")
+    elif raw.startswith("paste-check "):
+        # CP2 检查点专用：只读暂存文件并回传内容指纹，不提交。用于把
+        # "文件→引擎"（CP2）与"引擎→应用"（CP3）两段故障隔离开。
+        # 纯文件 IO + 日志，不触碰 IBus/GLib，可在 IPC 线程直接执行。
+        path_arg = raw[len("paste-check ") :].strip()
+        try:
+            content = Path(path_arg).expanduser().read_text(encoding="utf-8")
+        except Exception as exc:
+            log_error(f"CP2 失败：paste-check 读文件出错 path={path_arg!r}：{exc}")
+            conn.sendall(f"ERR read: {exc}\n".encode("utf-8", "ignore"))
         else:
-            GLib.idle_add(target._handle_clipboard_paste_request, "ipc")
-            conn.sendall(b"OK\n")
+            fingerprint = clipboard_paste.content_fingerprint(content)
+            log_error(f"CP2 通过：paste-check 已读到文件 {fingerprint} path={path_arg}")
+            conn.sendall(f"OK {fingerprint}\n".encode("utf-8", "ignore"))
     else:
         conn.sendall(b"ERROR unknown command\n")
 
@@ -362,9 +367,6 @@ class VoiceCustomEngine(IBus.Engine):
         self._rime_is_last_page = True
         self._ascii_mode = os.environ.get("VOICE_IME_START_ASCII", "0").strip().lower() in {"1", "true", "yes", "on"}
         self._pending_shift_toggle: int | None = None
-        self._clipboard_hotkey_release_keys: set[int] = set()
-        self._pending_clipboard_paste: tuple[str, bool, int] | None = None
-        self._last_clipboard_paste_request_at = 0.0
         self._rime: rime_backend.RimeSession | None = None
         _start_voice_ipc_server()
         if os.environ.get("VOICE_IME_KEYBOARD_BACKEND", "rime").lower() != "demo":
@@ -381,14 +383,6 @@ class VoiceCustomEngine(IBus.Engine):
         global _FOCUSED_ENGINE
         _FOCUSED_ENGINE = self
         if state & IBus.ModifierType.RELEASE_MASK:
-            if keyval in self._clipboard_hotkey_release_keys:
-                self._clipboard_hotkey_release_keys.discard(keyval)
-                if keyval in (IBus.KEY_p, IBus.KEY_P) and self._pending_clipboard_paste is not None:
-                    content, truncated, max_chars = self._pending_clipboard_paste
-                    self._pending_clipboard_paste = None
-                    log_error(f"输入法粘贴：按键释放后提交 keyval={keyval}")
-                    self._commit_clipboard_text(content, truncated, max_chars)
-                return True
             return self._handle_shift_toggle_release(keyval)
 
         if self._handle_shift_toggle_press(keyval, state):
@@ -418,42 +412,6 @@ class VoiceCustomEngine(IBus.Engine):
             letters=voice_hotkey.raw_hotkey_letters(),
         ):
             self._handle_voice_hotkey(raw=True)
-            return True
-
-        # IME-level paste fallback.  Disabled by default because the default
-        # GNOME Ctrl+Alt+P shortcut can still leak the same key event into IBus;
-        # handling both paths causes duplicate commits and, in some clients, IBus
-        # connection invalidation that leaves the engine in a broken ASCII-like
-        # state.  The default paste path is the external clipboard-paste.sh helper
-        # plus paste-file IPC, which avoids touching IBus during the key event.
-        if _env_bool("VOICE_IME_INTERNAL_CLIPBOARD_HOTKEY", False) and clipboard_paste.matches_ctrl_alt_letter(
-            IBus,
-            keyval,
-            state,
-            int(IBus.ModifierType.CONTROL_MASK),
-            int(IBus.ModifierType.MOD1_MASK),
-        ):
-            self._clipboard_hotkey_release_keys.update(
-                {
-                    keyval,
-                    IBus.KEY_p,
-                    IBus.KEY_P,
-                    IBus.KEY_Control_L,
-                    IBus.KEY_Control_R,
-                    IBus.KEY_Alt_L,
-                    IBus.KEY_Alt_R,
-                    IBus.KEY_Meta_L,
-                    IBus.KEY_Meta_R,
-                }
-            )
-            log_error(f"输入法粘贴热键触发：keyval={keyval}, state={int(state)}")
-            self._show_clipboard_paste_status()
-            # Direct IBus key handling is the only moment where this engine is
-            # definitely attached to the focused input context.  Commit
-            # synchronously here, like normal candidate commits, instead of
-            # scheduling a delayed timeout that can run after the connection is
-            # gone.
-            self._handle_clipboard_paste(False)
             return True
 
         if self._ascii_mode:
@@ -1206,23 +1164,20 @@ class VoiceCustomEngine(IBus.Engine):
 
         GLib.timeout_add(millis, clear_if_current)
 
-    def _show_clipboard_paste_status(self) -> bool:
-        """Show a visible status while the Ctrl+Alt+P paste path prepares."""
-        millis = _env_int("VOICE_IME_CLIPBOARD_PREPARE_HINT_MS", 1200, minimum=1)
-        self._show_aux("📋 正在粘贴……", millis)
-        log_error("输入法粘贴：显示准备提示")
-        return False
-
     def _clipboard_prepare_delay_ms(self) -> int:
-        default_ms = int(_env_float("VOICE_IME_CLIPBOARD_PREPARE_DELAY_SECONDS", 1.0, minimum=0.0) * 1000)
+        # 300ms 与语音提交节奏一致；镜像方案下粘贴时刻已无焦点抖动，
+        # 不再需要为"等焦点稳定"保留 1 秒（2026-08-28 排查结论）。
+        default_ms = int(_env_float("VOICE_IME_CLIPBOARD_PREPARE_DELAY_SECONDS", 0.3, minimum=0.0) * 1000)
         return _env_int("VOICE_IME_CLIPBOARD_PREPARE_DELAY_MS", default_ms, minimum=0)
 
-    def _handle_clipboard_file_paste(self, path_text: str) -> bool:
+    def _handle_clipboard_file_paste(self, path_text: str, delay_ms: int | None = None) -> bool:
         """Commit clipboard text prepared by the external Ctrl+Alt+P helper.
 
         This mirrors the voice path as closely as possible: the helper owns
         clipboard access and the user-visible notification, while the engine only
         receives already-prepared text and commits it through _commit_voice_result.
+        ``delay_ms`` is a diagnostic override (scripts/diagnose-paste.sh) for
+        bisecting the timing window; ``None`` keeps the configured default.
         """
         try:
             path = Path(path_text).expanduser()
@@ -1234,19 +1189,26 @@ class VoiceCustomEngine(IBus.Engine):
             log_error(f"输入法粘贴：外部剪贴板文件为空 path={path_text!r}")
             return False
         content = content.replace("\r\n", "\n").replace("\r", "\n")
+        # CP2 检查点：文本已从暂存文件回到引擎。指纹与 CP1（clipboard-paste.sh）
+        # 对照可确认这一跳内容完好、行数一致（多行是否被破坏在这一眼可见）。
+        log_error(f"CP2 通过：外部文件已读回引擎 {clipboard_paste.content_fingerprint(content)} path={path_text!r}")
         max_chars = _env_int("VOICE_IME_CLIPBOARD_MAX_CHARS", 20000, minimum=1)
         truncated = False
         if len(content) > max_chars:
             content = content[:max_chars]
             truncated = True
-        delay = self._clipboard_prepare_delay_ms()
+        delay = self._clipboard_prepare_delay_ms() if delay_ms is None else max(0, int(delay_ms))
+        # 与语音链路同通道的可见反馈：光标附近显示「正在粘贴」，确认热键已
+        # 触发（桌面通知依赖通知守护进程且各环境表现不一；aux text 走的是
+        # 与「正在录音」完全相同的 IBus 通道）。时长覆盖提交等待窗口。
+        hint_ms = _env_int("VOICE_IME_CLIPBOARD_PREPARE_HINT_MS", delay + 800, minimum=600)
+        self._show_aux("📋 正在粘贴……", hint_ms)
         # Keep the engine's own mode flags sane even if the target page rejects
         # the commit.  We intentionally do not call _clear() here because it
         # emits extra IBus UI signals; the paste-file path should be as close as
         # possible to the stable voice-result commit path.
         self._ascii_mode = False
         self._pending_shift_toggle = None
-        log_error(f"输入法粘贴：外部文件已读取 len={len(content)}, truncated={truncated}, focus_delay_ms={delay}")
         if delay > 0:
             GLib.timeout_add(delay, self._commit_clipboard_file_text, content, truncated)
         else:
@@ -1254,89 +1216,18 @@ class VoiceCustomEngine(IBus.Engine):
         return False
 
     def _commit_clipboard_file_text(self, content: str, truncated: bool) -> bool:
+        # 语音完成路径同款顺序：先清辅助提示再提交，避免合成提交周围的多余
+        # IBus 信号干扰敏感客户端；代际 +1 同时取消未到期的自动清除。
+        self._aux_generation += 1
+        self._composition_aux_visible = False
+        self.update_auxiliary_text(text(""), False)
         self._commit_voice_result(content)
-        log_error(f"输入法粘贴：已通过语音提交路径提交 len={len(content)}, truncated={truncated}")
-        return False
-
-    def _handle_clipboard_paste_request(self, source: str = "unknown") -> bool:
-        """Handle Ctrl+Alt+P and commit after shortcut/focus settles."""
-        now = time.monotonic()
-        debounce_ms = _env_int("VOICE_IME_CLIPBOARD_REQUEST_DEBOUNCE_MS", 700, minimum=0)
-        if debounce_ms and (now - self._last_clipboard_paste_request_at) * 1000 < debounce_ms:
-            log_error(f"输入法粘贴：忽略重复请求 source={source}")
-            return False
-        self._last_clipboard_paste_request_at = now
-        self._show_clipboard_paste_status()
-        delay = self._clipboard_prepare_delay_ms()
-        log_error(f"输入法粘贴：收到请求 source={source}, 准备延迟 delay_ms={delay}")
-        if delay > 0:
-            GLib.timeout_add(delay, self._handle_clipboard_paste, True)
-        else:
-            self._handle_clipboard_paste(True)
-        return False
-
-    def _handle_clipboard_paste(self, from_ipc: bool = False) -> bool:
-        """Commit current clipboard text through IBus instead of app paste.
-
-        Direct key events must commit synchronously while IBus is processing the
-        focused input context.  IPC/global-shortcut calls run outside that key
-        event, so they keep a small delay to let focus return to the original
-        application.
-        """
-        try:
-            content, clipboard_source, clipboard_details = clipboard_paste.read_clipboard_text_with_source()
-        except Exception:
-            log_error("读取剪贴板失败\n" + traceback.format_exc())
-            self._show_aux("读取剪贴板失败", 1800)
-            return False
-
-        if not content:
-            log_error(f"输入法粘贴：剪贴板没有文本 from_ipc={from_ipc}, details={clipboard_details}")
-            self._show_aux("剪贴板没有文本", 1500)
-            return False
-
-        content = content.replace("\r\n", "\n").replace("\r", "\n")
-        max_chars = _env_int("VOICE_IME_CLIPBOARD_MAX_CHARS", 20000, minimum=1)
-        truncated = False
-        if len(content) > max_chars:
-            content = content[:max_chars]
-            truncated = True
-
-        delay = 0
-        if from_ipc:
-            delay = _env_int(
-                "VOICE_IME_CLIPBOARD_COMMIT_DELAY_MS",
-                _env_int("VOICE_IME_COMMIT_DELAY_MS", 200, minimum=0),
-                minimum=0,
-            )
+        # CP3a 检查点：commit_text 已在 GLib 主线程调用完毕（引擎视角的终点）。
+        # 文字是否真正到达焦点应用不在引擎可观测范围内——投递观测（CP3b）
+        # 由 scripts/diagnose-paste.sh 用 dbus-monitor 旁路完成。
         log_error(
-            f"输入法粘贴：已读取 len={len(content)}, source={clipboard_source}, "
-            f"truncated={truncated}, from_ipc={from_ipc}, delay_ms={delay}, "
-            f"details={clipboard_details}"
+            f"CP3a 通过：commit_text 已调用 {clipboard_paste.content_fingerprint(content)} truncated={truncated}"
         )
-        if not from_ipc and _env_bool("VOICE_IME_CLIPBOARD_COMMIT_ON_RELEASE", False):
-            # Legacy fallback only.  Some toolkits never deliver the P release
-            # event to IBus after Ctrl+Alt+P, so the default direct path commits
-            # synchronously during the key event instead of waiting here.
-            self._pending_clipboard_paste = (content, truncated, max_chars)
-            log_error("输入法粘贴：等待热键释放后提交")
-        elif delay > 0:
-            GLib.timeout_add(delay, self._commit_clipboard_text, content, truncated, max_chars)
-        else:
-            self._commit_clipboard_text(content, truncated, max_chars)
-        return False
-
-    def _commit_clipboard_text(self, content: str, truncated: bool, max_chars: int) -> bool:
-        """Commit clipboard text after the global shortcut focus settles."""
-        if self._buffer or self._raw_input or self._display_items or self._chinese_candidates or self._english_candidates:
-            self._clear()
-        self.commit_text(text(content))
-        log_error(f"输入法粘贴：已提交 len={len(content)}, truncated={truncated}")
-        # Avoid auxiliary UI updates for direct hotkey commits.  Some browser
-        # input contexts are sensitive to extra IBus signals around a synthetic
-        # commit and can temporarily stop accepting Chinese composition.
-        if truncated:
-            log_error(f"输入法粘贴：内容过长，已截断到 {max_chars} 字")
         return False
 
     def _voice_env_enabled(self, name: str, default: bool = False) -> bool:

@@ -14,7 +14,7 @@ if [[ -x "$ROOT_DIR/scripts/check-environment.sh" ]]; then
   echo
 fi
 
-chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py" "$ROOT_DIR/run-engine.sh" "$ROOT_DIR/scripts/voice-toggle.sh" "$ROOT_DIR/scripts/clipboard-paste.sh" "$ROOT_DIR/scripts/keyboard-paste.sh" "$ROOT_DIR/src/ibus_voice_ime/keyboard_type_clipboard.py" "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-keyboard-paste-hotkey.sh" "$ROOT_DIR/scripts/uninstall-gnome-clipboard-paste-hotkey.sh" 2>/dev/null || chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py"
+chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py" "$ROOT_DIR/run-engine.sh" "$ROOT_DIR/scripts/voice-toggle.sh" "$ROOT_DIR/scripts/clipboard-paste.sh" "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" "$ROOT_DIR/scripts/uninstall-gnome-clipboard-paste-hotkey.sh" 2>/dev/null || chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py"
 PYTHON="$ROOT_DIR/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3)"
@@ -63,9 +63,6 @@ VOICE_IME_RECORD_SECONDS=5
 VOICE_IME_HOTKEYS=Ctrl+Alt+V
 VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B
 VOICE_IME_CLIPBOARD_HOTKEYS=Ctrl+Alt+P
-VOICE_IME_INTERNAL_CLIPBOARD_HOTKEY=0
-VOICE_IME_CLIPBOARD_RECOVER_ENGINE=1
-VOICE_IME_CLIPBOARD_RECOVER_DELAY_SECONDS=2.0
 VOICE_IME_CANDIDATE_UI=popup
 VOICE_IME_PREEDIT_MIRROR=off
 EOF_ENV
