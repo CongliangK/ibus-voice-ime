@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
+# 通过引擎 IPC 触发语音输入（GNOME 全局快捷键兜底链路）。
+# 用法：voice-toggle.sh        -> 发送 "toggle"（主热键 Ctrl+Alt+V 同款行为）
+#       voice-toggle.sh raw    -> 发送 "toggle-raw"（原文语音输入：跳过 LLM 后处理）
+# 其他参数值一律按普通 toggle 处理，保持旧行为不变。
 set -euo pipefail
 
-python3 - <<'PY'
+MODE="${1:-}"
+
+python3 - "$MODE" <<'PY'
 from __future__ import annotations
 
 import os
@@ -12,7 +18,7 @@ import time
 from pathlib import Path
 
 ENGINE_NAME = "voice-custom"
-COMMAND = b"toggle\n"
+COMMAND = b"toggle-raw\n" if sys.argv[1] == "raw" else b"toggle\n"
 LOG_PATH = Path.home() / ".local/share/ibus-voice-ime/ipc-client.log"
 
 

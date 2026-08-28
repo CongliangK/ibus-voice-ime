@@ -315,7 +315,7 @@ check_desktop_integration() {
     fail "GNOME 输入源未注册 voice-custom"
     FAILED_ITEMS+=(hotkeys)
   fi
-  local paths raw path cmd dangling=0 ours=0
+  local paths raw path cmd cmd_file dangling=0 ours=0
   raw="$(gsettings get org.gnome.settings-daemon.plugins.media-keys custom-keybindings 2>/dev/null || echo '[]')"
   paths="$(printf '%s' "$raw" | tr -d "[]'," | tr ' ' '\n' | grep -v '^$')"
   for path in $paths; do
@@ -323,8 +323,10 @@ check_desktop_integration() {
     cmd="${cmd//\'}"
     case "$cmd" in
       *ibus-voice-ime*)
-        if [[ -f "$cmd" ]]; then
-          if [[ "$cmd" == "$ROOT_DIR/"* ]]; then
+        # 命令可带参数（如 "voice-toggle.sh raw"），存在性只检查第一个词。
+        cmd_file="${cmd%% *}"
+        if [[ -f "$cmd_file" ]]; then
+          if [[ "$cmd_file" == "$ROOT_DIR/"* ]]; then
             ours=$((ours + 1))
           else
             warn "快捷键指向其他副本：$cmd"
@@ -338,7 +340,7 @@ check_desktop_integration() {
         ;;
     esac
   done
-  [[ $ours -ge 2 ]] && ok "语音/粘贴热键已注册并指向本仓库"
+  [[ $ours -ge 2 ]] && ok "语音/粘贴热键已注册并指向本仓库（共 $ours 个）"
   [[ $dangling -gt 0 ]] && fail "共 $dangling 个快捷键断链"
   if [[ $ours -eq 0 && $dangling -eq 0 ]]; then
     warn "未检测到指向本仓库的语音/粘贴热键（未运行 ./install.sh？）"

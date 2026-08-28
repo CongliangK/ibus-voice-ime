@@ -19,6 +19,7 @@
                     │  vendor/rime/ 内置 librime（雾凇拼音方案）      │
                     └────────────────┬───────────────────────────────┘
                                      │ Ctrl+Alt+V（toggle）
+                                     │ Ctrl+Alt+B（原文：跳过 LLM）
                                      ▼
  ┌───────────┐   ┌──────────────┐   ┌──────────────┐   ┌────────────┐   ┌──────────┐
  │ arecord 录音│──▶│ 音频预处理    │──▶│ ASR 后端      │──▶│ 规则清理    │──▶│commit_text│
@@ -33,7 +34,7 @@
 
 - `ibus-daemon` 通过组件 XML 中的 `<exec>` 拉起 `run-engine.sh` → `engine.py`。`run-engine.sh` 是环境装配层：加载 `~/.config/environment.d/ibus-voice-ime.conf`、设置全部运行时默认值、必要时从 Bitwarden Secrets Manager（BWS）运行时注入云端后端密钥，然后 `exec` 引擎。
 - ASR sidecar 是**独立进程**（本地 HTTP，仅绑定 127.0.0.1），首次语音时按需拉起，不随引擎启动。
-- GNOME 全局快捷键（`Ctrl+Alt+V` / `Ctrl+Alt+P`）指向 `scripts/voice-toggle.sh` / `scripts/clipboard-paste.sh`，它们通过引擎的 **Unix domain socket IPC**（`$XDG_RUNTIME_DIR/ibus-voice-ime/voice.sock`）下发指令，不在引擎进程内抢按键。
+- GNOME 全局快捷键（`Ctrl+Alt+V` / `Ctrl+Alt+B` / `Ctrl+Alt+P`）指向 `scripts/voice-toggle.sh [raw]` / `scripts/clipboard-paste.sh`，它们通过引擎的 **Unix domain socket IPC**（`$XDG_RUNTIME_DIR/ibus-voice-ime/voice.sock`）下发指令，不在引擎进程内抢按键。语音命令：`toggle`（主热键；空串 / `hotkey` / `voice` 均为同义别名）与 `toggle-raw`（原文语音输入；别名 `voice-raw`）；另有粘贴命令（`paste` / `paste-prepare` / `paste-file <路径>`，见 `engine.py` 的 `_serve_ipc_connection`）。
 
 ## 关键选型与理由
 
@@ -86,7 +87,7 @@ Rime 只是引擎，候选质量取决于**方案与词库**。默认方案选�
 ## 语音流水线（数据流细节）
 
 ```text
-Ctrl+Alt+V（toggle：按一次开始，再按一次结束）
+Ctrl+Alt+V（toggle：按一次开始，再按一次结束；Ctrl+Alt+B 原文模式同款，录音中按任一热键均可停止）
   → 录音：arecord 直采配置设备；设备不存在自动回退系统默认源；arecord 失败回退 pw-record+ffmpeg
   → 预处理（VOICE_IME_DENOISE_TIER，默认 rnnoise 档）：
       sox 高通 80Hz + 50/100/150Hz 工频陷波 + RNNoise(bd) + 归一化；缺件自动降级 notch 档
@@ -96,7 +97,7 @@ Ctrl+Alt+V（toggle：按一次开始，再按一次结束）
   → IBus commit_text 提交到当前光标
 ```
 
-- **LLM 云端润色（可选）**：OpenCC 之后可接一个云端大模型做润色（补标点/去口水词），通过用户自有的 `~/.config/ibus-voice-ime/llm.json` 开启（OpenAI 兼容接口：base_url + api_key + 精确 model ID，不做模型列表查询；`scripts/setup-llm-cloud.sh` 生成）。接口失败自动回退原文。本地小模型路径（llama.cpp sidecar）实测会改坏听写原文，已被云端方案取代并被 `run-engine.sh` 钉死关闭。
+- **LLM 云端润色（可选）**：OpenCC 之后可接一个云端大模型做润色（补标点/去口水词），通过用户自有的 `~/.config/ibus-voice-ime/llm.json` 开启（OpenAI 兼容接口：base_url + api_key + 精确 model ID，不做模型列表查询；`scripts/setup-llm-cloud.sh` 生成）。接口失败自动回退原文。本地小模型路径（llama.cpp sidecar）实测会改坏听写原文，已被云端方案取代并被 `run-engine.sh` 钉死关闭。`Ctrl+Alt+B`「原文语音输入」触发的流水线**完全跳过**这一步（无论文本长度），只走上面的确定性规整。
 - 识别结果同时受**自定义词典**影响：三列格式（标准词 | 别名 | 常见误识别），前两列作为热词直传支持热词的云端后端，第三列做本地确定性整词替换。
 
 ## 配置体系

@@ -61,6 +61,7 @@ VOICE_IME_RIME_USER_DATA_DIR=$HOME/.local/share/ibus-voice-ime/rime-user
 VOICE_IME_LLM_POSTPROCESS=0
 VOICE_IME_RECORD_SECONDS=5
 VOICE_IME_HOTKEYS=Ctrl+Alt+V
+VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B
 VOICE_IME_CLIPBOARD_HOTKEYS=Ctrl+Alt+P
 VOICE_IME_INTERNAL_CLIPBOARD_HOTKEY=0
 VOICE_IME_CLIPBOARD_RECOVER_ENGINE=1
@@ -101,6 +102,7 @@ if ! systemctl --user set-environment \
   "VOICE_IME_RIME_STAGING_DIR=$ROOT_DIR/vendor/rime/build" \
   "VOICE_IME_RIME_USER_DATA_DIR=$HOME/.local/share/ibus-voice-ime/rime-user" \
   "VOICE_IME_HOTKEYS=Ctrl+Alt+V" \
+  "VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B" \
   "VOICE_IME_CLIPBOARD_HOTKEYS=Ctrl+Alt+P" 2>/dev/null; then
   echo "提示：systemctl --user 不可用（SSH 无用户会话/非 systemd？），配置将在下次登录时由 environment.d 生效。"
 fi
@@ -186,6 +188,7 @@ cat <<EOF
 切换方式：GNOME 顶栏输入法菜单，或 Super+Space，选择“自定义语音输入法”。
 键盘输入示例：nihao + Space -> 你好
 语音输入热键：Ctrl+Alt+V，默认后端为本地 Qwen3-ASR（1.7B）。
+原文语音输入热键：Ctrl+Alt+B，识别结果不做 LLM 后处理，只做确定性规整后上屏。
 输入法粘贴热键：Ctrl+Alt+P，读取剪贴板并显示“正在粘贴”提示后，通过语音结果同款 commit_text 路径提交文本。
 EOF
 

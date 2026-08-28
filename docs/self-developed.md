@@ -39,7 +39,7 @@ MiMo Token Plan（OpenAI-compatible）与火山豆包 bigmodel（异步提交 + 
 
 ### 8. 语音热键与状态浮层（asr/voice_hotkey.py、asr/voice_overlay.py）
 
-`Ctrl+Alt+V` 热键解析（GNOME 转发兜底场景）；可选 GTK 状态浮窗。
+`Ctrl+Alt+V` / `Ctrl+Alt+B`（原文模式）热键解析（GNOME 转发兜底场景）；可选 GTK 状态浮窗。
 
 ### 9. 用户记忆层（memory/chinese_memory.py、memory/english_memory.py、memory/voice_terms.py）
 

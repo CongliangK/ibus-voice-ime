@@ -1,6 +1,6 @@
 # IBus 自定义语音输入法原型
 
-Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇拼音），语音输入按 `Ctrl+Alt+V` 说话、识别后直接上屏，支持本地 Qwen3-ASR / 云端 MiMo / 火山引擎等多种识别后端。
+Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇拼音），语音输入按 `Ctrl+Alt+V` 说话、识别后直接上屏，支持本地 Qwen3-ASR / 云端 MiMo / 火山引擎等多种识别后端；另有 `Ctrl+Alt+B`「原文语音输入」，识别结果不做 LLM 后处理。
 
 深度文档（技术架构与选型理由、语音后端、自研范围、测试平台、已知局限）见 [docs/README.md](docs/README.md)。
 
@@ -48,7 +48,7 @@ cd ibus-voice-ime
 #   --no-zhwiki --no-moegirl / --proxy http://127.0.0.1:7890 / --skip-install
 # 无 NVIDIA GPU 时语音步骤自动跳过，并打印云端后端替代命令。
 
-# Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音
+# Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音；Ctrl+Alt+B 原文语音（免整理）
 ```
 
 两个安装脚本的分工：
@@ -243,11 +243,11 @@ export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 
 ## 语音输入
 
-热键：`Ctrl+Alt+V`。
+热键：`Ctrl+Alt+V`。另有 `Ctrl+Alt+B`「原文语音输入」：同一条录音/识别链路，但识别结果**绝不经过 LLM 后处理**（无论文本多长），只做确定性规整（去口头禅、繁简转换等）后上屏，适合念原文、口令、不想被改写的场合。
 
-在部分终端程序中，应用/工具包可能不会把 `Ctrl+Alt+V` 转发给 IBus；安装脚本会额外注册一个 GNOME 用户级全局快捷键，把同一个 `Ctrl+Alt+V` 转发给输入法进程。
+在部分终端程序中，应用/工具包可能不会把 `Ctrl+Alt+V` 转发给 IBus；安装脚本会额外注册一个 GNOME 用户级全局快捷键，把同一个 `Ctrl+Alt+V` 转发给输入法进程（`Ctrl+Alt+B` 同样注册了 GNOME 兜底绑定）。
 
-默认是 toggle 模式：按一次开始录音，再按一次停止录音、识别并提交到当前光标位置。状态弹窗默认关闭。现在语音流水线是：
+默认是 toggle 模式：按一次开始录音，再按一次停止录音、识别并提交到当前光标位置；录音中按**任意一个**语音热键（V 或 B）都会停止录音。fixed 模式（`VOICE_IME_TRIGGER_MODE=fixed`，固定时长录音）下 V/B 的差异同样保留：B 键触发的识别结果依旧跳过 LLM 后处理与云端语义平滑（volc-bigmodel 后端的 DDC），只做确定性规整。状态弹窗默认关闭。现在语音流水线是：
 
 ```text
 录音 wav -> STT 初稿 -> 规则清理 ->（可选：云端 LLM 润色，JSON 配置开启）-> 提交到当前光标
@@ -308,8 +308,9 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
 常用语音/STT 环境变量：
 
 ```bash
-export VOICE_IME_TRIGGER_MODE=toggle         # toggle：按一次开始，再按一次停止；fixed：固定时长旧模式
+export VOICE_IME_TRIGGER_MODE=toggle         # toggle：按一次开始，再按一次停止；fixed：固定时长旧模式（V/B 差异同 toggle：B 仍跳过 LLM 后处理）
 export VOICE_IME_HOTKEYS=Ctrl+Alt+V # 默认语音热键；仅支持 Ctrl+Alt+字母
+export VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B # 原文语音热键（跳过 LLM 后处理）；与主热键或剪贴板热键（Ctrl+Alt+P）重叠的字母被剔除，全部重叠时自动禁用
 export VOICE_IME_MAX_RECORD_SECONDS=120      # toggle 模式最长录音时长
 export VOICE_IME_OVERLAY=0                   # 默认关闭独立语音状态弹窗；设为 1 可开启
 export VOICE_IME_OVERLAY_POSITION=top-center # top-center 或 center
@@ -478,7 +479,7 @@ STT 之后的文本润色（补标点、**整理成规范 Markdown**、去口水
 
 设计约定（最简方案换最大可靠性）：
 
-- **短句不整理**：默认 `min_chars: 50`——不足 50 字的听写直接提交规则清理结果，不为几个字付云端延迟和费用（短句也几乎不需要补标点）；想调整改这个字段即可。
+- **短句不整理**：默认 `min_chars: 50`——不足 50 字的听写直接提交规则清理结果，不为几个字付云端延迟和费用（短句也几乎不需要补标点）；想调整改这个字段即可。用 `Ctrl+Alt+B`「原文语音输入」触发的听写则**完全跳过** LLM 后处理，与长度无关（见「语音输入」）。
 - **Markdown 输出（面向 AI 消费）**：整理结果默认是规范 Markdown，且**任务/指令类听写会整理成智能体任务简报**——`## 目标` / `## 背景` / `## 任务`（编号步骤）/ `## 约束` / `## 验收`，只为听写中实际存在的部分生成小节；叙述/讨论类内容按主题分节或保持自然段落，不强行套简报；命令/路径/代码用行内代码或代码块。文字内容本身不改，尤其**不会自作主张追加用户没说过的要求**（标题和目标只能来自原文关键词）。提示词在 `src/ibus_voice_ime/text/llm_postprocess.py`（`SYSTEM_PROMPT` / `MODE_INSTRUCTIONS` / `_build_messages`），可按需手工调整，改完重启引擎生效。
 - **不做模型列表查询**：本工具不会请求 `/models` 帮你挑模型。`model` 必须填与服务商**完全一致**的 ID；填错的后果是第一次调用返回明确的 HTTP 404/400 错误（错误信息会提示检查 `base_url` 是否以 `/v1` 结尾、model ID 是否正确），而不是静默选错模型。
 - **服务商特有参数走 `extra_body`**：该字段的内容会合并进请求体。典型用途是思考型模型关思考（输入法后处理要快而直接）——例如 GLM 系列：`"extra_body": {"thinking": {"type": "disabled"}}`（实测同一请求从 15 秒超时降到约 2 秒）；不关思考的模型若返回空结果并提示 `finish_reason=length`，就是思考耗尽了 `max_tokens`。

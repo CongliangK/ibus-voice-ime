@@ -39,19 +39,25 @@ GitHub Actions（`ubuntu-latest`），push / PR / 手动触发均运行 **releas
 
 确定性与依赖约束：验证只用标准库，本地与 CI 跑同一条 `tools/validate.py release` 命令，行为一致；除非未来在 `mise.toml` 固化工具，门禁保持 stdlib-only。
 
-## 单元测试覆盖（tests/，96 个用例）
+## 单元测试覆盖（tests/，170 个用例）
 
 | 测试文件 | 用例数 | 守护的内容 |
 |---|---|---|
 | test_qwen_asr_model_manager.py | 27 | sidecar 模型管理器（加载 / 切换 / 错误面） |
+| test_llm_cloud_config.py | 28 | LLM 云端 JSON 配置（字段/权限/优先级） |
 | test_audio_preprocess.py | 12 | 降噪链（陷波 / RNNoise 档、降级路径、fail-safe） |
 | test_volc_bigmodel_asr.py | 12 | 火山后端（请求构造、热词直传、轮询解析） |
+| test_llm_prompt_markdown.py | 13 | LLM 提示词与 Markdown 输出约定 |
 | test_arecord_device_fallback.py | 9 | 录音设备不存在时的默认源回退 |
 | test_qwen_asr_warm.py | 8 | sidecar 预热 / 就绪判定 |
 | test_log_trim.py | 7 | 日志裁剪（保留行数、残行保护、异常安全） |
+| test_rime_schema_fallback.py | 7 | 词库缺失时的方案回退 |
+| test_secret_persistence_policy.py | 7 | API Key 不落盘策略 |
 | test_cjk_latin_space.py | 6 | 中西文间距后处理 |
 | test_replacement_table.py | 6 | 词典整词替换边界（不误伤子串） |
-| test_secret_persistence_policy.py | 4 | API Key 不落盘策略 |
+| test_voice_hotkey.py | 15 | 主/原文语音热键解析、去重、匹配与组合停止提示 |
+| test_engine_ipc_dispatch.py | 5 | 引擎 IPC 命令分发（toggle / toggle-raw，stub GLib） |
+| test_voice_postprocess_skip_llm.py | 3 | 原文模式彻底跳过 LLM 后处理 |
 | test_sidecar_security.py | 3 | sidecar 仅绑定回环地址 |
 | test_validation_smoke.py | 2 | 验证工具自身冒烟 |
 

@@ -222,7 +222,7 @@ def _corpus() -> dict[str, str] | None:
     return corpus or None
 
 
-def _request_options() -> dict[str, Any]:
+def _request_options(*, skip_llm: bool = False) -> dict[str, Any]:
     """Build the ``request`` field of the submit body from env toggles.
 
     Defaults are tuned for a Chinese-English mixed dictation IME:
@@ -231,6 +231,10 @@ def _request_options() -> dict[str, Any]:
       suppresses the local filler layer when DDC is active)
     - no language pin (empty = best Mandarin/English/dialect mixing)
     - corpus.context hotwords from the shared voice dictionary
+
+    ``skip_llm=True``（原文语音输入 Ctrl+Alt+B）强制 ``enable_ddc=False``：
+    云端语义平滑也是 LLM 改写的一种，原文模式必须拿到未经改动的识别结果，
+    该覆盖优先于 VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC 环境变量。
     """
     options: dict[str, Any] = {
         "model_name": model_name(),
@@ -243,15 +247,16 @@ def _request_options() -> dict[str, Any]:
     # the user prefers the cloud bigmodel's smoothing over the local
     # text_postprocess filler removal.  When DDC is on, the local
     # VOICE_IME_REMOVE_FILLERS path is auto-suppressed in voice.py for this
-    # backend to avoid double-processing.
-    options["enable_ddc"] = _env_bool("VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC", True)
+    # backend to avoid double-processing.  The raw-transcript path (skip_llm)
+    # forces it off so the transcript stays unmodified.
+    options["enable_ddc"] = False if skip_llm else _env_bool("VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC", True)
     corpus = _corpus()
     if corpus is not None:
         options["corpus"] = corpus
     return options
 
 
-def _submit(task_id: str, audio_b64: str, audio_format: str) -> str:
+def _submit(task_id: str, audio_b64: str, audio_format: str, *, skip_llm: bool = False) -> str:
     """Submit the recognition task; return the X-Tt-Logid for query tracing."""
     headers = {
         "Content-Type": "application/json",
@@ -271,7 +276,7 @@ def _submit(task_id: str, audio_b64: str, audio_format: str) -> str:
     body = {
         "user": {"uid": _app_key_for_uid()},
         "audio": audio_block,
-        "request": _request_options(),
+        "request": _request_options(skip_llm=skip_llm),
     }
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(_submit_url(), data=data, headers=headers, method="POST")
@@ -352,7 +357,12 @@ def _extract_text(parsed: dict[str, Any]) -> str:
     return ""
 
 
-def transcribe(wav_path: str) -> str:
+def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
+    """Submit the audio file and poll until the transcript is ready.
+
+    ``skip_llm=True``（原文语音输入 Ctrl+Alt+B）强制关闭云端 DDC 语义平滑；
+    参数一路以函数形参传递到 ``_request_options``，不用环境变量（线程安全）。
+    """
     path = Path(wav_path)
     if not path.exists():
         raise RuntimeError(f"audio not found: {wav_path}")
@@ -367,7 +377,7 @@ def transcribe(wav_path: str) -> str:
 
     task_id = str(uuid.uuid4())
     started = time.monotonic()
-    logid = _submit(task_id, audio_b64, _audio_format(path))
+    logid = _submit(task_id, audio_b64, _audio_format(path), skip_llm=skip_llm)
 
     interval = max(0.3, float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_POLL_INTERVAL", "1.0")))
     max_wait = max(5.0, float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_TOTAL_TIMEOUT", "120")))

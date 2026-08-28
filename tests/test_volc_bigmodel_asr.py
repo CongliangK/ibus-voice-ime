@@ -143,6 +143,54 @@ class VolcBigmodelAsrTest(unittest.TestCase):
         opts = volc_bigmodel_asr._request_options()
         self.assertFalse(opts["enable_ddc"])
 
+    def test_request_options_skip_llm_forces_ddc_off(self) -> None:
+        # 原文语音输入（Ctrl+Alt+B）路径：skip_llm=True 强制关 DDC，
+        # 优先于 VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC 的默认开启。
+        opts = volc_bigmodel_asr._request_options(skip_llm=True)
+        self.assertFalse(opts["enable_ddc"])
+        self.assertTrue(opts["enable_punc"])
+        self.assertTrue(opts["enable_itn"])
+
+    def test_request_options_skip_llm_overrides_env_ddc_on(self) -> None:
+        os.environ["VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC"] = "1"
+        self.assertFalse(volc_bigmodel_asr._request_options(skip_llm=True)["enable_ddc"])
+        # 非 raw 路径不受影响：仍按环境变量（显式开启）走。
+        self.assertTrue(volc_bigmodel_asr._request_options()["enable_ddc"])
+
+    def test_transcribe_skip_llm_disables_ddc_in_submit_body(self) -> None:
+        # 全链路验证：transcribe(skip_llm=True) -> _submit -> 请求体
+        # request.enable_ddc 必须为 False（云端不做语义平滑改写）。
+        import json as _json
+        import tempfile
+        import wave
+
+        os.environ["VOICE_IME_VOLC_API_KEY"] = "fake-key"
+        os.environ["VOICE_IME_VOLC_BIGMODEL_HOTWORDS"] = "0"
+        captured = {}
+        success_body = '{"result":{"text":"原文识别"}}'
+        calls = iter(
+            [
+                _Resp("20000000", "ok", ""),  # submit
+                _Resp("20000000", "ok", success_body),  # poll (done)
+            ]
+        )
+
+        def fake_urlopen(req, timeout):  # noqa: ARG001
+            if req.data != b"{}":  # query 的请求体恒为 {}，其余即 submit
+                captured["body"] = _json.loads(req.data.decode("utf-8"))
+            return next(calls)
+
+        with mock.patch("ibus_voice_ime.asr.volc_bigmodel_asr.urllib.request.urlopen", side_effect=fake_urlopen):
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                with wave.open(tmp.name, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes(b"\x00\x00" * 160)
+                text = volc_bigmodel_asr.transcribe(tmp.name, skip_llm=True)
+        self.assertEqual(text, "原文识别")
+        self.assertFalse(captured["body"]["request"]["enable_ddc"])
+
     def test_corpus_hotwords_from_dictionary(self) -> None:
         import tempfile
         d = tempfile.mkdtemp()

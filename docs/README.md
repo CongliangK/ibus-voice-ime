@@ -14,7 +14,7 @@
 
 ## 一句话了解本项目
 
-一个用 Python 写的 Linux IBus 输入法引擎：**键盘输入**复用 Rime（librime + 雾凇拼音），**语音输入**（`Ctrl+Alt+V`）走自研的「录音 → 音频预处理 → ASR 后端 → 规则清理 → 提交」流水线，默认后端是本地 Qwen3-ASR 1.7B sidecar。
+一个用 Python 写的 Linux IBus 输入法引擎：**键盘输入**复用 Rime（librime + 雾凇拼音），**语音输入**（`Ctrl+Alt+V`，或跳过 LLM 后处理的原文模式 `Ctrl+Alt+B`）走自研的「录音 → 音频预处理 → ASR 后端 → 规则清理 → 提交」流水线，默认后端是本地 Qwen3-ASR 1.7B sidecar。
 
 ## 文档维护约定
 

@@ -97,7 +97,7 @@ class VoiceOverlay:
             self._cancel_button.connect("clicked", lambda *_: self._on_cancel and self._on_cancel())
             row.pack_start(self._cancel_button, True, True, 0)
         else:
-            hint = Gtk.Label(label=f"再按 {voice_hotkey.hotkey_label()} 停止；或说完后静音自动识别")
+            hint = Gtk.Label(label=f"再按 {voice_hotkey.stop_hotkey_label()} 停止；或说完后静音自动识别")
             hint.set_xalign(0)
             box.pack_start(hint, False, False, 0)
 
@@ -111,12 +111,20 @@ class VoiceOverlay:
             return False
         state = int(event.state)
         keyval = int(event.keyval)
+        # 录音中按主热键（Ctrl+Alt+V）或原文热键（Ctrl+Alt+B）都能停止录音。
         if voice_hotkey.matches_ctrl_alt_letter(
             Gdk,
             keyval,
             state,
             int(Gdk.ModifierType.CONTROL_MASK),
             int(Gdk.ModifierType.MOD1_MASK),
+        ) or voice_hotkey.matches_ctrl_alt_letter(
+            Gdk,
+            keyval,
+            state,
+            int(Gdk.ModifierType.CONTROL_MASK),
+            int(Gdk.ModifierType.MOD1_MASK),
+            letters=voice_hotkey.raw_hotkey_letters(),
         ):
             if self._on_stop:
                 self._on_stop()

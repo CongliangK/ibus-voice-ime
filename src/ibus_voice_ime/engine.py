@@ -3,6 +3,8 @@
 """A minimal custom IBus input method with optional local voice input.
 
 Hotkey: Ctrl+Alt+V records audio and commits recognized text.
+Ctrl+Alt+B is the raw-transcript variant: the same recording pipeline, but the
+recognized text is never sent through LLM post-processing.
 """
 from __future__ import annotations
 
@@ -215,6 +217,8 @@ def _voice_ipc_server() -> None:
 
 
 def _serve_ipc_connection(conn) -> None:
+    # 注意：此处的局部变量 raw 是接收到的 IPC 命令文本，与「原文语音输入」
+    # （raw 模式）只是同名；raw 模式命令是下面的 "toggle-raw" / "voice-raw"。
     raw = conn.recv(128).decode("utf-8", "ignore").strip().lower()
     target = _FOCUSED_ENGINE
     if raw in {"", "toggle", "hotkey", "voice"}:
@@ -223,6 +227,14 @@ def _serve_ipc_connection(conn) -> None:
             conn.sendall(b"NO_FOCUS\n")
         else:
             GLib.idle_add(target._handle_voice_hotkey)
+            conn.sendall(b"OK\n")
+    elif raw in {"toggle-raw", "voice-raw"}:
+        if not _engine_can_receive_ipc(target):
+            log_error(f"IPC 原文语音请求失败：没有可用焦点引擎 command={raw!r}")
+            conn.sendall(b"NO_FOCUS\n")
+        else:
+            # 与上面同款 idle 分发；额外传 raw=True 表示「原文语音输入」。
+            GLib.idle_add(target._handle_voice_hotkey, True)
             conn.sendall(b"OK\n")
     elif raw in {"paste-prepare", "clipboard-prepare", "ime-paste-prepare"}:
         if not _engine_can_receive_ipc(target):
@@ -331,6 +343,8 @@ class VoiceCustomEngine(IBus.Engine):
         self._aux_generation = 0
         self._voice_busy = False
         self._voice_state = "idle"  # idle | recording | processing
+        # 本次 toggle 录音是否为「原文语音输入」（Ctrl+Alt+B）：跳过 LLM 后处理。
+        self._voice_raw = False
         self._audio_session: audio_session.AudioSession | None = None
         self._overlay: voice_overlay.VoiceOverlay | None = None
         self._voice_seen_sound = False
@@ -382,6 +396,8 @@ class VoiceCustomEngine(IBus.Engine):
         self._cancel_pending_shift_toggle(keyval)
 
         # Voice hotkey.  Works even when there is a preedit buffer.
+        # 主热键（默认 Ctrl+Alt+V）优先匹配；raw 热键（默认 Ctrl+Alt+B）在
+        # 主热键不匹配时才尝试，两者互不重叠且命中后都提前 return。
         if voice_hotkey.matches_ctrl_alt_letter(
             IBus,
             keyval,
@@ -390,6 +406,18 @@ class VoiceCustomEngine(IBus.Engine):
             int(IBus.ModifierType.MOD1_MASK),
         ):
             self._handle_voice_hotkey()
+            return True
+
+        # 「原文语音输入」热键：识别结果跳过 LLM 后处理，只走确定性规整。
+        if voice_hotkey.matches_ctrl_alt_letter(
+            IBus,
+            keyval,
+            state,
+            int(IBus.ModifierType.CONTROL_MASK),
+            int(IBus.ModifierType.MOD1_MASK),
+            letters=voice_hotkey.raw_hotkey_letters(),
+        ):
+            self._handle_voice_hotkey(raw=True)
             return True
 
         # IME-level paste fallback.  Disabled by default because the default
@@ -1329,11 +1357,18 @@ class VoiceCustomEngine(IBus.Engine):
         elif self._buffer:
             self._commit_candidate(self._lookup.get_cursor_pos())
 
-    def _handle_voice_hotkey(self) -> None:
-        log_error(f"语音热键触发：state={self._voice_state}, busy={self._voice_busy}")
+    def _handle_voice_hotkey(self, raw: bool = False) -> None:
+        """语音热键入口：raw=True 表示「原文语音输入」（跳过 LLM 后处理）。
+
+        录音进行中时，无论按的是主热键还是 raw 热键都只停止当前录音；
+        空闲时才按 raw 标志以对应模式开始新的录音。
+        """
+        log_error(f"语音热键触发：state={self._voice_state}, busy={self._voice_busy}, raw={raw}")
         mode = os.environ.get("VOICE_IME_TRIGGER_MODE", "toggle").strip().lower()
         if mode == "fixed":
-            self._start_voice_input()
+            # fixed 模式同样尊重 raw 标志：V/B 的差异（是否跳过 LLM 后处理）
+            # 与 toggle 模式一致，只是录音方式仍是旧的固定时长。
+            self._start_voice_input(raw=raw)
             return
         if self._voice_state == "recording":
             self._stop_toggle_voice_recording()
@@ -1341,9 +1376,9 @@ class VoiceCustomEngine(IBus.Engine):
         if self._voice_state == "processing" or self._voice_busy:
             self._show_aux("🎙️ 正在处理上一段语音……")
             return
-        self._begin_toggle_voice_recording()
+        self._begin_toggle_voice_recording(raw=raw)
 
-    def _begin_toggle_voice_recording(self) -> None:
+    def _begin_toggle_voice_recording(self, raw: bool = False) -> None:
         if self._voice_busy:
             self._show_aux("🎙️ 正在处理上一段语音……")
             return
@@ -1360,9 +1395,10 @@ class VoiceCustomEngine(IBus.Engine):
         self._audio_session = session
         self._voice_state = "recording"
         self._voice_busy = True
+        self._voice_raw = raw
         self._voice_seen_sound = False
         self._voice_last_sound_at = time.monotonic()
-        log_error("开始 toggle 语音录音")
+        log_error(f"开始 toggle 语音录音 raw={raw}")
         # Pre-warm the ASR model onto the GPU concurrently with recording so
         # that by the time the user stops talking the model is already loaded
         # and the first /transcribe is near-instant.  Best-effort: any failure
@@ -1370,7 +1406,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._warm_voice_asr()
         # Do not keep a preedit composition during long recording; on Wayland
         # some clients then stop forwarding the second shortcut to IBus.
-        self.update_auxiliary_text(text(f"🎙️ 正在录音，再按 {voice_hotkey.hotkey_label()} 停止……"), True)
+        self.update_auxiliary_text(text(f"🎙️ 正在录音，再按 {voice_hotkey.stop_hotkey_label()} 停止……"), True)
 
         self._overlay = voice_overlay.VoiceOverlay(
             on_stop=self._stop_toggle_voice_recording,
@@ -1378,7 +1414,8 @@ class VoiceCustomEngine(IBus.Engine):
         )
         self._overlay.show_recording(
             mode=os.environ.get("VOICE_IME_VOICE_MODE", "dictation"),
-            llm_enabled=llm_postprocess.enabled(),
+            # raw 模式先短路，避免无谓读取 llm.json 判断 LLM 是否开启。
+            llm_enabled=not raw and llm_postprocess.enabled(),
             max_seconds=max_seconds,
         )
         GLib.timeout_add(100, self._update_recording_status)
@@ -1412,7 +1449,7 @@ class VoiceCustomEngine(IBus.Engine):
         level = session.level()
         minutes = int(elapsed) // 60
         seconds = int(elapsed) % 60
-        self.update_auxiliary_text(text(f"🎙️ 正在录音 {minutes:02d}:{seconds:02d}，再按 {voice_hotkey.hotkey_label()} 停止……"), True)
+        self.update_auxiliary_text(text(f"🎙️ 正在录音 {minutes:02d}:{seconds:02d}，再按 {voice_hotkey.stop_hotkey_label()} 停止……"), True)
         if self._overlay is not None:
             self._overlay.update_recording(elapsed=elapsed, level=level)
         self._maybe_auto_stop_toggle_recording(elapsed, level)
@@ -1465,10 +1502,18 @@ class VoiceCustomEngine(IBus.Engine):
         def worker() -> None:
             try:
                 wav_path = session.stop()
-                raw = voice.transcribe(wav_path)
+                # skip_llm 传给 transcribe：volc-bigmodel 后端据此强制关闭云端
+                # DDC 语义平滑，保证 raw 模式拿到未经云端改写的识别原文。
+                raw = voice.transcribe(wav_path, skip_llm=self._voice_raw)
                 log_error(f"STT 完成，长度={len(raw)}")
-                GLib.idle_add(self._show_voice_processing, "✨ 正在整理文本……", self._voice_processing_detail(llm=True))
-                result = voice.postprocess(raw)
+                # raw 模式（Ctrl+Alt+B）彻底跳过 LLM 后处理分支（min_chars
+                # 逻辑因此不参与）；悬浮窗/状态 detail 也不显示 LLM 开启。
+                # 先判断 raw 再读 llm.json，raw 模式下避免无谓的配置读取。
+                llm_active = not self._voice_raw and llm_postprocess.enabled()
+                # raw 模式只做确定性规整，提示文案不能暗示 LLM 参与。
+                processing_hint = "📋 正在规整文本……" if self._voice_raw else "✨ 正在整理文本……"
+                GLib.idle_add(self._show_voice_processing, processing_hint, self._voice_processing_detail(llm=llm_active))
+                result = voice.postprocess(raw, skip_llm=self._voice_raw)
                 log_error(f"后处理完成，长度={len(result)}")
                 session.cleanup()
                 GLib.idle_add(self._finish_voice_input, result, None)
@@ -1494,6 +1539,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._audio_session = None
         self._voice_state = "idle"
         self._voice_busy = False
+        self._voice_raw = False
         self.update_preedit_text(text(""), 0, False)
         self.update_auxiliary_text(text(""), False)
         if self._overlay is not None:
@@ -1525,8 +1571,8 @@ class VoiceCustomEngine(IBus.Engine):
             self._overlay.show_processing(status, detail)
         return False
 
-    def _start_voice_input(self) -> None:
-        """Legacy fixed-duration recording mode."""
+    def _start_voice_input(self, raw: bool = False) -> None:
+        """Legacy fixed-duration recording mode (raw=True skips LLM post-processing)."""
         if self._voice_busy:
             self._show_aux("🎙️ 正在识别上一段语音……")
             return
@@ -1540,7 +1586,7 @@ class VoiceCustomEngine(IBus.Engine):
 
         def worker() -> None:
             try:
-                result = voice.record_and_transcribe(seconds)
+                result = voice.record_and_transcribe(seconds, skip_llm=raw)
                 GLib.idle_add(self._finish_voice_input, result, None)
             except Exception as exc:  # keep engine alive
                 tb = traceback.format_exc()
@@ -1554,6 +1600,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._voice_busy = False
         self._voice_state = "idle"
         self._audio_session = None
+        self._voice_raw = False
         log_error(f"语音输入完成：error={bool(error)}, result_len={len(result or '')}")
         self.update_preedit_text(text(""), 0, False)
         self.update_auxiliary_text(text(""), False)

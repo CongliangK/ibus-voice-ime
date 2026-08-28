@@ -372,11 +372,14 @@ def _transcribe_with_mimo_cloud_asr(wav_path: str) -> str | None:
     return text
 
 
-def _transcribe_with_volc_bigmodel_asr(wav_path: str) -> str | None:
+def _transcribe_with_volc_bigmodel_asr(wav_path: str, *, skip_llm: bool = False) -> str | None:
     if not volc_bigmodel_asr.selected():
         return None
     started = time.monotonic()
-    text = volc_bigmodel_asr.transcribe(wav_path)
+    # skip_llm（原文语音输入 Ctrl+Alt+B）：强制关闭云端 DDC 语义平滑，识别
+    # 结果保持原样，只走本地确定性规整。以函数参数传递（transcribe 在 worker
+    # 线程跑，不用改环境变量的方式，线程安全）。
+    text = volc_bigmodel_asr.transcribe(wav_path, skip_llm=skip_llm)
     elapsed = time.monotonic() - started
     _log(
         f"ASR transcribed with Volcano bigmodel ASR resource={volc_bigmodel_asr.resource_id()} "
@@ -425,25 +428,28 @@ def _voice_dictionary_prompt() -> str:
     return context or punct
 
 
-def transcribe(wav_path: str) -> str:
+def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
     # Normalize loudness + remove low-frequency rumble and (optionally) steady
     # noise before any backend reads the file.  Cheap (sox subprocess) and
     # fails safe: on any problem it returns the original path untouched, so
     # recognition proceeds exactly as before.  Toggle via VOICE_IME_AUDIO_*.
     wav_path = audio_preprocess.preprocess_wav(wav_path)
+    # skip_llm（原文语音输入 Ctrl+Alt+B）目前只影响 volc-bigmodel 后端：
+    # 强制关闭云端 DDC 语义平滑。其余后端本就不做云端改写，参数被忽略。
     # Backend selection follows the VOICE_IME_ASR_BACKEND / *_ASR flags.  Order
     # is intentional: local Qwen3-ASR first (project default), then local MiMo,
     # MiMo cloud, custom command, faster-whisper, vosk.  Each helper returns
     # None when its selector is off, so the first selected backend wins.
-    for backend in (
+    backends: tuple = (
         _transcribe_with_qwen_asr,
         _transcribe_with_mimo_asr,
         _transcribe_with_mimo_cloud_asr,
-        _transcribe_with_volc_bigmodel_asr,
+        lambda wav_path: _transcribe_with_volc_bigmodel_asr(wav_path, skip_llm=skip_llm),
         _transcribe_with_command,
         _transcribe_with_faster_whisper,
         _transcribe_with_vosk,
-    ):
+    )
+    for backend in backends:
         text = backend(wav_path)
         if text is not None:
             return text
@@ -453,13 +459,15 @@ def transcribe(wav_path: str) -> str:
     )
 
 
-def postprocess(raw_text: str) -> str:
+def postprocess(raw_text: str, *, skip_llm: bool = False) -> str:
     mode = os.environ.get("VOICE_IME_VOICE_MODE", "dictation").strip().lower()
     # When the Volcano bigmodel backend is doing cloud-side semantic smoothing
     # (enable_ddc), suppress the local filler-removal pass so the same
     # disfluencies are not processed twice; the cloud's smoothing is preferred.
+    # The raw-transcript path (skip_llm=True, Ctrl+Alt+B) keeps DDC off, so the
+    # local deterministic filler removal must stay active there.
     saved_remove_fillers = os.environ.get("VOICE_IME_REMOVE_FILLERS")
-    if volc_bigmodel_asr.cloud_smoothing_on():
+    if not skip_llm and volc_bigmodel_asr.cloud_smoothing_on():
         os.environ["VOICE_IME_REMOVE_FILLERS"] = "0"
     try:
         normalized = text_postprocess.normalize(raw_text, mode=mode)
@@ -473,9 +481,11 @@ def postprocess(raw_text: str) -> str:
     # cleanup -> script normalization.  refine_with_fallback returns the raw
     # text on any transport/API error, so dictation never breaks because of
     # the LLM layer.  OpenCC stays the final authority on script direction,
-    # so it runs again after the model output.
+    # so it runs again after the model output.  The raw-transcript hotkey
+    # (Ctrl+Alt+B) passes skip_llm=True: the LLM branch is skipped entirely —
+    # regardless of text length — and only the deterministic cleanup runs.
     final_text = chinese_script.normalize(normalized)
-    if llm_postprocess.enabled():
+    if not skip_llm and llm_postprocess.enabled():
         try:
             final_text = chinese_script.normalize(
                 llm_postprocess.refine_with_fallback(final_text, mode=mode))
@@ -484,10 +494,10 @@ def postprocess(raw_text: str) -> str:
     return final_text
 
 
-def record_and_transcribe(seconds: int | None = None) -> str:
+def record_and_transcribe(seconds: int | None = None, *, skip_llm: bool = False) -> str:
     seconds = int(seconds or os.environ.get("VOICE_IME_RECORD_SECONDS", "5"))
     with tempfile.TemporaryDirectory(prefix="ibus-voice-ime-") as tmp:
         wav_path = str(Path(tmp) / "record.wav")
         _record_wav(wav_path, seconds)
-        raw = transcribe(wav_path)
-        return postprocess(raw)
+        raw = transcribe(wav_path, skip_llm=skip_llm)
+        return postprocess(raw, skip_llm=skip_llm)
