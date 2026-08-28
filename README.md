@@ -181,9 +181,9 @@ export VOICE_IME_ENGLISH_USER_DICT=~/.local/share/ibus-voice-ime/english.json
 
 热键：`Ctrl+Alt+P`。
 
-默认安装会把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./clipboard-paste.sh`。脚本只负责读取桌面剪贴板、显示“📋 正在粘贴……”通知，并把准备好的文本写入用户运行目录，然后立刻通过输入法 IPC 通知 `engine.py` 并退出；`engine.py`（位于 `src/ibus_voice_ime/`）再等待约 1 秒，让焦点像 `Ctrl+Alt+V` 语音链路一样回到网页输入框，随后走语音识别结果同款 `_commit_voice_result()` / IBus `commit_text()` 提交路径。输入法内部的 direct `Ctrl+Alt+P` 处理默认关闭，避免 GNOME 全局快捷键和 IBus 同时处理同一次按键导致输入法状态异常。脚本提交后默认会延迟短暂切到英文输入源再切回 `voice-custom`，自动恢复少数网页导致的 IBus 状态损坏。
+默认安装会把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./scripts/clipboard-paste.sh`。脚本只负责读取桌面剪贴板、显示“📋 正在粘贴……”通知，并把准备好的文本写入用户运行目录，然后立刻通过输入法 IPC 通知 `engine.py` 并退出；`engine.py`（位于 `src/ibus_voice_ime/`）再等待约 1 秒，让焦点像 `Ctrl+Alt+V` 语音链路一样回到网页输入框，随后走语音识别结果同款 `_commit_voice_result()` / IBus `commit_text()` 提交路径。输入法内部的 direct `Ctrl+Alt+P` 处理默认关闭，避免 GNOME 全局快捷键和 IBus 同时处理同一次按键导致输入法状态异常。脚本提交后默认会延迟短暂切到英文输入源再切回 `voice-custom`，自动恢复少数网页导致的 IBus 状态损坏。
 
-旧的外部虚拟键盘粘贴链路仍保留为 `./keyboard-paste.sh`：它不走浏览器 `paste` 事件，也不依赖 IBus `commit_text()`；它会读取剪贴板，然后通过 Linux `/dev/uinput` 创建一个虚拟键盘，逐字模拟真实键盘输入。可在遇到不接受 IBus commit 的网页/应用时手动作为兜底使用。
+旧的外部虚拟键盘粘贴链路仍保留为 `./scripts/keyboard-paste.sh`：它不走浏览器 `paste` 事件，也不依赖 IBus `commit_text()`；它会读取剪贴板，然后通过 Linux `/dev/uinput` 创建一个虚拟键盘，逐字模拟真实键盘输入。可在遇到不接受 IBus commit 的网页/应用时手动作为兜底使用。
 
 使用步骤：
 
@@ -195,7 +195,7 @@ export VOICE_IME_ENGLISH_USER_DICT=~/.local/share/ibus-voice-ime/english.json
 
 ```bash
 cd ~/ibus-voice-ime
-./keyboard-paste.sh --check
+./scripts/keyboard-paste.sh --check
 ```
 
 如果提示无法写入 `/dev/uinput`，可临时授权：
@@ -218,7 +218,7 @@ export VOICE_IME_CLIPBOARD_PREPARE_HINT_MS=1200       # “正在粘贴”提示
 export VOICE_IME_CLIPBOARD_COMMIT_DELAY_MS=300        # 读取剪贴板后额外提交延迟
 export VOICE_IME_CLIPBOARD_MAX_CHARS=20000            # 最大提交字符数
 
-# 仅用于手动运行 ./keyboard-paste.sh 兜底链路：
+# 仅用于手动运行 ./scripts/keyboard-paste.sh 兜底链路：
 export VOICE_IME_KEYBOARD_PASTE_DELAY_MS=1000
 export VOICE_IME_KEYBOARD_PASTE_MODE=smart
 export VOICE_IME_KEYBOARD_PASTE_TYPING_ENGINE=xkb:us::eng
@@ -226,7 +226,7 @@ export VOICE_IME_KEYBOARD_PASTE_KEY_DELAY_MS=4
 export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 ```
 
-外部虚拟键盘逐字输入脚本仍保留为 `./keyboard-paste.sh`，仅作为不接受 IBus commit 的手动兜底。
+外部虚拟键盘逐字输入脚本仍保留为 `./scripts/keyboard-paste.sh`，仅作为不接受 IBus commit 的手动兜底。
 
 ## 语音输入
 
@@ -546,7 +546,7 @@ tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sid
 - **语音输入没反应 / 录音失败**：`arecord -l` 确认有采集卡；日志出现「已回退系统默认录音源」属正常降级；确认没有其他程序独占麦克风。
 - **首次按 Ctrl+Alt+V 后等很久**：Qwen3-ASR sidecar 首次启动要把模型加载进显存，视盘速 30 秒到数分钟；之后有常驻/预热机制。
 - **无 NVIDIA GPU**：本地后端不可用，切换云端：`./scripts/switch-mimo-cloud-asr.sh cn`（小米 MiMo）或 `./scripts/switch-volc-bigmodel-asr.sh`（火山引擎豆包），均需自备 API Key。
-- **非 GNOME 桌面**：`install.sh` 的 gsettings 输入源注册与热键脚本不适用。手工集成思路：运行 `engine.py --xml` 生成组件描述文件放进 IBus 扫描路径（`IBUS_COMPONENT_PATH`），热键用桌面自己的全局快捷键机制调 `voice-toggle.sh`。
+- **非 GNOME 桌面**：`install.sh` 的 gsettings 输入源注册与热键脚本不适用。手工集成思路：运行 `engine.py --xml` 生成组件描述文件放进 IBus 扫描路径（`IBUS_COMPONENT_PATH`），热键用桌面自己的全局快捷键机制调 `scripts/voice-toggle.sh`。
 - **Ctrl+Alt+V 在某些终端/应用无效**：部分工具链不把该组合键转发给 IBus，安装脚本已注册 GNOME 全局快捷键兜底；其他桌面需自行绑定。
 - **候选质量一般**：跑 `./scripts/setup-rime-ice.sh` 部署雾凇拼音大词库；不跑则回退内置 `luna_pinyin_simp`。
 

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMAND="$ROOT_DIR/clipboard-paste.sh"
+COMMAND="$ROOT_DIR/scripts/clipboard-paste.sh"
 NAME="自定义语音输入法输入法粘贴"
 
 if ! command -v gsettings >/dev/null 2>&1; then

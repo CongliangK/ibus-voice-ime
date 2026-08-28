@@ -14,7 +14,7 @@ if [[ -x "$ROOT_DIR/scripts/check-environment.sh" ]]; then
   echo
 fi
 
-chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py" "$ROOT_DIR/run-engine.sh" "$ROOT_DIR/voice-toggle.sh" "$ROOT_DIR/clipboard-paste.sh" "$ROOT_DIR/keyboard-paste.sh" "$ROOT_DIR/src/ibus_voice_ime/keyboard_type_clipboard.py" "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-keyboard-paste-hotkey.sh" "$ROOT_DIR/scripts/uninstall-gnome-clipboard-paste-hotkey.sh" 2>/dev/null || chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py"
+chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py" "$ROOT_DIR/run-engine.sh" "$ROOT_DIR/scripts/voice-toggle.sh" "$ROOT_DIR/scripts/clipboard-paste.sh" "$ROOT_DIR/scripts/keyboard-paste.sh" "$ROOT_DIR/src/ibus_voice_ime/keyboard_type_clipboard.py" "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-keyboard-paste-hotkey.sh" "$ROOT_DIR/scripts/uninstall-gnome-clipboard-paste-hotkey.sh" 2>/dev/null || chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py"
 PYTHON="$ROOT_DIR/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3)"

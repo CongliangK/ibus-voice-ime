@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMAND="$ROOT_DIR/keyboard-paste.sh"
+COMMAND="$ROOT_DIR/scripts/keyboard-paste.sh"
 BINDING="<Control><Alt>p"
 NAME="自定义语音输入法键盘粘贴"
 

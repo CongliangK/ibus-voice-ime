@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMMAND="$ROOT_DIR/voice-toggle.sh"
+COMMAND="$ROOT_DIR/scripts/voice-toggle.sh"
 BINDING="<Control><Alt>v"
 NAME="自定义语音输入法语音输入"
 
