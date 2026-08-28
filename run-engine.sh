@@ -46,6 +46,25 @@ _INHERITED_RIME_LIBRARY="${VOICE_IME_RIME_LIBRARY:-}"
 _INHERITED_RIME_SHARED_DATA_DIR="${VOICE_IME_RIME_SHARED_DATA_DIR:-}"
 _INHERITED_RIME_STAGING_DIR="${VOICE_IME_RIME_STAGING_DIR:-}"
 _INHERITED_RIME_USER_DATA_DIR="${VOICE_IME_RIME_USER_DATA_DIR:-}"
+
+# 陈旧会话环境自愈（2026-08-28 打字事故根因）：ibus-daemon 继承的是登录时
+# 的会话环境；仓库被迁移/删除后，其中的绝对路径全部失效，而 environment.d
+# 的新值要等下次登录才进入会话环境。继承的"救援值"只有指向真实存在的路径
+# 时才有效——指向不存在路径的继承值视为陈旧并忽略，让 environment.d 与
+# 本仓库默认值接管。
+_forget_stale_inherit() {  # $1=_INHERITED_* 变量名：值非空且路径不存在时置空
+  local -n var="$1"
+  if [[ -n "$var" && ! -e "$var" ]]; then
+    echo "[run-engine] 自愈：继承的 $1 指向不存在的路径（$var），已忽略" >&2
+    var=""
+  fi
+  return 0
+}
+_forget_stale_inherit _INHERITED_RIME_LIBRARY
+_forget_stale_inherit _INHERITED_RIME_SHARED_DATA_DIR
+_forget_stale_inherit _INHERITED_RIME_STAGING_DIR
+_forget_stale_inherit _INHERITED_RIME_USER_DATA_DIR
+
 ENV_CONF="$HOME/.config/environment.d/ibus-voice-ime.conf"
 if [[ -r "$ENV_CONF" ]]; then
   set -a
@@ -126,6 +145,11 @@ export VOICE_IME_QWEN_ASR="${VOICE_IME_QWEN_ASR:-1}"
 export VOICE_IME_MIMO_ASR="${VOICE_IME_MIMO_ASR:-0}"
 export VOICE_IME_MIMO_CLOUD_ASR="${VOICE_IME_MIMO_CLOUD_ASR:-0}"
 export VOICE_IME_QWEN_ASR_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
+# QWEN 同类自愈：陈旧的继承路径（仓库迁移残留）不得压过 env 文件/默认值。
+[[ -n "$VOICE_IME_QWEN_ASR_MODEL_PATH" && ! -e "$VOICE_IME_QWEN_ASR_MODEL_PATH" ]] && {
+  echo "[run-engine] 自愈：继承的 VOICE_IME_QWEN_ASR_MODEL_PATH 指向不存在的路径，已忽略" >&2
+  unset VOICE_IME_QWEN_ASR_MODEL_PATH
+}
 export VOICE_IME_QWEN_ASR_MODEL_PATH="${VOICE_IME_QWEN_ASR_MODEL_PATH:-$ROOT_DIR/vendor/models/qwen3-asr/Qwen3-ASR-1.7B}"
 export VOICE_IME_QWEN_ASR_PYTHON="${VOICE_IME_QWEN_ASR_PYTHON:-$ROOT_DIR/.venv-qwen-asr/bin/python}"
 export VOICE_IME_QWEN_ASR_HOST="${VOICE_IME_QWEN_ASR_HOST:-127.0.0.1}"
@@ -158,9 +182,13 @@ export VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID="${VOICE_IME_VOLC_BIGMODEL_RESOURCE_I
 export VOICE_IME_VOLC_BIGMODEL_MODEL_NAME="${VOICE_IME_VOLC_BIGMODEL_MODEL_NAME:-bigmodel}"
 export VOICE_IME_VOLC_API_KEY_SECRET="${VOICE_IME_VOLC_API_KEY_SECRET:-VOLC_BIGMODEL_ASR_API_KEY}"
 
-# Strict policy: LLM post-processing is always disabled.  Ignore inherited
-# VOICE_IME_LLM_POSTPROCESS/VOICE_IME_LLM_INTERNAL values so no LLM rewrite
-# layer or built-in llama.cpp sidecar is used by the engine.
+# LLM 后处理策略：云端 OpenAI 兼容接口是唯一受支持的开启方式，通过
+# ~/.config/ibus-voice-ime/llm.json 显式配置（scripts/setup-llm-cloud.sh 生成，
+# 含 base_url + api_key + 精确 model ID，不做模型列表查询）。该文件存在且合法时，
+# 其配置优先于下面所有 VOICE_IME_LLM_* 环境变量。
+# 本地 llama.cpp 小模型实测会改坏听写原文，遗留 env/sidecar 实验路径在此
+# 一律压制：忽略继承的 VOICE_IME_LLM_POSTPROCESS/VOICE_IME_LLM_INTERNAL。
+export VOICE_IME_LLM_CONFIG="${VOICE_IME_LLM_CONFIG:-$HOME/.config/ibus-voice-ime/llm.json}"
 export VOICE_IME_LLM_POSTPROCESS=0
 export VOICE_IME_LLM_INTERNAL=0
 export VOICE_IME_LLM_RERANK=0
@@ -171,6 +199,7 @@ export VOICE_IME_LLM_MODEL="${VOICE_IME_LLM_MODEL:-qwen3.5-0.8b}"
 export VOICE_IME_LLM_CANDIDATES="${VOICE_IME_LLM_CANDIDATES:-1}"
 export VOICE_IME_LLM_TIMEOUT="${VOICE_IME_LLM_TIMEOUT:-4}"
 export VOICE_IME_LLM_TEMPERATURE="${VOICE_IME_LLM_TEMPERATURE:-0.1}"
+export VOICE_IME_LLM_MIN_CHARS="${VOICE_IME_LLM_MIN_CHARS:-50}"
 export VOICE_IME_LLM_FALLBACK_RAW="${VOICE_IME_LLM_FALLBACK_RAW:-1}"
 export VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$LOG_DIR/llm.jsonl}"
 export VOICE_IME_LLM_AGGRESSIVE="${VOICE_IME_LLM_AGGRESSIVE:-0}"

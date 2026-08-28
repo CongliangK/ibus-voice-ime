@@ -107,9 +107,38 @@ check_ibus_registration() {
     else
       warn "引擎在运行，但不是本仓库的实例（重启后生效：./scripts/ibus-restart.sh）"
     fi
+    check_stale_engine_env
   else
     warn "引擎进程未运行（可能未启用输入法；重启 IBus 后复查）"
   fi
+}
+
+check_stale_engine_env() {
+  # 2026-08-28 打字事故根因：登录会话缓存了仓库迁移前删除的旧绝对路径，
+  # ibus-daemon 原样传给引擎，librime 加载失败 → 打字瘫痪（语音不受影响）。
+  # run-engine.sh 已有自愈，这里检查"活引擎进程"的环境里是否仍有指向
+  # 不存在路径的 VOICE_IME_* 变量（自愈失效/旧引擎未重启时报警）。
+  local pid dead=0
+  for pid in $(pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus"); do
+    [[ -r "/proc/$pid/environ" ]] || continue
+    while IFS= read -r line; do
+      case "$line" in
+        VOICE_IME_*=/*ibus-voice-ime*)
+          local var="${line%%=*}" val="${line#*=}"
+          if [[ -n "$val" && ! -e "$val" ]]; then
+            fail "引擎环境 $var 指向不存在的路径：$val"
+            dead=$((dead + 1))
+          fi
+          ;;
+      esac
+    done < <(tr '\0' '\n' < "/proc/$pid/environ")
+  done
+  if [[ $dead -eq 0 ]]; then
+    ok "引擎进程环境无失效路径（陈旧会话环境自愈正常）"
+  else
+    FAILED_ITEMS+=(stale-env)
+  fi
+  return 0
 }
 
 # ----------------------------------------------------------- Rime 词库态 --
@@ -232,6 +261,48 @@ check_asr_backend() {
   fi
 }
 
+# ------------------------------------------------------ LLM 云端后处理 --
+check_llm_cloud_config() {
+  header "LLM 云端后处理（OpenAI 兼容）"
+  local cfg="${VOICE_IME_LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ibus-voice-ime/llm.json}"
+  if [[ ! -f "$cfg" ]]; then
+    ok "未配置（默认关闭，走规则清理）。启用：./scripts/setup-llm-cloud.sh"
+    return
+  fi
+  local perms
+  perms="$(stat -c %a "$cfg" 2>/dev/null || echo '?')"
+  if [[ "$perms" != "600" ]]; then
+    warn "配置文件权限为 $perms（建议 chmod 600，内含 API Key）：$cfg"
+  fi
+  # 只做本地 JSON 解析/字段校验，不联网、不调用模型
+  local out
+  if out="$(PYTHONPATH="$ROOT_DIR/src" python3 -c '
+from ibus_voice_ime.text import llm_cloud_config
+cfg, problems = llm_cloud_config.load_report()
+if cfg is None:
+    print("INVALID")
+    for p in problems:
+        print("  - " + p)
+elif cfg.enabled:
+    print(f"OK {cfg.model} @ {cfg.base_url}（timeout={cfg.timeout}s）")
+else:
+    print("OFF（enabled=false，LLM 润色关闭）")
+' 2>&1)"; then
+    case "$out" in
+      OK*)  ok "${out#OK }" ;;
+      OFF*) ok "已配置但 enabled=false（LLM 润色关闭）" ;;
+      INVALID*)
+        warn "配置文件存在但未通过校验（LLM 已自动停用，语音输入不受影响）："
+        printf '%s\n' "${out#INVALID$'\n'}" | sed 's/^/         /'
+        warn "修复：编辑 $cfg 或重跑 ./scripts/setup-llm-cloud.sh"
+        ;;
+      *) warn "配置校验输出异常：$out" ;;
+    esac
+  else
+    warn "无法运行配置校验（python3/PYTHONPATH 异常）：$out"
+  fi
+}
+
 # ------------------------------------------------------------ 桌面集成 --
 check_desktop_integration() {
   header "桌面集成（GNOME）"
@@ -347,6 +418,14 @@ do_fix() {
           fail "setup-qwen-asr.sh 失败（网络/磁盘？）"
         fi
         ;;
+      stale-env)
+        echo "==> 引擎环境含失效路径，重启引擎（run-engine.sh 会自愈陈旧继承值）"
+        if "$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null 2>&1; then
+          fixed "引擎已重启，失效路径已自愈"
+        else
+          fail "ibus-restart.sh 失败，请手动重启或重新登录"
+        fi
+        ;;
       env-deps)
         echo "==> 环境依赖缺失需人工处理（见上方 check-environment 的 FAIL 项）"
         ;;
@@ -365,6 +444,7 @@ check_env_dependencies
 check_ibus_registration
 check_rime_assets
 check_asr_backend
+check_llm_cloud_config
 check_desktop_integration
 check_exec_bits
 
@@ -375,6 +455,7 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
   check_ibus_registration
   check_rime_assets
   check_asr_backend
+  check_llm_cloud_config
   check_desktop_integration
   check_exec_bits
 fi
