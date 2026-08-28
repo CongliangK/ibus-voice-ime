@@ -96,11 +96,11 @@ Ctrl+Alt+V（toggle：按一次开始，再按一次结束）
   → IBus commit_text 提交到当前光标
 ```
 
-- LLM 后处理（重写/重排）是**实验功能且当前被引擎强制关闭**：实测小模型后处理会改坏听写原文（改词、吞字、添加不存在内容），确定性规则清理已覆盖绝大多数脏数据。基础设施（内置 llama.cpp sidecar）保留供实验，见根 README 的现状声明。
+- **LLM 云端润色（可选）**：OpenCC 之后可接一个云端大模型做润色（补标点/去口水词），通过用户自有的 `~/.config/ibus-voice-ime/llm.json` 开启（OpenAI 兼容接口：base_url + api_key + 精确 model ID，不做模型列表查询；`scripts/setup-llm-cloud.sh` 生成）。接口失败自动回退原文。本地小模型路径（llama.cpp sidecar）实测会改坏听写原文，已被云端方案取代并被 `run-engine.sh` 钉死关闭。
 - 识别结果同时受**自定义词典**影响：三列格式（标准词 | 别名 | 常见误识别），前两列作为热词直传支持热词的云端后端，第三列做本地确定性整词替换。
 
 ## 配置体系
 
 - **单一事实源**：`~/.config/environment.d/ibus-voice-ime.conf`。`install.sh` 与各 `switch-*` / `setup-*` 脚本写入，`run-engine.sh` 每次启动加载（显式 export 的救援配置优先于文件旧值）。
 - **默认值层**：`run-engine.sh` 对全部 `VOICE_IME_*` 变量给出合理默认，环境文件缺项时引擎仍可运行。
-- **密钥策略**：云端 API Key 不落盘，运行时由 `run-engine.sh` 的 BWS 包装注入到引擎进程（有单元测试守护该策略）。
+- **密钥策略**：ASR 云端 Key 不落盘，运行时由 `run-engine.sh` 的 BWS 包装注入到引擎进程（有单元测试守护该策略）。唯一例外是 LLM 云端润色：用户以 0600 权限自持 `~/.config/ibus-voice-ime/llm.json`（`.gitignore` 双保险，绝不入库）。

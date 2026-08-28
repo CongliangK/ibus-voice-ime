@@ -2,8 +2,15 @@
 """Optional LLM cleanup/reranking for voice dictation.
 
 Uses an OpenAI-compatible Chat Completions endpoint via stdlib urllib, so it
-works with the built-in llama.cpp sidecar, Ollama, LM Studio, llama.cpp server,
-OpenAI-compatible cloud APIs, and does not add runtime dependencies.
+works with any cloud provider exposing that API and does not add runtime
+dependencies.
+
+The recommended configuration is a cloud endpoint described by the user-owned
+JSON file ``~/.config/ibus-voice-ime/llm.json`` (see ``llm_cloud_config.py``):
+the user supplies base_url + api_key + an exact model ID, and no model-list
+discovery is performed.  The legacy local llama.cpp sidecar path remains
+available for experiments via environment variables but is pinned off by
+``run-engine.sh`` — a local 0.8B model measurably degrades dictation text.
 """
 from __future__ import annotations
 
@@ -15,34 +22,49 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from ibus_voice_ime.memory import voice_terms
-from ibus_voice_ime.text import llm_runtime, text_postprocess
+from ibus_voice_ime.text import llm_cloud_config, llm_runtime, text_postprocess
 
 DEFAULT_BASE_URL = llm_runtime.DEFAULT_BASE_URL
 DEFAULT_MODEL = llm_runtime.DEFAULT_MODEL_ALIAS
 
 MODE_INSTRUCTIONS: dict[str, str] = {
-    "dictation": "主要任务是积极补齐标点。除添加/调整标点和必要空白外，尽量不要改动任何文字。",
+    "dictation": "主要任务：补齐标点，并把内容整理成适合 AI 消费的规范 Markdown——任务/指令整理成任务简报（目标/背景/任务/约束/验收），叙述内容按主题分节。除标点、空白与结构化排版外，尽量不要改动任何文字。",
     "literal": "尽量原样输出；除添加/调整标点、空白和明显识别错误外，不要改动文字。",
     "markdown": "积极补齐标点；不要主动整理结构，除非原文已经明显是 Markdown。",
-    "prompt": "积极补齐标点；不要重写成更强的提示词，除标点外尽量不改文字。",
+    "prompt": "补齐标点并整理成清晰的提示词/任务简报结构（目标/背景/任务/约束/验收）；不得自作主张追加用户没说过的要求。",
     "command": "尽量原样保留命令、路径、参数和英文符号；只在安全时补标点。",
 }
 
-SYSTEM_PROMPT = """你是语音输入法的轻量后处理器。
+SYSTEM_PROMPT = """你是语音输入法的后处理器。用户的听写绝大多数是发给 AI 编程助手的指令，你的任务是把口语听写整理成「AI 可直接执行」的规范 Markdown。
 
-当前优先目标：积极补齐中文标点。听写文本不能整段没有标点；应该根据语气和语义加入逗号、句号、问号、顿号、分号或冒号。
+当前优先目标：积极补齐中文标点；判断内容性质，用最合适的结构输出。
+
+当内容是给 AI/智能体的任务或指令时，整理成任务简报。只为听写中实际存在的部分生成对应小节（用原文关键词，没有就跳过该节，绝不编造）：
+## 目标 —— 一句话说清要做什么（只能压缩用户原话）；
+## 背景 —— 已知的上下文、现状、环境；
+## 任务 —— 分解为编号步骤，每步引用用户原话；
+## 约束 —— 用户提到的限制、禁区、注意事项（如「不要动某文件」）；
+## 验收 —— 用户给出的完成标准（如覆盖率、预期行为）。
+
+当内容是叙述、讨论或问答时，按主题用 # / ## / ### 标题组织，并列内容用 - 分点；只有真正的连续叙述才保持自然段落；不要强行套任务简报。
+
+通用规则：
+- **积极分点（重要）**：凡是并列的要点、步骤、选项、条件、对象、要求、注意事项，一律用 `- ` 无序列表逐条列出；哪怕挤在同一句话里、用顿号/逗号串联的并列项，也要拆成列表。原则是「能分点就分点」，避免把并列内容留在大段文字里；
+- 顺序性动作用 `1. 2. 3.` 编号列表，非顺序的并列用 `- `；
+- 命令、路径、文件名、代码、配置项用行内代码或代码块（```）包裹；
+- 听写文本不能整段没有标点；按语气和语义加入逗号、句号、问号、顿号、分号或冒号。
 
 严格限制：
-1. 除添加/调整标点符号和必要空白外，尽量不要改动任何文字。
-2. 不要润色、总结、压缩、扩写、改写句式、重排内容、替换主语，不能把用户的话改成命令。
-3. 不要丢失信息，不要新增信息，不要改变主语、人称、语气、顺序、命令/疑问/否定含义。
-4. 只有在极其明确时，才修正明显识别错字或删除明确无意义的独立口水词；不确定就保留原词，只补标点。
+1. 只做标点、空白与结构化排版，不改动任何文字本身的含义。
+2. 可以拆分长句、归类分节；但不要润色、扩写、替换主语，尤其不能自作主张追加用户没说过的要求、步骤或标准。
+3. 不要丢失信息；小节标题和「目标」只能使用或压缩原文已有内容。
+4. 只有在极其明确时，才修正明显识别错字或删除明确无意义的独立口水词；不确定就保留原词。
 
 默认使用简体中文输出；如果原文或模型输出里出现繁体中文，请转换为简体中文。
-只输出处理后的文本，不要解释，不要加引号。
+只输出整理后的 Markdown，不要解释，不要把整个输出包进代码块，不要加引号。
 """.strip()
 
 CANDIDATE_SYSTEM_PROMPT = """你是语音输入法的轻量后处理器。
@@ -85,10 +107,28 @@ def _env_float(name: str, default: float) -> float:
 
 
 def enabled() -> bool:
-    # Hard policy: LLM post-processing is disabled regardless of environment
-    # variables.  Keep this false so status/UI paths and direct callers cannot
-    # accidentally enable the LLM rewrite layer.
-    return False
+    """Whether LLM post-processing is active.
+
+    Primary opt-in: a valid cloud config file (``~/.config/ibus-voice-ime/
+    llm.json``, see ``llm_cloud_config``).  Its ``enabled`` flag rules.  The
+    legacy env/local-sidecar path can only be turned on via
+    ``VOICE_IME_LLM_POSTPROCESS=1`` and is pinned off by ``run-engine.sh``,
+    so it stays an explicitly experimental escape hatch.
+    """
+    cloud = llm_cloud_config.load()
+    if cloud is not None:
+        return cloud.enabled
+    return _env_bool("VOICE_IME_LLM_POSTPROCESS", False)
+
+
+def active_model_label() -> str:
+    """Model name to show in the processing overlay / status surfaces."""
+    cloud = llm_cloud_config.load()
+    if cloud is not None:
+        return cloud.model
+    if llm_runtime.internal_enabled():
+        return llm_runtime.model_alias()
+    return os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL)
 
 
 def rerank_enabled() -> bool:
@@ -131,6 +171,46 @@ def _resolve_base_url() -> str:
     return configured or DEFAULT_BASE_URL
 
 
+class _Endpoint(NamedTuple):
+    base_url: str
+    model: str
+    api_key: str
+    timeout: float
+    temperature: float
+    max_tokens: int
+    extra_body: dict = {}
+
+
+def _active_endpoint(mode: str) -> _Endpoint:
+    """Resolve the endpoint to call.
+
+    The cloud JSON config is authoritative whenever present and valid — the
+    environment defaults exported by run-engine.sh (local sidecar URL, key
+    "local", 4s timeout) must never leak into a cloud call.  Without it we
+    fall back to the legacy env/sidecar experimental path.
+    """
+    cloud = llm_cloud_config.load()
+    if cloud is not None:
+        return _Endpoint(
+            base_url=cloud.base_url,
+            model=cloud.model,
+            api_key=cloud.api_key,
+            timeout=cloud.timeout,
+            temperature=cloud.temperature,
+            max_tokens=cloud.max_tokens,
+            extra_body=cloud.extra_body,
+        )
+    temperature = _env_float("VOICE_IME_LLM_TEMPERATURE", 0.25 if _aggressive_enabled(mode) else 0.1)
+    return _Endpoint(
+        base_url=_resolve_base_url(),
+        model=llm_runtime.model_alias() if llm_runtime.internal_enabled() else os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL),
+        api_key=os.environ.get("VOICE_IME_LLM_API_KEY", "local"),
+        timeout=_env_float("VOICE_IME_LLM_TIMEOUT", 4.0),
+        temperature=temperature,
+        max_tokens=_env_int("VOICE_IME_LLM_MAX_TOKENS", 1024),
+    )
+
+
 def _load_custom_dictionary() -> str:
     # Merged explicit voice dictionary + frequently typed English memory.
     # The name is kept for compatibility with the rest of this module.
@@ -149,7 +229,8 @@ def _build_messages(raw_text: str, mode: str) -> list[dict[str, str]]:
         f"模式：{mode}",
         f"要求：{mode_instruction}",
         "标点要求：要更积极地补标点，不能整段无标点；优先添加逗号、句号、问号、顿号、分号或冒号。",
-        "文字要求：别的都不改；除标点和必要空白外，不要润色、总结、压缩、扩写、重排或改写主语；默认输出简体中文。",
+        "格式要求：输出规范 Markdown，能分点就分点——并列的要点/步骤/条件/要求一律用 - 列表逐条呈现（顿号串联的并列也要拆开），顺序动作用编号列表。若内容是给 AI/智能体的指令，整理成任务简报——## 目标 / ## 背景 / ## 任务（编号步骤）/ ## 约束 / ## 验收，只为听写中实际存在的部分生成小节，标题用原文关键词；连续叙述才保持自然段落；命令/路径/代码用行内代码或代码块；不强行套结构。",
+        "文字要求：除标点、空白与结构化排版外，不要润色、总结、压缩、扩写或改写主语；不得追加用户没说过的要求、步骤或标准；默认输出简体中文。",
     ]
     if dictionary:
         user_parts.append("请优先正确保留这些用户词典/技术词：\n" + dictionary)
@@ -199,8 +280,9 @@ def _extract_content(response: dict[str, Any]) -> str:
 
 
 def _chat_completion(messages: list[dict[str, str]], *, base_url: str, model: str, timeout: float,
-                     temperature: float, max_tokens: int) -> str:
-    api_key = os.environ.get("VOICE_IME_LLM_API_KEY", "local")
+                     temperature: float, max_tokens: int, api_key: str = "",
+                     extra_body: dict | None = None) -> str:
+    api_key = api_key or os.environ.get("VOICE_IME_LLM_API_KEY", "local")
     payload = {
         "model": model,
         "messages": messages,
@@ -208,6 +290,10 @@ def _chat_completion(messages: list[dict[str, str]], *, base_url: str, model: st
         "max_tokens": max_tokens,
         "stream": False,
     }
+    if extra_body:
+        # 服务商特有参数（如 GLM 关思考 {"thinking": {"type": "disabled"}}）。
+        # 来自用户自己的 JSON 配置，允许覆盖默认字段。
+        payload.update(extra_body)
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -219,18 +305,43 @@ def _chat_completion(messages: list[dict[str, str]], *, base_url: str, model: st
             body = resp.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"LLM HTTP {exc.code}: {detail}") from exc
+        hint = ""
+        if exc.code in (400, 404):
+            hint = "；请检查 base_url 是否为 OpenAI 兼容根地址（通常以 /v1 结尾）、model 是否为完全正确的模型 ID（本工具不做模型列表查询，ID 必须与服务商完全一致）"
+        elif exc.code in (401, 403):
+            hint = "；请检查 api_key 是否有效且有权限"
+        elif exc.code == 429:
+            hint = "；请求频率或额度受限"
+        raise RuntimeError(f"LLM HTTP {exc.code}: {detail}{hint}") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", exc)
+        raise RuntimeError(f"LLM 连接失败：{reason}；请检查 base_url、网络与 timeout 配置") from exc
 
     result = json.loads(body)
     content = _extract_content(result)
     if not content:
-        raise RuntimeError("LLM 返回空结果")
+        finish = ""
+        choices = result.get("choices") or []
+        if choices and isinstance(choices[0], dict):
+            finish = str(choices[0].get("finish_reason") or "")
+        hint = ""
+        if finish == "length":
+            hint = "；多为思考型模型耗尽 max_tokens：调大 max_tokens，或在配置 extra_body 里关闭思考（如 {\"thinking\": {\"type\": \"disabled\"}}）"
+        raise RuntimeError(f"LLM 返回空结果（finish_reason={finish or '未知'}）{hint}")
     return content.strip()
 
 
 def _strip_wrappers(text: str) -> str:
-    text = text.strip().strip("`｣「『』\"'").strip()
-    return text_postprocess.cleanup_punctuation(text).strip()
+    text = text.strip()
+    # 有些模型会把整个输出包进一个代码围栏（```markdown ... ```）或引号里。
+    # 只做这种"去包裹"，不做任何标点/空格重排——云端 LLM 已经排好版，
+    # 机械清理（重复标点折叠、CJK-拉丁空格删除等）反而会破坏刻意排的
+    # 格式（如 "node 20 然后" 被挤成 "node 20然后"）。那些规则只服务于
+    # 无 LLM 的确定性回退链路。
+    fenced = re.match(r"^```[\w+-]*[ \t]*\n(.*)\n```[ \t]*$", text, re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    return text.strip().strip("｣「『』\"'").strip()
 
 
 def _parse_candidate_array(text: str) -> list[str]:
@@ -270,7 +381,8 @@ def _dedupe(items: list[str]) -> list[str]:
 
 
 def generate_candidates(raw_text: str, *, mode: str, base_url: str, model: str,
-                        timeout: float, temperature: float, max_tokens: int) -> list[str]:
+                        timeout: float, temperature: float, max_tokens: int,
+                        api_key: str = "", extra_body: dict | None = None) -> list[str]:
     count = max(1, min(_env_int("VOICE_IME_LLM_CANDIDATES", 3), 5))
     if count <= 1:
         content = _chat_completion(
@@ -280,6 +392,8 @@ def generate_candidates(raw_text: str, *, mode: str, base_url: str, model: str,
             timeout=timeout,
             temperature=temperature,
             max_tokens=max_tokens,
+            api_key=api_key,
+            extra_body=extra_body,
         )
         return [_strip_wrappers(content)]
 
@@ -290,6 +404,8 @@ def generate_candidates(raw_text: str, *, mode: str, base_url: str, model: str,
         timeout=timeout,
         temperature=max(temperature, 0.2),
         max_tokens=max_tokens,
+        api_key=api_key,
+        extra_body=extra_body,
     )
     candidates = _parse_candidate_array(content)
     if not candidates:
@@ -584,28 +700,30 @@ def refine(raw_text: str, *, mode: str | None = None) -> str:
     if not raw_text or not enabled():
         return raw_text
 
-    min_chars = _env_int("VOICE_IME_LLM_MIN_CHARS", 8)
+    # Short utterances (quick words/phrases) rarely benefit from polish but
+    # still pay the cloud latency/cost, so they bypass the LLM entirely.
+    # The JSON config's min_chars is authoritative; the env var only applies
+    # on the legacy no-config path.
+    cloud = llm_cloud_config.load()
+    min_chars = cloud.min_chars if cloud is not None else _env_int("VOICE_IME_LLM_MIN_CHARS", 50)
     if len(raw_text) < min_chars:
         return raw_text
 
     mode = (mode or os.environ.get("VOICE_IME_VOICE_MODE", "dictation")).strip().lower()
-    base_url = _resolve_base_url()
-    model = llm_runtime.model_alias() if llm_runtime.internal_enabled() else os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL)
-    timeout = _env_float("VOICE_IME_LLM_TIMEOUT", 4.0)
-    default_temperature = 0.25 if _aggressive_enabled(mode) else 0.1
-    temperature = _env_float("VOICE_IME_LLM_TEMPERATURE", default_temperature)
-    max_tokens = _env_int("VOICE_IME_LLM_MAX_TOKENS", 1024)
+    ep = _active_endpoint(mode)
 
     if trust_llm_output() or not rerank_enabled():
         final_text = _chat_completion(
             _build_messages(raw_text, mode),
-            base_url=base_url,
-            model=model,
-            timeout=timeout,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            base_url=ep.base_url,
+            model=ep.model,
+            timeout=ep.timeout,
+            temperature=ep.temperature,
+            max_tokens=ep.max_tokens,
+            api_key=ep.api_key,
+            extra_body=ep.extra_body,
         )
-        final_text = text_postprocess.cleanup_punctuation(_strip_wrappers(final_text)).strip()
+        final_text = _strip_wrappers(final_text)
         _log(raw_text, final_text)
         return final_text
 
@@ -613,14 +731,16 @@ def refine(raw_text: str, *, mode: str | None = None) -> str:
         generated = generate_candidates(
             raw_text,
             mode=mode,
-            base_url=base_url,
-            model=model,
-            timeout=timeout,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            base_url=ep.base_url,
+            model=ep.model,
+            timeout=ep.timeout,
+            temperature=ep.temperature,
+            max_tokens=ep.max_tokens,
+            api_key=ep.api_key,
+            extra_body=ep.extra_body,
         )
         final_text, scored = rerank(raw_text, generated, mode=mode)
-        final_text = text_postprocess.cleanup_punctuation(final_text).strip()
+        final_text = final_text.strip()
         _log(raw_text, final_text, candidates=scored)
         return final_text
 
@@ -638,6 +758,7 @@ def refine_with_fallback(raw_text: str, *, mode: str | None = None) -> str:
 
 
 __all__ = [
+    "active_model_label",
     "enabled",
     "generate_candidates",
     "trust_llm_output",

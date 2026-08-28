@@ -174,6 +174,25 @@ def cleanup_punctuation(text: str) -> str:
     return text
 
 
+# Markdown 代码片段：围栏代码块（```...```）与行内代码（`...`，不含换行）。
+_MD_CODE_SPAN_RE = re.compile(r"(```[\w+-]*[^\n]*\n?.*?\n?```|`[^`\n]+`)", re.DOTALL)
+
+
+def cleanup_punctuation_keep_code(text: str) -> str:
+    """Markdown-safe variant of :func:`cleanup_punctuation`.
+
+    LLM 输出整理成 Markdown 后会包含代码块/行内代码，而重复标点折叠规则
+    会把代码里的 `::`、`...` 等当成标点误伤（例如 `std::vector` 变成
+    `std：vector`）。这里把文本按代码片段切开，只在代码之外做清理。
+    """
+    if not text:
+        return text
+    return "".join(
+        part if part.startswith("`") else cleanup_punctuation(part)
+        for part in _MD_CODE_SPAN_RE.split(text)
+    )
+
+
 def _looks_like_code_or_command(text: str) -> bool:
     ascii_tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_./:+\-]*", text)
     cjk_count = len(_CJK_RE.findall(text))

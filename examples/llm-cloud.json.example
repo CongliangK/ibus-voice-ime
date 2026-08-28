@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "base_url": "在这里填入服务商的 OpenAI 兼容根地址，通常以 /v1 结尾",
+  "api_key": "在这里填入 API Key",
+  "model": "在这里填入完全正确的模型 ID",
+  "timeout": 15,
+  "temperature": 0.1,
+  "max_tokens": 1024,
+  "min_chars": 50,
+  "extra_body": {}
+}

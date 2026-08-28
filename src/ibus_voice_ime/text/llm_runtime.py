@@ -53,7 +53,13 @@ def internal_enabled() -> bool:
     Default is auto: use the sidecar unless the user explicitly configured a
     different VOICE_IME_LLM_BASE_URL.  Users can force it with
     VOICE_IME_LLM_INTERNAL=1 or disable it with VOICE_IME_LLM_INTERNAL=0.
+    A valid cloud JSON config (~/.config/ibus-voice-ime/llm.json) always takes
+    precedence — the local sidecar must never shadow a configured cloud model.
     """
+    from ibus_voice_ime.text import llm_cloud_config
+
+    if llm_cloud_config.load() is not None:
+        return False
     raw = os.environ.get("VOICE_IME_LLM_INTERNAL")
     if raw is not None:
         return _env_bool("VOICE_IME_LLM_INTERNAL", True)

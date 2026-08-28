@@ -65,9 +65,9 @@ MiMo Token Plan（OpenAI-compatible）与火山豆包 bigmodel（异步提交 + 
 | librime + Rime 官方数据（brise） | 键盘输入引擎与基础方案 | 仓库内捆绑 `vendor/rime/` |
 | 雾凇拼音 rime-ice（+ 可选 zhwiki / moegirl） | 默认拼音方案与词库 | 核心 schema 捆绑；大词库脚本下载 |
 | OpenCC | 繁简转换 | 仓库内捆绑（lib + 数据） |
-| Qwen3-ASR / MiMo-V2.5-ASR / Qwen3.5-0.8B 模型 | 识别与（实验性）后处理推理 | 安装脚本下载，不进 git |
+| Qwen3-ASR / MiMo-V2.5-ASR 模型 | 识别推理 | 安装脚本下载，不进 git |
 | faster-whisper（CTranslate2）、vosk、torch/transformers | 识别推理实现 | pip 安装 |
-| llama.cpp | 实验性 LLM sidecar（当前禁用） | 安装脚本下载 |
+| llama.cpp | 遗留本地 LLM sidecar（已被云端 OpenAI 兼容后处理取代，默认禁用） | 安装脚本下载 |
 | 小米 / 火山云 ASR | 云端识别服务 | 仅 API 集成 |
 
 一句话总结：**输入法框架接入、librime 绑定、语音全链路（录音→预处理→sidecar→后处理→提交）、记忆与粘贴增强、安装与验证工具链是自研；拼音算法与词库、识别模型本体、繁简数据是复用。**

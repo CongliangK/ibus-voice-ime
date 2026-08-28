@@ -1502,7 +1502,7 @@ class VoiceCustomEngine(IBus.Engine):
 
     def _voice_processing_detail(self, llm: bool = False) -> str:
         if llm and llm_postprocess.enabled():
-            return os.environ.get("VOICE_IME_LLM_MODEL", "qwen3.5-0.8b")
+            return llm_postprocess.active_model_label()
         backend = os.environ.get("VOICE_IME_ASR_BACKEND", "qwen3-asr").strip().lower()
         if backend in {"qwen", "qwen3", "qwen3-asr", "qwen-asr"}:
             model = os.environ.get("VOICE_IME_QWEN_ASR_MODEL", "1.7b")

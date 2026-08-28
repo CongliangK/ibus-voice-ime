@@ -250,7 +250,7 @@ export VOICE_IME_KEYBOARD_PASTE_MAX_CHARS=20000
 默认是 toggle 模式：按一次开始录音，再按一次停止录音、识别并提交到当前光标位置。状态弹窗默认关闭。现在语音流水线是：
 
 ```text
-录音 wav -> STT 初稿 -> 规则清理 ->（LLM 重排为实验功能，默认禁用）-> 提交到当前光标
+录音 wav -> STT 初稿 -> 规则清理 ->（可选：云端 LLM 润色，JSON 配置开启）-> 提交到当前光标
 ```
 
 默认 STT 后端是本地 `Qwen3-ASR` sidecar（0.6B / 1.7B，默认 1.7B）：模型从 `vendor/models/qwen3-asr/` 加载，首次语音时由 engine 进程自动拉起本地 HTTP sidecar（端口 18081，bf16，cuda:0）。如需切换模型：
@@ -452,45 +452,43 @@ export VOICE_IME_CHINESE_SCRIPT=traditional # 可选：简体转繁体
 
 默认使用系统配置 `/usr/share/opencc/t2s.json`；如需自定义可设置 `VOICE_IME_OPENCC_T2S_CONFIG=/path/to/t2s.json`。LLM 后处理开启时，也会被提示默认输出简体中文，但最终仍以 OpenCC 兜底转换为准。
 
-### LLM 后处理 / 重排（实验功能，当前已禁用）
+### LLM 云端后处理（OpenAI 兼容接口，可选）
 
-**现状声明**：LLM 后处理是实验功能，当前被引擎**强制关闭**——`run-engine.sh` 在启动时无条件设置 `VOICE_IME_LLM_POSTPROCESS=0 / VOICE_IME_LLM_INTERNAL=0 / VOICE_IME_LLM_RERANK=0`，且 `llm_postprocess.enabled()` 硬编码返回 False。也就是说：设置环境变量开启不了它，`scripts/setup-llm.sh` 安装的 llama.cpp sidecar 不会被语音流程调用。默认链路是 **Qwen3-ASR + 规则清理**后直接提交。
-
-这样设计的原因：实测小模型后处理会改坏原始听写内容（改词、吞字、加不存在的内容），确定性规则清理已覆盖绝大多数脏数据。要真正启用需修改引擎代码解除强制关闭并自担改写质量风险（`src/ibus_voice_ime/asr/voice.py` 的 postprocess 链、`run-engine.sh` 的 Strict policy 段、`text/llm_postprocess.py` 的 `enabled()`）。
-
-实验用的基础设施仍然保留：内置管理的 `llama.cpp` sidecar（`llama-server` + GGUF 模型，ModelScope `Qwen/Qwen3.5-0.8B`），`./scripts/setup-llm.sh` 可完成安装与预置。
+STT 之后的文本润色（补标点、**整理成规范 Markdown**、去口水词、修错字）可以交给任意**云端大模型**，只要它提供 OpenAI 兼容的 `chat/completions` 接口。这是**唯一受支持的开启方式**：一个用户自有的 JSON 配置文件，填三样东西——网址、API Key、模型 ID。
 
 ```bash
-cd ~/ibus-voice-ime
-./scripts/setup-llm.sh
-ibus restart
+./scripts/setup-llm-cloud.sh        # 交互式生成配置，可选当场连通性测试
 ```
 
-常用配置：
+生成的配置文件在 `~/.config/ibus-voice-ime/llm.json`（权限 0600，字段模板见 `examples/llm-cloud.json.example`）：
 
-```bash
-export VOICE_IME_LLM_POSTPROCESS=0      # 默认关闭；如需试验 LLM 后处理，手动改为 1
-export VOICE_IME_LLM_INTERNAL=1
-export VOICE_IME_LLM_TRUST_OUTPUT=1      # 启用 LLM 时采用单次输出，不做多候选回退
-export VOICE_IME_LLM_RERANK=0            # 默认关闭重排层，避免规则打分再次干预
-export VOICE_IME_LLM_BASE_URL=http://127.0.0.1:18080/v1
-export VOICE_IME_LLM_API_KEY=local
-export VOICE_IME_LLM_MODEL=qwen3.5-0.8b
-export VOICE_IME_LLM_CANDIDATES=1
-export VOICE_IME_LLM_TIMEOUT=4
-export VOICE_IME_LLM_FALLBACK_RAW=1      # 仅在接口错误/超时时回退，不参与正常文本选择
+```json
+{
+  "enabled": true,
+  "base_url": "https://api.your-provider.com/v1",
+  "api_key": "sk-...",
+  "model": "the-exact-model-id",
+  "timeout": 15,
+  "temperature": 0.1,
+  "max_tokens": 1024,
+  "min_chars": 50,
+  "extra_body": {"thinking": {"type": "disabled"}}
+}
 ```
 
-实验时如果已经有 Ollama、LM Studio 或其它 OpenAI-compatible 服务，也可以不用内置 sidecar：
+设计约定（最简方案换最大可靠性）：
 
-```bash
-export VOICE_IME_LLM_INTERNAL=0
-export VOICE_IME_LLM_BASE_URL=http://127.0.0.1:11434/v1
-export VOICE_IME_LLM_API_KEY=ollama
-export VOICE_IME_LLM_MODEL=your-model
-```
+- **短句不整理**：默认 `min_chars: 50`——不足 50 字的听写直接提交规则清理结果，不为几个字付云端延迟和费用（短句也几乎不需要补标点）；想调整改这个字段即可。
+- **Markdown 输出（面向 AI 消费）**：整理结果默认是规范 Markdown，且**任务/指令类听写会整理成智能体任务简报**——`## 目标` / `## 背景` / `## 任务`（编号步骤）/ `## 约束` / `## 验收`，只为听写中实际存在的部分生成小节；叙述/讨论类内容按主题分节或保持自然段落，不强行套简报；命令/路径/代码用行内代码或代码块。文字内容本身不改，尤其**不会自作主张追加用户没说过的要求**（标题和目标只能来自原文关键词）。提示词在 `src/ibus_voice_ime/text/llm_postprocess.py`（`SYSTEM_PROMPT` / `MODE_INSTRUCTIONS` / `_build_messages`），可按需手工调整，改完重启引擎生效。
+- **不做模型列表查询**：本工具不会请求 `/models` 帮你挑模型。`model` 必须填与服务商**完全一致**的 ID；填错的后果是第一次调用返回明确的 HTTP 404/400 错误（错误信息会提示检查 `base_url` 是否以 `/v1` 结尾、model ID 是否正确），而不是静默选错模型。
+- **服务商特有参数走 `extra_body`**：该字段的内容会合并进请求体。典型用途是思考型模型关思考（输入法后处理要快而直接）——例如 GLM 系列：`"extra_body": {"thinking": {"type": "disabled"}}`（实测同一请求从 15 秒超时降到约 2 秒）；不关思考的模型若返回空结果并提示 `finish_reason=length`，就是思考耗尽了 `max_tokens`。
+- **JSON 配置优先于环境变量**：文件存在且合法时，`run-engine.sh` 里的 `VOICE_IME_LLM_*` 默认值（本地 sidecar 地址、4 秒超时等）不会泄漏进云端调用。
+- **即刻生效**：引擎在每次语音后处理前重新读取该文件，改完配置无需重启输入法。把 `enabled` 改为 `false` 即关闭。
+- **信任模型输出**：LLM 返回的 Markdown **原样提交**——只做"去包裹"（整体被代码围栏/引号包住时解开），不再做机械的标点/空格重排（重复标点折叠、CJK-拉丁空格删除等）。那些确定性规则只服务于无 LLM 的回退链路，接在模型后面反而会破坏刻意排的格式。繁简方向仍以 OpenCC 兜底转换为准。
+- **失败兜底**：接口错误/超时/返回异常时自动回退提交原始识别文本，语音输入永远不会因为 LLM 挂了而断掉。
+- **密钥边界**：该文件只存在于你的 `~/.config`（已加入 `.gitignore` 双保险），绝不入库；`./scripts/doctor.sh` 会检查它的 JSON 合法性与文件权限（0600）。
 
-再强调一次：仅设置 `VOICE_IME_LLM_POSTPROCESS=1` 不会生效（引擎会覆盖回 0）；见本节开头的现状声明。
+历史包袱说明：早期的本地小模型路径（llama.cpp sidecar + Qwen3.5-0.8B GGUF，`scripts/setup-llm.sh`）实测会改坏听写原文（改词、吞字、加不存在内容），已被云端方案取代且默认压制——`run-engine.sh` 仍会把遗留的 `VOICE_IME_LLM_POSTPROCESS`/`VOICE_IME_LLM_INTERNAL` 环境变量钉死为 0。仅设置环境变量开启不了本地 LLM 后处理。
 
 模式配置：
 

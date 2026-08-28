@@ -7,8 +7,9 @@ follows VOICE_IME_ASR_BACKEND / VOICE_IME_QWEN_ASR and falls through to the
 local MiMo sidecar, MiMo cloud ASR, Volcano Engine bigmodel ASR, a custom
 command, faster-whisper, or vosk in that order.
 
-After ASR, the transcript is normalized only by deterministic local rules.
-LLM post-processing is intentionally disabled and must not run.
+After ASR, the transcript is normalized by deterministic local rules and,
+when the user configured a cloud LLM endpoint (~/.config/ibus-voice-ime/
+llm.json, OpenAI-compatible), polished by that model with raw-text fallback.
 """
 from __future__ import annotations
 
@@ -23,7 +24,7 @@ from pathlib import Path
 
 from ibus_voice_ime.asr import audio_preprocess, mimo_asr_runtime, mimo_cloud_asr, qwen_asr_runtime, volc_bigmodel_asr
 from ibus_voice_ime.memory import voice_terms
-from ibus_voice_ime.text import chinese_script, text_postprocess
+from ibus_voice_ime.text import chinese_script, llm_postprocess, text_postprocess
 
 
 class VoiceError(RuntimeError):
@@ -467,9 +468,20 @@ def postprocess(raw_text: str) -> str:
             os.environ.pop("VOICE_IME_REMOVE_FILLERS", None)
         else:
             os.environ["VOICE_IME_REMOVE_FILLERS"] = saved_remove_fillers
-    # Strict policy: never call llm_postprocess here and do not add punctuation
-    # locally. Keep the final path deterministic: cleanup -> script normalization.
-    return chinese_script.normalize(normalized)
+    # Cloud LLM polish is opt-in via ~/.config/ibus-voice-ime/llm.json (see
+    # llm_cloud_config); without it the path stays deterministic:
+    # cleanup -> script normalization.  refine_with_fallback returns the raw
+    # text on any transport/API error, so dictation never breaks because of
+    # the LLM layer.  OpenCC stays the final authority on script direction,
+    # so it runs again after the model output.
+    final_text = chinese_script.normalize(normalized)
+    if llm_postprocess.enabled():
+        try:
+            final_text = chinese_script.normalize(
+                llm_postprocess.refine_with_fallback(final_text, mode=mode))
+        except Exception:
+            pass
+    return final_text
 
 
 def record_and_transcribe(seconds: int | None = None) -> str:
