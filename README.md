@@ -40,16 +40,27 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 ```bash
 git clone https://github.com/CongliangK/ibus-voice-ime.git
 cd ibus-voice-ime
-./scripts/check-environment.sh     # 环境自检，按提示解决 FAIL 项
+./init.sh                          # 一次性初始化：词库 + 语音模型 + 降噪，默认全量
+# 可选参数（均幂等，已就绪自动跳过）：
+#   --no-voice            不安装语音输入（不下载 ASR 模型与 venv）
+#   --no-denoise          不要 RNNoise 降噪模型（录音降级 notch 档）
+#   --no-rime-ice         跳过雾凇拼音大词库（键盘回退内置 luna）
+#   --no-zhwiki --no-moegirl / --proxy http://127.0.0.1:7890 / --skip-install
+# 无 NVIDIA GPU 时语音步骤自动跳过，并打印云端后端替代命令。
 
-./install.sh                       # 注册 IBus 组件 + GNOME 输入源/热键
-
-# 选一个语音识别后端（二选一）：
-./scripts/setup-qwen-asr.sh        # 本地 Qwen3-ASR（默认后端，需 NVIDIA GPU）
-# 或：VOICE_IME_MIMO_API_KEY='tp-xxxxx' ./scripts/switch-mimo-cloud-asr.sh cn
-
-ibus restart                       # 或重新登录
 # Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音
+```
+
+两个安装脚本的分工：
+
+- **`init.sh`（一次性初始化）**：拿到仓库后的第一步。下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
+- **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。
+
+健康检查（体检，不修改不下载）：
+
+```bash
+./scripts/doctor.sh        # 只检查并报告
+./scripts/doctor.sh fix    # 检查并自动修复（补词库/模型下载、修执行位、重注册热键等）
 ```
 
 可选：如需 faster-whisper 兜底后端，创建带系统包的 venv 并安装依赖（引擎检测到 `.venv` 会优先使用）：
@@ -69,7 +80,7 @@ cd ~/ibus-voice-ime
 ./scripts/test-rime-runtime.sh
 ```
 
-推荐部署**雾凇拼音（rime-ice）+ zhwiki + moegirl** 大词库以获得接近商业输入法的候选质量（默认方案为 rime_ice；脚本会自动用内置 librime 编译词库，首次约 1-3 分钟）：
+推荐部署**雾凇拼音（rime-ice）+ zhwiki + moegirl** 大词库以获得接近商业输入法的候选质量（默认方案为 rime_ice；`./init.sh` 已默认包含此步；脚本会自动用内置 librime 编译词库，首次约 1-3 分钟）。手动（重新）部署：
 
 ```bash
 ./scripts/setup-rime-ice.sh                   # 默认走直连，网络不通可加代理
@@ -520,10 +531,11 @@ pi
 
 ## 故障排查
 
-第一步永远是环境自检 + 看引擎日志：
+第一步永远是项目体检 + 看引擎日志：
 
 ```bash
-./scripts/check-environment.sh
+./scripts/doctor.sh                    # 体检：半残态/断链热键/缺失资产等，只检查
+./scripts/doctor.sh fix                # 自动修复（含词库/模型下载、重注册）
 tail -f ~/.local/share/ibus-voice-ime/engine.log
 ```
 

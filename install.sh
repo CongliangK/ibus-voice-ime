@@ -145,6 +145,13 @@ fi
 # voice recognition results.
 "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" || true
 
+# 词库就绪性提示（只警告、不下载——install.sh 定位是轻量的每次注册/激活；
+# 真正的资产初始化由一次性脚本 ./init.sh 完成）。
+if [[ ! -f "$ROOT_DIR/vendor/rime/share/rime-data/cn_dicts/base.dict.yaml" ]]; then
+  echo "⚠ rime-ice 词库未部署：键盘将回退 luna_pinyin_simp（可打字但词库小）。" >&2
+  echo "  一次性初始化（默认部署词库/语音模型/降噪）：./init.sh" >&2
+fi
+
 # Let ibus-daemon reload component list.  This briefly restarts input methods.
 # 后端/密钥等 ASR 配置以 environment.d 文件为单一事实源，透传给重启后的 daemon。
 SPAWN_BACKEND_ENV=()
