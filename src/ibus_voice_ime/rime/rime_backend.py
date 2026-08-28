@@ -296,6 +296,26 @@ def _decode(value: bytes | None) -> str:
     return value.decode("utf-8", errors="replace") if value else ""
 
 
+def rime_ice_assets_present(
+    shared_data_dir: Path, staging_dir: Path | None, user_data_dir: Path
+) -> bool:
+    """rime_ice 可用的完整条件：方案文件、词库源、编译产物三者齐备。
+
+    只查编译产物是不够的：新 clone 只带 git 跟踪的 schema，cn_dicts 在
+    .gitignore 里——若用户目录残留旧编译产物而词库源缺失，librime 维护性
+    重部署会失败并使会话出零候选（半残态）。此时必须回退 luna 而非静默可用。
+    """
+    schema = shared_data_dir / "rime_ice.schema.yaml"
+    dict_source = shared_data_dir / "cn_dicts" / "base.dict.yaml"
+    built = (staging_dir or user_data_dir) / "rime_ice.table.bin"
+    user_built = user_data_dir / "build" / "rime_ice.table.bin"
+    return (
+        schema.is_file()
+        and dict_source.is_file()
+        and (built.is_file() or user_built.is_file())
+    )
+
+
 class RimeSession:
     def __init__(self, schema: str | None = None):
         self.api = RimeService.api()
@@ -303,16 +323,22 @@ class RimeSession:
         if not self.session_id:
             raise RimeError("创建 Rime 会话失败")
         schema = schema or os.environ.get("VOICE_IME_RIME_SCHEMA", "rime_ice")
-        # rime-ice (default) needs scripts/setup-rime-ice.sh first. If its
-        # compiled dict is absent (shared schema missing OR no rime_ice.table.bin
-        # in the staging/user build dir), fall back to the always-present
-        # luna_pinyin_simp so a fresh checkout still types instead of crashing.
-        if schema == "rime_ice":
-            shared_schema = Path(_shared_data_dir(), "rime_ice.schema.yaml")
-            built = Path(_staging_dir() or _user_data_dir(), "rime_ice.table.bin")
-            user_built = Path(_user_data_dir(), "build", "rime_ice.table.bin")
-            if not shared_schema.is_file() or not (built.is_file() or user_built.is_file()):
-                schema = "luna_pinyin_simp"
+        # rime-ice (default) needs its dictionary sources + compiled artifacts.
+        # A fresh checkout only carries the git-tracked schema file; without
+        # cn_dicts the deployment degrades to zero candidates. Fall back to the
+        # always-present luna_pinyin_simp so typing still works, loudly.
+        if schema == "rime_ice" and not rime_ice_assets_present(
+            Path(_shared_data_dir()),
+            Path(_staging_dir()) if _staging_dir() else None,
+            Path(_user_data_dir()),
+        ):
+            print(
+                "[ibus-voice-ime] rime_ice 资产不完整（缺 cn_dicts 词库或编译产物），"
+                "已回退 luna_pinyin_simp。修复：./scripts/setup-rime-ice.sh "
+                "或重新运行 ./install.sh（默认自动部署词库）",
+                flush=True,
+            )
+            schema = "luna_pinyin_simp"
         self.api.select_schema(self.session_id, schema.encode("utf-8"))
 
     def close(self) -> None:
