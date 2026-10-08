@@ -6,6 +6,7 @@ import atexit
 import json
 import os
 import shlex
+import socket
 import subprocess
 import threading
 import time
@@ -26,6 +27,58 @@ _PROCESS_KEY: tuple[str, int, str] | None = None
 # 录音开始的预热线程与停止后的识别线程可能并发首拉 sidecar；不加锁会双拉
 # 进程，输家死于端口冲突并报出假错误（实际幸存方健康）。
 _ENSURE_LOCK = threading.Lock()
+# 拉起失败熔断：sidecar 依赖缺失/驱动不匹配等“稳定秒退”故障下，每次听写都会
+# 重复支付 python+torch import（10-40s）后失败。冷却窗内直接抛缓存错误。
+_FAIL_AT = 0.0
+_FAIL_KEY: tuple[str, int, str] | None = None
+_FAIL_MSG = ""
+
+
+def _fail_cooldown() -> float:
+    try:
+        return max(0.0, float(os.environ.get("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", "180")))
+    except Exception:
+        return 180.0
+
+
+def _record_spawn_failure(key: tuple[str, int, str], message: str) -> RuntimeError:
+    global _FAIL_AT, _FAIL_KEY, _FAIL_MSG
+    _FAIL_AT = time.monotonic()
+    _FAIL_KEY = key
+    _FAIL_MSG = message
+    return RuntimeError(message)
+
+
+def _raise_cached_failure(key: tuple[str, int, str]) -> None:
+    cooldown = _fail_cooldown()
+    if cooldown <= 0 or not _FAIL_MSG or _FAIL_KEY != key:
+        return
+    elapsed = time.monotonic() - _FAIL_AT
+    if elapsed < cooldown:
+        raise RuntimeError(
+            f"Qwen3-ASR sidecar 刚刚启动失败，{int(cooldown - elapsed)}s 内不再重复拉起（熔断）。\n"
+            f"上次错误：{_FAIL_MSG}\n"
+            "修复后自动恢复；设 VOICE_IME_QWEN_ASR_FAIL_COOLDOWN=0 可禁用熔断。"
+        )
+
+
+def _clear_failure() -> None:
+    global _FAIL_AT, _FAIL_KEY, _FAIL_MSG
+    _FAIL_AT = 0.0
+    _FAIL_KEY = None
+    _FAIL_MSG = ""
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    try:
+        proc.terminate()
+        proc.wait(timeout=2)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=1)
+        except Exception:
+            pass
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -160,25 +213,56 @@ def _log_tail(log_file: Path, lines: int = 15) -> str:
 
 
 def _humanize_transcribe_error(code: int, detail: str) -> str:
-    """把 sidecar 的英文 500 转成带补救指引的中文信息。"""
+    """把 sidecar 的英文 500 转成带补救指引的中文信息（按根因分流）。"""
+    if code != 500:
+        return f"Qwen3-ASR HTTP {code}: {detail}"
+    low = detail.lower()
     markers = (
-        "no Qwen3-ASR model is active",
-        "CUDA",
+        "no qwen3-asr model is active",
         "cuda",
-        "No module named",
+        "no module named",
         "torch",
-        "OSError",
+        "oserror",
+        "bfloat16",
+        "safetensor",
+        "deserializ",
+        "out of memory",
+        "显存",
     )
-    if code == 500 and any(m in detail for m in markers):
-        return (
-            f"Qwen3-ASR 识别失败：模型未能在 GPU 上加载（{detail[:200]}）。\n"
+    if not any(m in low for m in markers):
+        return f"Qwen3-ASR HTTP {code}: {detail}"
+    if "out of memory" in low or "显存" in detail:
+        guidance = (
+            "显存不足：关闭占用显存的程序（游戏/ComfyUI 等）后重试，"
+            "或 ./scripts/switch-qwen-asr.sh 0.6b 换小模型，"
+            "或切云端后端（./scripts/switch-mimo-cloud-asr.sh cn）。"
+        )
+    elif "not compiled with cuda" in low:
+        guidance = (
+            "sidecar venv 里装的是 CPU 版 PyTorch：rm -rf .venv-qwen-asr 后重跑 "
+            "./scripts/setup-qwen-asr.sh（需 CUDA 轮子，参照 pytorch.org 安装指引）。"
+        )
+    elif "bfloat16" in low:
+        guidance = (
+            "显卡不支持 bfloat16（GTX 10xx/16xx、RTX 20xx 等）：在 "
+            "~/.config/environment.d/ibus-voice-ime.conf 设 VOICE_IME_QWEN_ASR_DTYPE=float16 后重启输入法。"
+        )
+    elif "safetensor" in low or "deserializ" in low:
+        guidance = (
+            "模型文件可能不完整（下载中断）：删除 vendor/models/qwen3-asr 下对应目录后"
+            "重跑 ./scripts/setup-qwen-asr.sh。"
+        )
+    else:
+        guidance = (
             "常见原因与处理：\n"
             "  1. 模型未下载 → 运行 ./scripts/setup-qwen-asr.sh\n"
             "  2. 无 NVIDIA GPU / CUDA 不可用 → 切云端后端：./scripts/switch-mimo-cloud-asr.sh cn\n"
-            "  3. sidecar 依赖缺失 → 重跑 ./scripts/setup-qwen-asr.sh\n"
-            "完整日志：~/.local/share/ibus-voice-ime/qwen-asr-server.log"
+            "  3. sidecar 依赖缺失 → 重跑 ./scripts/setup-qwen-asr.sh"
         )
-    return f"Qwen3-ASR HTTP {code}: {detail}"
+    return (
+        f"Qwen3-ASR 识别失败：模型未能在 GPU 上加载（{detail[:200]}）。\n{guidance}\n"
+        "完整日志：~/.local/share/ibus-voice-ime/qwen-asr-server.log"
+    )
 
 
 def ensure_server() -> str:
@@ -190,7 +274,25 @@ def _ensure_server_locked() -> str:
     global _PROCESS, _PROCESS_KEY
     url = base_url()
     key = (_host(), _port(), model_id())
+    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    log_file = log_dir / "qwen-asr-server.log"
+    try:
+        timeout = max(1.0, float(os.environ.get("VOICE_IME_QWEN_ASR_START_TIMEOUT", "120")))
+    except Exception:
+        timeout = 120.0
+
+    def death_error(code: int | None) -> RuntimeError:
+        tail = _log_tail(log_file)
+        hint = ""
+        if "address already in use" in tail.lower() or "eaddrinuse" in tail.lower():
+            hint = f"\n端口 {_port()} 已被其他进程占用：设置 VOICE_IME_QWEN_ASR_PORT 换端口后重启输入法。"
+        return _record_spawn_failure(
+            key,
+            f"Qwen3-ASR sidecar 启动失败（退出码 {code}）。\n{tail}\n完整日志：{log_file}{hint}",
+        )
+
     if _server_matches(key[2]) and (_PROCESS_KEY is None or _PROCESS_KEY == key):
+        _clear_failure()
         return url
     if is_ready() and not _server_matches(key[2]):
         raise RuntimeError(
@@ -198,8 +300,37 @@ def _ensure_server_locked() -> str:
             "请先执行 pkill -f qwen_asr_server.py，或使用 scripts/switch-qwen-asr.sh 切换。"
         )
 
-    if _PROCESS is not None and _PROCESS.poll() is None and _PROCESS_KEY == key:
-        return url
+    _raise_cached_failure(key)
+
+    if _PROCESS is not None and _PROCESS.poll() is None:
+        if _PROCESS_KEY != key:
+            # 配置变了（模型/端口）：停掉自己拉起的旧 sidecar 再拉新的，避免端口冲突。
+            _log("ASR 配置变更，重启 Qwen3-ASR sidecar")
+            _terminate_process(_PROCESS)
+            _PROCESS = None
+            _PROCESS_KEY = None
+        else:
+            # 上一次 ensure 拉起的进程仍在启动中（如预热线程首拉）：等它就绪，
+            # 而不是立即返回一个尚未监听的 URL。
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if _PROCESS.poll() is not None:
+                    code = _PROCESS.returncode
+                    _PROCESS = None
+                    _PROCESS_KEY = None
+                    raise death_error(code)
+                if is_ready():
+                    _log(f"ASR Qwen3-ASR sidecar ready: {url}")
+                    _clear_failure()
+                    return url
+                time.sleep(0.5)
+            # 超时：杀掉卡死的子进程再报错，不留占显存/端口的僵尸。
+            proc, _PROCESS, _PROCESS_KEY = _PROCESS, None, None
+            _terminate_process(proc)
+            raise _record_spawn_failure(
+                key,
+                f"Qwen3-ASR sidecar 启动超时（{timeout:.0f}s），已终止进程。详见日志：{log_file}",
+            )
 
     # 首装常见问题前置检查：模型目录不存在时 sidecar 会假装健康、识别时才
     # 报错；在这里早失败并给出补救命令。
@@ -212,9 +343,7 @@ def _ensure_server_locked() -> str:
             "或用 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端后端（无需 GPU）。"
         )
 
-    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "qwen-asr-server.log"
     trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
     cmd = [
         _python(),
@@ -225,33 +354,37 @@ def _ensure_server_locked() -> str:
     ]
     _log("ASR starting Qwen3-ASR sidecar: " + " ".join(shlex.quote(x) for x in cmd))
     log = log_file.open("a", encoding="utf-8")
-    env = os.environ.copy()
-    # Prefer ModelScope when the model id is remote and the user is in mainland China.
-    env.setdefault("HF_ENDPOINT", os.environ.get("HF_ENDPOINT", ""))
-    _PROCESS = subprocess.Popen(  # noqa: S603 - local sidecar command
-        cmd,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        cwd=str(ROOT_DIR),
-        env=env,
-        start_new_session=True,
-    )
+    try:
+        _PROCESS = subprocess.Popen(  # noqa: S603 - local sidecar command
+            cmd,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=str(ROOT_DIR),
+            env=os.environ.copy(),
+            start_new_session=True,
+        )
+    finally:
+        log.close()  # 子进程持有 dup 出的 fd；父进程及时关闭，防反复 spawn 泄漏
     _PROCESS_KEY = key
 
-    timeout = float(os.environ.get("VOICE_IME_QWEN_ASR_START_TIMEOUT", "120"))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _PROCESS.poll() is not None:
-            tail = _log_tail(log_file)
-            raise RuntimeError(
-                f"Qwen3-ASR sidecar 启动失败（退出码 {_PROCESS.returncode}）。\n"
-                f"{tail}\n完整日志：{log_file}"
-            )
+            code = _PROCESS.returncode
+            _PROCESS = None
+            _PROCESS_KEY = None
+            raise death_error(code)
         if is_ready():
             _log(f"ASR Qwen3-ASR sidecar ready: {url}")
+            _clear_failure()
             return url
         time.sleep(0.5)
-    raise RuntimeError(f"Qwen3-ASR sidecar 启动超时，详见日志：{log_file}")
+    proc, _PROCESS, _PROCESS_KEY = _PROCESS, None, None
+    _terminate_process(proc)
+    raise _record_spawn_failure(
+        key,
+        f"Qwen3-ASR sidecar 启动超时（{timeout:.0f}s），已终止进程。详见日志：{log_file}",
+    )
 
 
 def transcribe(wav_path: str) -> str:
@@ -275,7 +408,15 @@ def transcribe(wav_path: str) -> str:
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(_humanize_transcribe_error(exc.code, detail)) from exc
-    except urllib.error.URLError as exc:
+    except (urllib.error.URLError, socket.timeout) as exc:
+        # 慢推理触发的读超时（socket.timeout 被 urllib 包成 URLError 或直接抛出）
+        # 与“服务崩了”是两回事，混在一条文案里会把排障方向带偏。
+        reason = getattr(exc, "reason", None)
+        if isinstance(exc, socket.timeout) or isinstance(reason, (socket.timeout, TimeoutError)):
+            raise RuntimeError(
+                f"Qwen3-ASR 识别超时（>{timeout:.0f}s）：缩短录音长度，"
+                "或调大 VOICE_IME_QWEN_ASR_TIMEOUT。"
+            ) from exc
         raise RuntimeError(
             f"Qwen3-ASR sidecar 连接失败（{exc}）：服务可能已崩溃或未监听。"
             "详见 ~/.local/share/ibus-voice-ime/qwen-asr-server.log"

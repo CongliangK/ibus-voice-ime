@@ -32,7 +32,7 @@ def _pcm_rms_s16le(data: bytes) -> float:
 
 
 class AudioSession:
-    def __init__(self, *, max_seconds: int = 120, rms_full_scale: float = 3000.0):
+    def __init__(self, *, max_seconds: int = 300, rms_full_scale: float = 3000.0):
         self.max_seconds = max(1, int(max_seconds))
         self.rms_full_scale = max(1.0, float(rms_full_scale))
         self._tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
@@ -65,7 +65,10 @@ class AudioSession:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except FileNotFoundError as exc:
             self.cleanup()
-            raise AudioSessionError("找不到 arecord，无法录音") from exc
+            raise AudioSessionError(
+                "找不到 arecord（alsa-utils），无法录音。安装："
+                "Fedora sudo dnf install alsa-utils；Debian/Ubuntu sudo apt install alsa-utils"
+            ) from exc
         except Exception as exc:
             self.cleanup()
             raise AudioSessionError(f"启动录音失败：{exc}") from exc

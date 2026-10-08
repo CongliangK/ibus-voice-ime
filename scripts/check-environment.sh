@@ -86,8 +86,17 @@ fi
 if command -v arecord >/dev/null 2>&1; then
   ok "arecord（alsa-utils）已安装：主录音链路"
 else
-  fail "arecord 未安装。Fedora: sudo dnf install alsa-utils"
+  fail "arecord 未安装。Fedora: sudo dnf install alsa-utils；Debian/Ubuntu: sudo apt install alsa-utils"
 fi
+
+# init.sh 的资产下载用到 curl（rime-ice/rnnoise）与 git（rime-ice）；缺失时错误
+# 归因会变成误导性的“网络问题”，这里提前点名。
+command -v curl >/dev/null 2>&1 \
+  && ok "curl 已安装：词库/降噪模型下载" \
+  || warn "curl 未安装：init.sh 下载 rime-ice 词库与 RNNoise 模型会失败。Fedora: sudo dnf install curl；Debian/Ubuntu: sudo apt install curl"
+command -v git >/dev/null 2>&1 \
+  && ok "git 已安装：rime-ice 词库克隆" \
+  || warn "git 未安装：init.sh 部署 rime-ice 词库会失败。Fedora: sudo dnf install git；Debian/Ubuntu: sudo apt install git"
 
 # 内置 librime 能否在本机加载（glibc 版本 / CPU 架构不匹配会在这里暴露）。
 if [[ -f "$RUNTIME/lib/librime.so.1" ]]; then
@@ -125,7 +134,7 @@ PY
     then
       ok "PyGObject + IBus GObject 内省可用"
     else
-      fail "gi.repository.IBus 不可用。Fedora: sudo dnf install ibus python3-gobject"
+      fail "gi.repository.IBus 不可用。Fedora: sudo dnf install ibus python3-gobject；Debian/Ubuntu: sudo apt install ibus python3-gi"
     fi
   else
     fail "PyGObject 未安装（检查的 Python：$PY_BIN）。Fedora: sudo dnf install python3-gobject；"\
@@ -150,7 +159,7 @@ command -v gsettings >/dev/null 2>&1 \
   || warn "gsettings 未安装：install.sh 的 GNOME 集成步骤会跳过"
 [[ -f /usr/share/opencc/t2s.json ]] \
   && ok "OpenCC 繁简转换数据可用" \
-  || warn "/usr/share/opencc/t2s.json 不存在：繁→简兜底转换不可用（Fedora: sudo dnf install opencc）"
+  || warn "/usr/share/opencc/t2s.json 不存在：繁→简兜底转换不可用（Fedora: sudo dnf install opencc；Debian/Ubuntu: sudo apt install opencc）"
 
 # ---------------------------------------------------------------- 录音设备
 header "录音设备"
@@ -177,14 +186,20 @@ fi
 # ---------------------------------------------------------------- GPU 与模型
 if [[ "$CHECK_GPU" == "1" ]]; then
   header "GPU 与本地模型（默认后端 = 本地 Qwen3-ASR）"
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    GPU_NAME="$(nvidia-smi -L 2>/dev/null | head -1)"
-    ok "NVIDIA GPU：$GPU_NAME"
+  GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
+  if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+    eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+  fi
+  if [[ "$GPU_STATE" == "ok" ]]; then
+    ok "NVIDIA GPU：${GPU_BRIEF:-（型号未知）}"
     if [[ -d "$ROOT_DIR/vendor/models/qwen3-asr" ]]; then
       ok "Qwen3-ASR 模型已下载（vendor/models/qwen3-asr/）"
     else
       warn "Qwen3-ASR 模型未下载：运行 ./scripts/setup-qwen-asr.sh（约需数 GB 磁盘 + 对应显存）"
     fi
+  elif [[ "$GPU_STATE" == "partial" ]]; then
+    warn "检测到 NVIDIA 显卡，但 CUDA 驱动不可用：${GPU_REASON:-未知}"
+    [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
   else
     warn "未检测到 NVIDIA GPU：本地 Qwen3-ASR / faster-whisper GPU 后端不可用"
     echo "         无 GPU 的替代方案（改用云端识别，零显存）："

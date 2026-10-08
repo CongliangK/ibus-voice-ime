@@ -114,19 +114,29 @@ fi
 # ------------------------------------------------------------- 3) 语音 --
 if [[ $WITH_VOICE -eq 1 ]]; then
   step "语音输入（本地 Qwen3-ASR 后端）"
-  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    if [[ -x "$QWEN_VENV/bin/python" && -d "$QWEN_MODEL" ]]; then
+  # 三态探测：ok=CUDA 链路可用；partial=有 N 卡硬件但驱动不可用（给出修复命令）；
+  # none=无 N 卡。旧版只看 nvidia-smi，会把“驱动半装/内核升级后模块未编好”误报成
+  # “无 GPU”，用户明明插着卡（2026-10 报障）。
+  GPU_STATE="" GPU_REASON="" GPU_ACTION=""
+  eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+  if [[ "$GPU_STATE" == "ok" ]]; then
+    if [[ -x "$QWEN_VENV/bin/pip" && ( -f "$QWEN_MODEL/model.safetensors" || -f "$QWEN_MODEL/model.safetensors.index.json" ) ]]; then
       echo "已就绪，跳过（模型 $QWEN_MODEL）。"
       SKIP_STEPS+=("Qwen3-ASR 本地后端")
     else
       echo "安装本地 Qwen3-ASR：创建 venv + 下载 0.6B/1.7B 模型（约 6GB，耗时较长）……"
-      if "$ROOT_DIR/scripts/setup-qwen-asr.sh"; then
+      if "$ROOT_DIR/scripts/setup-qwen-asr.sh" "${PROXY_ARG[@]}"; then
         DONE_STEPS+=("Qwen3-ASR 本地后端")
       else
-        echo "⚠ Qwen3-ASR 安装失败（网络/磁盘？）。可重试 ./init.sh 或改用云端后端。" >&2
+        echo "⚠ Qwen3-ASR 安装失败（网络/磁盘/Python 版本？）。可重试 ./init.sh 或改用云端后端。" >&2
         ERRORS=$((ERRORS + 1))
       fi
     fi
+  elif [[ "$GPU_STATE" == "partial" ]]; then
+    echo "检测到 NVIDIA 显卡，但本地语音所需的 CUDA 驱动不可用，跳过本地语音后端（不算失败）："
+    echo "  原因：${GPU_REASON:-未知}"
+    [[ -n "$GPU_ACTION" ]] && printf '  %s\n' "$GPU_ACTION"
+    SKIP_STEPS+=("Qwen3-ASR 本地后端（NVIDIA 驱动不可用）")
   else
     echo "未检测到 NVIDIA GPU，跳过本地语音后端（不算失败）。"
     echo "云端替代（自备 API Key）："

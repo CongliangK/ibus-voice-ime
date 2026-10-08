@@ -93,14 +93,26 @@ class PickTargetTest(unittest.TestCase):
         # When we cannot read free VRAM, do not risk OOM on 1.7B; use 0.6B.
         self.assertEqual(_make_manager()._pick_target(None), "0.6b")
 
-    def test_single_model_configured_always_chosen(self) -> None:
+    def test_single_model_gate_on_vram(self) -> None:
+        # 单模型配置也过 VRAM 门：探测成功且空闲不足时报“显存不足”，
+        # 不再让 2-4GB 卡每次听写都付完整权重加载后 OOM。
         m = _make_manager(secondary=None)
-        self.assertEqual(m._pick_target(100), "1.7b")
+        self.assertEqual(m._pick_target(6000), "1.7b")
+        with self.assertRaises(RuntimeError) as ctx:
+            m._pick_target(100)
+        self.assertIn("显存不足", str(ctx.exception))
+
+    def test_single_model_probe_failure_still_tries(self) -> None:
+        # 探测失败（None）保持旧“照常尝试加载”语义，让真实加载错误浮出。
+        m = _make_manager(secondary=None)
         self.assertEqual(m._pick_target(None), "1.7b")
 
     def test_single_06b_model(self) -> None:
         m = _make_manager(primary="/models/Qwen3-ASR-0.6B", secondary=None)
-        self.assertEqual(m._pick_target(100), "0.6b")
+        self.assertEqual(m._pick_target(3000), "0.6b")
+        self.assertEqual(m._pick_target(None), "0.6b")
+        with self.assertRaises(RuntimeError):
+            m._pick_target(100)
 
 
 # --------------------------------------------------------------------------- #

@@ -37,10 +37,30 @@ def _build_model_kwargs() -> dict[str, Any]:
     Mirrors the kwargs the old ``_load_model`` produced, kept here so the
     multi-model manager can build fresh kwargs for each model it loads.
     """
-    dtype = _dtype(os.environ.get("VOICE_IME_QWEN_ASR_DTYPE", "bfloat16"))
+    dtype_name = (os.environ.get("VOICE_IME_QWEN_ASR_DTYPE", "bfloat16") or "bfloat16").lower()
     device_map = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
+    # pre-Ampere（GTX 10xx/16xx、RTX 20xx，sm<80）没有原生 bfloat16：默认 bf16 会在
+    # 首个 kernel 报 "not implemented for 'BFloat16'"。这些卡 fp16 完全可用，自动降档
+    # 并打日志，用户无感。torch 只在 sidecar venv 里存在，import 失败则保持原值。
+    if dtype_name in {"bf16", "bfloat16"} and device_map.startswith("cuda"):
+        try:
+            import torch  # type: ignore
+
+            if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+                print(
+                    f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                    "本机 GPU 不支持 bfloat16，自动降级 dtype=bfloat16 -> float16"
+                    "（如需固定可设 VOICE_IME_QWEN_ASR_DTYPE=float16）",
+                    flush=True,
+                )
+                dtype_name = "float16"
+        except Exception:
+            pass
+    dtype = _dtype(dtype_name)
     max_batch = int(os.environ.get("VOICE_IME_QWEN_ASR_MAX_BATCH", "1"))
-    max_tokens = int(os.environ.get("VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS", "256"))
+    # 256 会把约 250~450 字的长听写硬截断（生成到上限即停、余下语音静默丢弃）；
+    # 1024 覆盖 5 分钟录音的典型字数量级。代价仅是长文本极端生成时间变长。
+    max_tokens = int(os.environ.get("VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS", "1024"))
     kwargs: dict[str, Any] = {
         "dtype": dtype,
         "device_map": device_map,
@@ -229,11 +249,22 @@ class ModelManager:
         """Choose the alias to activate given free VRAM (MiB) or None.
 
         Prefer the largest model that fits; fall back conservatively when the
-        probe failed.  When only one model is configured, it is always chosen
-        regardless of VRAM (loading may still OOM and surface a real error).
+        probe failed.  With a single configured model we still gate on VRAM
+        when the probe succeeded: a 2-4GB card would otherwise pay the full
+        disk->RAM weight load on every dictation just to OOM with a generic
+        error.  Probe failure (None) keeps the old try-anyway behavior so the
+        load surfaces the real underlying error.
         """
         if len(self._paths) == 1:
-            return next(iter(self._paths))
+            only = next(iter(self._paths))
+            need = self._vram_min[only]
+            if free_mib is not None and free_mib < need:
+                raise RuntimeError(
+                    f"显存不足：{only} 模型约需 {need} MiB 空闲显存，当前仅 {free_mib} MiB。"
+                    "关闭占用显存的程序后重试，或安装 0.6B 模型"
+                    "（./scripts/setup-qwen-asr.sh 会同时下载两档）以获得自动降级。"
+                )
+            return only
         if "1.7b" in self._paths and free_mib is not None and free_mib >= self._vram_min["1.7b"]:
             return "1.7b"
         if "0.6b" in self._paths:
@@ -255,11 +286,23 @@ class ModelManager:
                       f"Qwen3-ASR model manager watchdog check failed: {exc}", flush=True)
 
     def _probe_free_vram_mib(self) -> int | None:
-        """Return free GPU VRAM in MiB, or None if torch/CUDA is unavailable."""
+        """Return free GPU VRAM in MiB, or None if torch/CUDA is unavailable.
+
+        Reads the device selected by VOICE_IME_QWEN_ASR_DEVICE_MAP (default
+        cuda:0): on multi-GPU boxes the free memory of card 0 is irrelevant
+        when the model is about to be placed on card 1.
+        """
         try:
             import torch  # type: ignore
 
-            free, _total = torch.cuda.mem_get_info()
+            index = 0
+            device_map = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
+            if ":" in device_map:
+                try:
+                    index = int(device_map.rsplit(":", 1)[1])
+                except ValueError:
+                    index = 0
+            free, _total = torch.cuda.mem_get_info(index)
             return int(free) // (1024 * 1024)
         except Exception:
             return None
@@ -498,7 +541,14 @@ def _handle_transcribe(handler: BaseHTTPRequestHandler) -> None:
         # on the GPU.  Read it fresh here after acquire.
         active = _MANAGER.active_model() if _MANAGER is not None else _MODEL
         if active is None:
-            raise RuntimeError("no Qwen3-ASR model is active on the GPU")
+            # acquire_for_inference 把失败原因存进 load_error（仅日志可见）；
+            # 这里必须带出来，否则用户只看到自引用的泛化句，真实原因
+            # （OOM/CPU torch/驱动不匹配/模型文件损坏）全被吞掉。
+            detail = _MANAGER.load_error if _MANAGER is not None else ""
+            raise RuntimeError(
+                "no Qwen3-ASR model is active on the GPU"
+                + (f": {detail}" if detail else "")
+            )
         payload = sidecar_http.read_json_payload(handler.headers, handler.rfile)
         audio = _qwen_audio(payload)
         context = payload.get("context") if isinstance(payload.get("context"), str) else None

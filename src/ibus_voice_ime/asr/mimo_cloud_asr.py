@@ -138,7 +138,10 @@ def transcribe(wav_path: str) -> str:
     # Official docs say the Base64 data URL should not exceed 10 MB.
     limit = int(float(os.environ.get("VOICE_IME_MIMO_CLOUD_ASR_MAX_DATA_MB", "10")) * 1024 * 1024)
     if len(data_url.encode("utf-8")) > limit:
-        raise RuntimeError("MiMo 云端 ASR 音频超过 10MB data URL 限制；请缩短录音时长或改用本地后端。")
+        raise RuntimeError(
+            "MiMo 云端 ASR 音频超过 10MB data URL 限制；请缩短录音时长"
+            "（如 VOICE_IME_MAX_RECORD_SECONDS=120）或改用本地后端。"
+        )
 
     payload: dict[str, Any] = {
         "model": model_id(),

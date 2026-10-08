@@ -285,13 +285,14 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
 export VOICE_IME_TRIGGER_MODE=toggle         # toggle：按一次开始，再按一次停止；fixed：固定时长旧模式（V/B 差异同 toggle：B 仍跳过 LLM 后处理）
 export VOICE_IME_HOTKEYS=Ctrl+Alt+V # 默认语音热键；仅支持 Ctrl+Alt+字母
 export VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B # 原文语音热键（跳过 LLM 后处理）；与主热键或剪贴板热键（Ctrl+Alt+P）重叠的字母被剔除，全部重叠时自动禁用
-export VOICE_IME_MAX_RECORD_SECONDS=120      # toggle 模式最长录音时长
+export VOICE_IME_MAX_RECORD_SECONDS=300      # toggle 模式最长录音时长（默认 300 = 5 分钟）
 export VOICE_IME_OVERLAY=0                   # 默认关闭独立语音状态弹窗；设为 1 可开启
 export VOICE_IME_OVERLAY_POSITION=top-center # top-center 或 center
 export VOICE_IME_RECORD_SECONDS=5            # fixed 模式固定录音时长
 export VOICE_IME_ASR_BACKEND=qwen3-asr # 默认：本地 Qwen3-ASR (1.7B)
 export VOICE_IME_QWEN_ASR=1
 export VOICE_IME_QWEN_ASR_MODEL=1.7b
+export VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS=1024 # 单次转写生成 token 上限；过小会把长听写硬截断（默认 1024，约 1000~1800 汉字）
 export VOICE_IME_MIMO_ASR=0
 export VOICE_IME_MIMO_CLOUD_ASR=0
 export VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1

@@ -213,7 +213,10 @@ fi
 # ============================================================
 echo "==> 编译 Rime 字典（首次约 1-3 分钟，腾讯大词库较慢）"
 export LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-export VOICE_IME_RIME_LIBRARY="$LIB_DIR/librime.so.1"
+# 尊重用户显式指定的系统 librime（glibc 过老加载不了内置 Fedora 库的机器，
+# check-environment.sh 会建议设置 VOICE_IME_RIME_LIBRARY=系统库路径）；
+# 仅在未设置时才用内置库。
+export VOICE_IME_RIME_LIBRARY="${VOICE_IME_RIME_LIBRARY:-$LIB_DIR/librime.so.1}"
 export VOICE_IME_RIME_SHARED_DATA_DIR="$DATA_DIR"
 export VOICE_IME_RIME_USER_DATA_DIR="${VOICE_IME_RIME_USER_DATA_DIR:-$HOME/.local/share/ibus-voice-ime/rime-user}"
 cd "$ROOT_DIR"

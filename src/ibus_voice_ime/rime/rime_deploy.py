@@ -104,7 +104,21 @@ def deploy(root_dir: Path | None = None) -> None:
     if str(lib_dir) not in os.environ.get("LD_LIBRARY_PATH", ""):
         os.environ["LD_LIBRARY_PATH"] = f"{lib_dir}:{os.environ.get('LD_LIBRARY_PATH', '')}"
 
-    lib = ctypes.CDLL(str(lib_path))
+    try:
+        lib = ctypes.CDLL(str(lib_path))
+    except OSError as exc:
+        # 内置 librime 是 Fedora 构建的，在更老 glibc 的发行版（Ubuntu 22.04 等）
+        # 会报 GLIBC_x.xx not found；回退系统 librime（rime_backend 同款策略），
+        # 让 check-environment.sh 建议的 VOICE_IME_RIME_LIBRARY=系统库 路径真正可用。
+        try:
+            lib = ctypes.CDLL("librime.so.1")
+        except OSError:
+            raise DeployError(
+                f"无法加载 {lib_path}（{exc}）。内置库与系统不兼容；"
+                "安装系统 librime 后重试：Fedora sudo dnf install librime / "
+                "Debian系 sudo apt install librime，并在运行前设置 "
+                f"VOICE_IME_RIME_LIBRARY 指向系统库（如 /usr/lib/x86_64-linux-gnu/librime.so.1）"
+            ) from exc
     lib.rime_get_api.restype = ctypes.POINTER(RimeApi)
     api_ptr = lib.rime_get_api()
     if not api_ptr:

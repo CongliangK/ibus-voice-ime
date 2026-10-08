@@ -22,6 +22,8 @@ class ReplacementTableTest(unittest.TestCase):
                 "Open Code | opencode | open cold\n"
                 "Rime | | Rim\n"
                 "pi\n"
+                "DeepSeek Harness | deepseek harness | DeepSeek Honeys, DeepSeek Honey\n"
+                "Harness | harness | Honeys, honeys\n"
             )
         self._saved_dict = os.environ.get("VOICE_IME_VOICE_DICTIONARY")
         self._saved_repl = os.environ.get("VOICE_IME_VOICE_REPLACEMENTS")
@@ -59,6 +61,30 @@ class ReplacementTableTest(unittest.TestCase):
     def test_replaces_multiword_confusion(self) -> None:
         out = text_postprocess.apply_replacement_table("open cold 是误识别")
         self.assertEqual(out, "Open Code 是误识别")
+
+    def test_replaces_partial_phrase_confusion(self) -> None:
+        # Only the mis-heard tail word is replaced; the correct prefix survives.
+        self.assertEqual(
+            text_postprocess.apply_replacement_table("看看 DeepSeek Honeys 的日志"),
+            "看看 DeepSeek Harness 的日志",
+        )
+
+    def test_replaces_bare_confusion_fallback(self) -> None:
+        # ASR sometimes drops the prefix or lowercases: bare confusion still fixed.
+        self.assertEqual(
+            text_postprocess.apply_replacement_table("部署 Honeys 服务"),
+            "部署 Harness 服务",
+        )
+        self.assertEqual(
+            text_postprocess.apply_replacement_table("deepseek honeys 启动了吗"),
+            "deepseek Harness 启动了吗",
+        )
+
+    def test_confusion_substring_in_longer_token_untouched(self) -> None:
+        self.assertEqual(
+            text_postprocess.apply_replacement_table("Honeysuckle 很香"),
+            "Honeysuckle 很香",
+        )
 
     def test_does_not_touch_canonical_already_present(self) -> None:
         out = text_postprocess.apply_replacement_table("Rime 和 Rim")

@@ -236,11 +236,28 @@ check_asr_backend() {
         fail "Qwen3-ASR 模型缺失（$model_dir）"
         have_model=0
       fi
-      if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-        ok "NVIDIA GPU 可用"
-      else
-        warn "无 NVIDIA GPU：本地 Qwen 后端无法运行（切换云端：scripts/switch-mimo-cloud-asr.sh / switch-volc-bigmodel-asr.sh）"
+      if [[ -x "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
+        # venv 存在不等于能用：CPU-only torch 轮子 / venv 腐化都会让 sidecar 秒退，
+        # 只查可执行位会在这里给出误导性的全绿。
+        if "$ROOT_DIR/.venv-qwen-asr/bin/python" -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
+          ok "sidecar venv 内 torch.cuda 可用"
+        else
+          fail "sidecar venv 的 torch 用不了 CUDA（CPU-only 轮子 / venv 损坏 / 驱动异常）。修复：rm -rf .venv-qwen-asr && ./scripts/setup-qwen-asr.sh"
+          have_venv=0
+        fi
       fi
+      GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
+      if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+        eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+      fi
+      case "$GPU_STATE" in
+        ok) ok "NVIDIA GPU 可用（${GPU_BRIEF:-型号未知}）" ;;
+        partial)
+          warn "检测到 NVIDIA 显卡但 CUDA 驱动不可用：${GPU_REASON:-未知}"
+          [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
+          ;;
+        *) warn "无 NVIDIA GPU：本地 Qwen 后端无法运行（切换云端：scripts/switch-mimo-cloud-asr.sh / switch-volc-bigmodel-asr.sh）" ;;
+      esac
       if [[ $have_venv -eq 0 || $have_model -eq 0 ]]; then
         FAILED_ITEMS+=(qwen-setup)
       fi
@@ -390,7 +407,7 @@ do_fix() {
         ;;
       rnnoise-model)
         echo "==> 下载 RNNoise 模型（小文件）"
-        if "$ROOT_DIR/scripts/fetch-rnnoise-model.sh"; then
+        if "$ROOT_DIR/scripts/fetch-rnnoise-model.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
           fixed "RNNoise 模型已补齐"
         else
           fail "fetch-rnnoise-model.sh 失败（网络？）"
@@ -414,10 +431,10 @@ do_fix() {
         ;;
       qwen-setup)
         echo "==> 安装本地 Qwen3-ASR 后端（下载模型 + venv，约 6GB，耗时较长；一键全量初始化可用 ./init.sh）"
-        if "$ROOT_DIR/scripts/setup-qwen-asr.sh"; then
+        if "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
           fixed "Qwen3-ASR 后端安装完成"
         else
-          fail "setup-qwen-asr.sh 失败（网络/磁盘？）"
+          fail "setup-qwen-asr.sh 失败（网络/磁盘/Python 版本？）"
         fi
         ;;
       stale-env)

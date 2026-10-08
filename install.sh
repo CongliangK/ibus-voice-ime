@@ -198,9 +198,15 @@ if [[ ! -d "$ROOT_DIR/vendor/models/qwen3-asr" ]]; then
 EOF
 fi
 
-if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi -L >/dev/null 2>&1; then
-  cat <<'EOF'
-⚠ 未检测到 NVIDIA GPU：本地 Qwen3-ASR 后端无法运行，请改用云端后端
-（./scripts/switch-mimo-cloud-asr.sh cn 或 ./scripts/switch-volc-bigmodel-asr.sh）。
+GPU_STATE="" GPU_REASON="" GPU_ACTION=""
+if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+  eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+fi
+if [[ "$GPU_STATE" != "ok" ]]; then
+  cat <<EOF
+⚠ 本机 NVIDIA GPU 不可用（${GPU_REASON:-未检测到}）：默认语音后端（本地 Qwen3-ASR）将无法运行。
+键盘输入（Rime 拼音）不受影响。语音二选一：
+  1. 修复 GPU 环境后安装本地识别：$GPU_ACTION
+  2. 云端识别（无需 GPU，需 API Key）：./scripts/switch-mimo-cloud-asr.sh cn
 EOF
 fi

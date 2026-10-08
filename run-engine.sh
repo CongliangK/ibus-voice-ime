@@ -67,10 +67,16 @@ _forget_stale_inherit _INHERITED_RIME_USER_DATA_DIR
 
 ENV_CONF="$HOME/.config/environment.d/ibus-voice-ime.conf"
 if [[ -r "$ENV_CONF" ]]; then
-  set -a
-  # shellcheck disable=SC1090
-  source "$ENV_CONF"
-  set +a
+  # 行级解析替代 `set -a; source`：值含空格（HOME/仓库路径带空格）时 source 会把
+  # 值当 shell 语法执行导致引擎启动失败；systemd environment.d 也不做 shell 展开。
+  if [[ -x "$ROOT_DIR/scripts/env-file-load.sh" ]]; then
+    eval "$("$ROOT_DIR/scripts/env-file-load.sh" "$ENV_CONF")"
+  else
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_CONF"
+    set +a
+  fi
 fi
 [[ -n "$_INHERITED_RIME_LIBRARY" ]] && export VOICE_IME_RIME_LIBRARY="$_INHERITED_RIME_LIBRARY"
 [[ -n "$_INHERITED_RIME_SHARED_DATA_DIR" ]] && export VOICE_IME_RIME_SHARED_DATA_DIR="$_INHERITED_RIME_SHARED_DATA_DIR"
@@ -94,7 +100,7 @@ export VOICE_IME_RAW_HOTKEYS="${VOICE_IME_RAW_HOTKEYS:-Ctrl+Alt+B}"
 # 此变量仅用于 voice_hotkey 的 raw 热键去重（防止 B 键配置撞上粘贴快捷键）。
 export VOICE_IME_CLIPBOARD_HOTKEYS="${VOICE_IME_CLIPBOARD_HOTKEYS:-Ctrl+Alt+P}"
 export VOICE_IME_CLIPBOARD_MAX_CHARS="${VOICE_IME_CLIPBOARD_MAX_CHARS:-20000}"
-export VOICE_IME_MAX_RECORD_SECONDS="${VOICE_IME_MAX_RECORD_SECONDS:-120}"
+export VOICE_IME_MAX_RECORD_SECONDS="${VOICE_IME_MAX_RECORD_SECONDS:-300}"
 export VOICE_IME_OVERLAY="${VOICE_IME_OVERLAY:-0}"
 export VOICE_IME_OVERLAY_POSITION="${VOICE_IME_OVERLAY_POSITION:-top-center}"
 export VOICE_IME_OVERLAY_CATCH_HOTKEY="${VOICE_IME_OVERLAY_CATCH_HOTKEY:-1}"
@@ -157,7 +163,8 @@ export VOICE_IME_QWEN_ASR_PORT="${VOICE_IME_QWEN_ASR_PORT:-18081}"
 export VOICE_IME_QWEN_ASR_LANGUAGE="${VOICE_IME_QWEN_ASR_LANGUAGE:-Chinese}"
 export VOICE_IME_QWEN_ASR_DTYPE="${VOICE_IME_QWEN_ASR_DTYPE:-bfloat16}"
 export VOICE_IME_QWEN_ASR_DEVICE_MAP="${VOICE_IME_QWEN_ASR_DEVICE_MAP:-cuda:0}"
-export VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS="${VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS:-256}"
+# 256 会把约 250~450 字的长听写硬截断（余下语音静默丢弃），与 server 侧默认对齐 1024。
+export VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS="${VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS:-1024}"
 export VOICE_IME_QWEN_ASR_START_TIMEOUT="${VOICE_IME_QWEN_ASR_START_TIMEOUT:-180}"
 export VOICE_IME_QWEN_ASR_TIMEOUT="${VOICE_IME_QWEN_ASR_TIMEOUT:-180}"
 # Use an expandable-segment CUDA allocator so that after the idle watchdog
@@ -271,10 +278,14 @@ fi
 if [[ "$MIMO_ACTIVE" == "1" || "$VOLC_ACTIVE" == "1" ]]; then
   BWS_ENV_FILE="${VOICE_IME_BWS_ENV_FILE:-${PI_BWS_ENV_FILE:-$HOME/.config/pi-secrets/bws.env}}"
   if [[ -r "$BWS_ENV_FILE" ]] && command -v bws >/dev/null 2>&1; then
-    set -a
-    # shellcheck disable=SC1090
-    source "$BWS_ENV_FILE"
-    set +a
+    if [[ -x "$ROOT_DIR/scripts/env-file-load.sh" ]]; then
+      eval "$("$ROOT_DIR/scripts/env-file-load.sh" "$BWS_ENV_FILE")"
+    else
+      set -a
+      # shellcheck disable=SC1090
+      source "$BWS_ENV_FILE"
+      set +a
+    fi
     BWS_PROJECT_ID="${VOICE_IME_BWS_PROJECT_ID:-${BWS_PI_PROJECT_ID:-}}"
     if [[ -n "${BWS_ACCESS_TOKEN:-}" && -n "$BWS_PROJECT_ID" ]]; then
       PY_CMD=("$PYTHON" "$ENGINE" "$@")

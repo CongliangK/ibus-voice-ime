@@ -13,6 +13,7 @@ import html
 import locale
 import os
 import re
+import shutil
 import signal
 import socket
 import sys
@@ -21,11 +22,22 @@ import time
 import traceback
 from pathlib import Path
 
-import gi
+try:
+    import gi
 
-gi.require_version("GLib", "2.0")
-gi.require_version("IBus", "1.0")
-from gi.repository import GLib, IBus  # noqa: E402
+    gi.require_version("GLib", "2.0")
+    gi.require_version("IBus", "1.0")
+    from gi.repository import GLib, IBus  # noqa: E402
+except ImportError as _gi_exc:  # 缺 PyGObject 时给可读指引，而不是裸 traceback 死循环拉起
+    print(
+        f"无法加载 PyGObject/IBus（{_gi_exc}）。安装后重试：\n"
+        "  Fedora:        sudo dnf install python3-gobject ibus\n"
+        "  Debian/Ubuntu: sudo apt install python3-gi ibus\n"
+        "（若用项目 venv，请按 README 以 --system-site-packages 创建后重跑 ./install.sh）",
+        file=sys.stderr,
+        flush=True,
+    )
+    sys.exit(2)
 
 # Make local imports work when launched by ibus-daemon.
 # THIS_DIR = .../src/ibus_voice_ime; SRC_DIR = .../src (the package root on sys.path).
@@ -120,7 +132,10 @@ def engine_exec_command() -> str:
     launcher = repo_root / "run-engine.sh"
     if launcher.exists():
         return f"{launcher} --ibus"
-    return f"{sys.executable} {THIS_DIR / 'engine.py'} --ibus"
+    # sys.executable 在被 argv[0] 劫持的宿主进程（AppImage 等）里指向错误解释器；
+    # PATH 上的 python3 更可靠。
+    python = shutil.which("python3") or sys.executable
+    return f"{python} {THIS_DIR / 'engine.py'} --ibus"
 
 
 def log_error(message: str) -> None:
@@ -1274,7 +1289,7 @@ class VoiceCustomEngine(IBus.Engine):
             self._show_aux("🎙️ 正在处理上一段语音……")
             return
         self._flush_composition_before_voice()
-        max_seconds = _env_int("VOICE_IME_MAX_RECORD_SECONDS", 120)
+        max_seconds = _env_int("VOICE_IME_MAX_RECORD_SECONDS", 300)
         rms_full_scale = _env_float("VOICE_IME_OVERLAY_RMS_FULL_SCALE", 3000.0)
         try:
             session = audio_session.AudioSession(max_seconds=max_seconds, rms_full_scale=rms_full_scale)
