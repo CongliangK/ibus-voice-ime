@@ -203,6 +203,7 @@ if [[ "$CHECK_GPU" == "1" ]]; then
   else
     warn "未检测到 NVIDIA GPU：本地 Qwen3-ASR / faster-whisper GPU 后端不可用"
     echo "         无 GPU 的替代方案（改用云端识别，零显存）："
+    echo "         VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh   # 硅基流动（大陆直连；SenseVoiceSmall 官方标注免费，Qwen3-ASR 按秒计费）"
     echo "         ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo 云端（需 API Key）"
     echo "         ./scripts/switch-volc-bigmodel-asr.sh  # 火山引擎豆包（需 API Key）"
   fi

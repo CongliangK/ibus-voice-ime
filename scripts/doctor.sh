@@ -262,7 +262,7 @@ check_asr_backend() {
         FAILED_ITEMS+=(qwen-setup)
       fi
       ;;
-    mimo-cloud*|volc*)
+    mimo-cloud*|volc*|siliconflow*|sf-asr*)
       ok "云端后端（密钥由 BWS 运行时注入，不做落盘检查）"
       ;;
     *)

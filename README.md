@@ -241,7 +241,7 @@ export VOICE_IME_CLIPBOARD_MAX_CHARS=20000            # 最大提交字符数
 ```
 API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要写入文档或提交到仓库。
 
-本原型支持七种 STT 后端：
+本原型支持八种 STT 后端：
 
 1. `VOICE_IME_ASR_CMD` 自定义命令，命令 stdout 作为识别文本。例：
    ```bash
@@ -277,6 +277,15 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
    ```bash
    # API Key（X-Api-Key）推荐通过 BWS 运行时注入；这里仅当未配置 bws 时手动提供
    VOICE_IME_VOLC_API_KEY='xxxxx' ./scripts/switch-volc-bigmodel-asr.sh
+   ```
+8. `硅基流动 SiliconFlow ASR`（**Beta，未经深度测试**——2026-10 一次性验收合入，已知边界与回退方式详见 [docs/asr-backends.md](docs/asr-backends.md#硅基流动-siliconflow-asr低门槛云后端beta)；`POST /v1/audio/transcriptions` multipart 直传本地音频，默认模型 `FunAudioLLM/SenseVoiceSmall` 官方定价页标注**免费**，无需 GPU，`api.siliconflow.cn` 大陆直连）：
+   ```bash
+   # 注册 https://cloud.siliconflow.cn 创建 API Key（sk-xxx）；
+   # 单文件 <=50MB、时长 <=1h；有 RPM/TPM 限流（429 稍后重试）；
+   # 计费以控制台账单为准：SenseVoiceSmall 官方标注免费；
+   #   Qwen/Qwen3-ASR-1.7B 按音频时长计费（约 ¥0.00022/秒 ≈ 0.0132 元/分钟）
+   # 换模型（如 Qwen3-ASR-1.7B）：VOICE_IME_SILICONFLOW_MODEL='Qwen/Qwen3-ASR-1.7B'
+   VOICE_IME_SILICONFLOW_API_KEY='sk-xxxxx' ./scripts/switch-siliconflow-asr.sh
    ```
 
 常用语音/STT 环境变量：
@@ -354,6 +363,15 @@ export VOICE_IME_VOLC_BIGMODEL_HOTWORDS_MAX=5000  # 热词上限，文档上限 
 # 可选：火山控制台“自学习平台”配置的持久热词/替换词表（优先级低于 context 直传）
 # export VOICE_IME_VOLC_BIGMODEL_BOOSTING_TABLE=my_boosting
 # export VOICE_IME_VOLC_BIGMODEL_CORRECT_TABLE=my_correct
+
+# 硅基流动 SiliconFlow ASR 常用变量
+export VOICE_IME_ASR_BACKEND=siliconflow-asr
+export VOICE_IME_SILICONFLOW_ASR=1
+export VOICE_IME_SILICONFLOW_API_KEY=sk-xxxxx       # 推荐用 bws 注入，不写这里
+export VOICE_IME_SILICONFLOW_API_KEY_SECRET=SILICONFLOW_API_KEY  # BWS 密钥名，不持久化原始 key
+export VOICE_IME_SILICONFLOW_BASE_URL=https://api.siliconflow.cn
+export VOICE_IME_SILICONFLOW_MODEL=FunAudioLLM/SenseVoiceSmall  # 官方标注免费；可换 Qwen/Qwen3-ASR-1.7B（约 ¥0.00022/秒）
+export VOICE_IME_SILICONFLOW_TIMEOUT=120
 ```
 
 GPU 验证：

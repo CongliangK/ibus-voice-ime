@@ -46,7 +46,7 @@ ENV_FILE="$ENV_DIR/ibus-voice-ime.conf"
 # install.sh 只负责组件注册与路径修正，不把后端静默重置回默认。
 BACKEND_LINES=""
 if [[ -f "$ENV_FILE" ]]; then
-  BACKEND_LINES="$(grep -E '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD_|VOICE_IME_MIMO_API_KEY|VOICE_IME_MIMO_BASE_URL|VOICE_IME_VOLC_|VOICE_IME_WHISPER_|VOICE_IME_REQUIRE_GPU_STT|PYTORCH_CUDA_ALLOC_CONF|LD_LIBRARY_PATH)' "$ENV_FILE" || true)"
+  BACKEND_LINES="$(grep -E '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD_|VOICE_IME_MIMO_API_KEY|VOICE_IME_MIMO_BASE_URL|VOICE_IME_VOLC_|VOICE_IME_SILICONFLOW|VOICE_IME_WHISPER_|VOICE_IME_REQUIRE_GPU_STT|PYTORCH_CUDA_ALLOC_CONF|LD_LIBRARY_PATH)' "$ENV_FILE" || true)"
   CURRENT_BACKEND="$(grep -m1 '^VOICE_IME_ASR_BACKEND=' "$ENV_FILE" | cut -d= -f2- || true)"
   echo "检测到已有配置：保留当前语音后端设置（${CURRENT_BACKEND:-qwen3-asr}）"
 fi
@@ -205,8 +205,9 @@ fi
 if [[ "$GPU_STATE" != "ok" ]]; then
   cat <<EOF
 ⚠ 本机 NVIDIA GPU 不可用（${GPU_REASON:-未检测到}）：默认语音后端（本地 Qwen3-ASR）将无法运行。
-键盘输入（Rime 拼音）不受影响。语音二选一：
+键盘输入（Rime 拼音）不受影响。语音三选一：
   1. 修复 GPU 环境后安装本地识别：$GPU_ACTION
-  2. 云端识别（无需 GPU，需 API Key）：./scripts/switch-mimo-cloud-asr.sh cn
+  2. 云端识别（无需 GPU/大陆直连，注册 cloud.siliconflow.cn；SenseVoiceSmall 官方标注免费，Qwen3-ASR 按秒计费）：VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh
+  3. 云端识别（需 API Key）：./scripts/switch-mimo-cloud-asr.sh cn
 EOF
 fi

@@ -4,8 +4,8 @@
 The engine calls `record_and_transcribe()` in a worker thread.
 ASR policy: default to the local Qwen3-ASR sidecar (1.7B).  Backend selection
 follows VOICE_IME_ASR_BACKEND / VOICE_IME_QWEN_ASR and falls through to the
-local MiMo sidecar, MiMo cloud ASR, Volcano Engine bigmodel ASR, a custom
-command, faster-whisper, or vosk in that order.
+local MiMo sidecar, MiMo cloud ASR, Volcano Engine bigmodel ASR, SiliconFlow
+cloud ASR, a custom command, faster-whisper, or vosk in that order.
 
 After ASR, the transcript is normalized by deterministic local rules and,
 when the user configured a cloud LLM endpoint (~/.config/ibus-voice-ime/
@@ -22,7 +22,14 @@ import wave
 from array import array
 from pathlib import Path
 
-from ibus_voice_ime.asr import audio_preprocess, mimo_asr_runtime, mimo_cloud_asr, qwen_asr_runtime, volc_bigmodel_asr
+from ibus_voice_ime.asr import (
+    audio_preprocess,
+    mimo_asr_runtime,
+    mimo_cloud_asr,
+    qwen_asr_runtime,
+    siliconflow_asr,
+    volc_bigmodel_asr,
+)
 from ibus_voice_ime.memory import voice_terms
 from ibus_voice_ime.text import chinese_script, llm_postprocess, text_postprocess
 
@@ -388,6 +395,19 @@ def _transcribe_with_volc_bigmodel_asr(wav_path: str, *, skip_llm: bool = False)
     return text
 
 
+def _transcribe_with_siliconflow_asr(wav_path: str) -> str | None:
+    if not siliconflow_asr.selected():
+        return None
+    started = time.monotonic()
+    text = siliconflow_asr.transcribe(wav_path)
+    elapsed = time.monotonic() - started
+    _log(
+        f"ASR transcribed with SiliconFlow ASR model={siliconflow_asr.model_id()} "
+        f"elapsed={elapsed:.3f}s chars={len(text)}"
+    )
+    return text
+
+
 def _transcribe_with_vosk(wav_path: str) -> str | None:
     model_dir = os.environ.get("VOICE_IME_VOSK_MODEL", "").strip()
     if not model_dir:
@@ -438,13 +458,15 @@ def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
     # 强制关闭云端 DDC 语义平滑。其余后端本就不做云端改写，参数被忽略。
     # Backend selection follows the VOICE_IME_ASR_BACKEND / *_ASR flags.  Order
     # is intentional: local Qwen3-ASR first (project default), then local MiMo,
-    # MiMo cloud, custom command, faster-whisper, vosk.  Each helper returns
-    # None when its selector is off, so the first selected backend wins.
+    # MiMo cloud, Volcano bigmodel, SiliconFlow, custom command, faster-whisper,
+    # vosk.  Each helper returns None when its selector is off, so the first
+    # selected backend wins.
     backends: tuple = (
         _transcribe_with_qwen_asr,
         _transcribe_with_mimo_asr,
         _transcribe_with_mimo_cloud_asr,
         lambda wav_path: _transcribe_with_volc_bigmodel_asr(wav_path, skip_llm=skip_llm),
+        _transcribe_with_siliconflow_asr,
         _transcribe_with_command,
         _transcribe_with_faster_whisper,
         _transcribe_with_vosk,

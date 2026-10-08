@@ -189,6 +189,16 @@ export VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID="${VOICE_IME_VOLC_BIGMODEL_RESOURCE_I
 export VOICE_IME_VOLC_BIGMODEL_MODEL_NAME="${VOICE_IME_VOLC_BIGMODEL_MODEL_NAME:-bigmodel}"
 export VOICE_IME_VOLC_API_KEY_SECRET="${VOICE_IME_VOLC_API_KEY_SECRET:-VOLC_BIGMODEL_ASR_API_KEY}"
 
+# SiliconFlow (硅基流动) cloud ASR (multipart 直传, 默认免费模型 SenseVoiceSmall).
+# Default off; enabled via scripts/switch-siliconflow-asr.sh.  The API key is
+# injected at runtime from BWS (VOICE_IME_SILICONFLOW_API_KEY_SECRET) below,
+# never persisted in environment.d.
+export VOICE_IME_SILICONFLOW_ASR="${VOICE_IME_SILICONFLOW_ASR:-0}"
+export VOICE_IME_SILICONFLOW_BASE_URL="${VOICE_IME_SILICONFLOW_BASE_URL:-https://api.siliconflow.cn}"
+export VOICE_IME_SILICONFLOW_MODEL="${VOICE_IME_SILICONFLOW_MODEL:-FunAudioLLM/SenseVoiceSmall}"
+export VOICE_IME_SILICONFLOW_API_KEY_SECRET="${VOICE_IME_SILICONFLOW_API_KEY_SECRET:-SILICONFLOW_API_KEY}"
+export VOICE_IME_SILICONFLOW_TIMEOUT="${VOICE_IME_SILICONFLOW_TIMEOUT:-120}"
+
 # LLM 后处理策略：云端 OpenAI 兼容接口是唯一受支持的开启方式，通过
 # ~/.config/ibus-voice-ime/llm.json 显式配置（scripts/setup-llm-cloud.sh 生成，
 # 含 base_url + api_key + 精确 model ID，不做模型列表查询）。该文件存在且合法时，
@@ -261,12 +271,13 @@ fi
 # If a cloud ASR backend is selected but its API key is not present in the
 # environment, load it just-in-time from Bitwarden Secrets Manager.  This keeps
 # keys out of persistent environment.d files; only this engine process
-# receives the injected secret(s).  MiMo cloud and Volcano bigmodel ASR are
-# both supported, and a single bws run wrapper can inject both if both are
-# somehow configured.
+# receives the injected secret(s).  MiMo cloud, Volcano bigmodel and
+# SiliconFlow ASR are all supported, and a single bws run wrapper can inject
+# several if several are somehow configured.
 ASR_BACKEND_LC="${VOICE_IME_ASR_BACKEND,,}"
 MIMO_ACTIVE=0
 VOLC_ACTIVE=0
+SILICONFLOW_ACTIVE=0
 if [[ -z "${VOICE_IME_MIMO_API_KEY:-${MIMO_API_KEY:-}}" ]] && \
    [[ "$ASR_BACKEND_LC" == "mimo-cloud" || "$ASR_BACKEND_LC" == "mimo-cloud-asr" || "$ASR_BACKEND_LC" == "mimo-api" || "$ASR_BACKEND_LC" == "mimo-api-asr" || "$ASR_BACKEND_LC" == "mimo-tokenplan-asr" || "${VOICE_IME_MIMO_CLOUD_ASR:-0}" == "1" ]]; then
   MIMO_ACTIVE=1
@@ -275,7 +286,11 @@ if [[ -z "${VOICE_IME_VOLC_API_KEY:-${VOLC_BIGMODEL_API_KEY:-${VOLC_ASR_API_KEY:
    [[ "$ASR_BACKEND_LC" == "volc" || "$ASR_BACKEND_LC" == "volc-asr" || "$ASR_BACKEND_LC" == "volc-engine-asr" || "$ASR_BACKEND_LC" == "volc-bigmodel" || "$ASR_BACKEND_LC" == "volc-bigmodel-asr" || "$ASR_BACKEND_LC" == "doubao-asr" || "$ASR_BACKEND_LC" == "doubao-bigmodel-asr" || "${VOICE_IME_VOLC_BIGMODEL_ASR:-0}" == "1" ]]; then
   VOLC_ACTIVE=1
 fi
-if [[ "$MIMO_ACTIVE" == "1" || "$VOLC_ACTIVE" == "1" ]]; then
+if [[ -z "${VOICE_IME_SILICONFLOW_API_KEY:-${SILICONFLOW_API_KEY:-}}" ]] && \
+   [[ "$ASR_BACKEND_LC" == "siliconflow" || "$ASR_BACKEND_LC" == "siliconflow-asr" || "$ASR_BACKEND_LC" == "sf-asr" || "${VOICE_IME_SILICONFLOW_ASR:-0}" == "1" ]]; then
+  SILICONFLOW_ACTIVE=1
+fi
+if [[ "$MIMO_ACTIVE" == "1" || "$VOLC_ACTIVE" == "1" || "$SILICONFLOW_ACTIVE" == "1" ]]; then
   BWS_ENV_FILE="${VOICE_IME_BWS_ENV_FILE:-${PI_BWS_ENV_FILE:-$HOME/.config/pi-secrets/bws.env}}"
   if [[ -r "$BWS_ENV_FILE" ]] && command -v bws >/dev/null 2>&1; then
     if [[ -x "$ROOT_DIR/scripts/env-file-load.sh" ]]; then
@@ -299,6 +314,10 @@ if [[ "$MIMO_ACTIVE" == "1" || "$VOLC_ACTIVE" == "1" ]]; then
       if [[ "$VOLC_ACTIVE" == "1" ]]; then
         VOLC_SECRET="${VOICE_IME_VOLC_API_KEY_SECRET:-VOLC_BIGMODEL_ASR_API_KEY}"
         BWS_INJECT+="if [[ -z \"\${VOICE_IME_VOLC_API_KEY:-}\" && -n \"\${${VOLC_SECRET}:-}\" ]]; then export VOICE_IME_VOLC_API_KEY=\"\${${VOLC_SECRET}}\"; fi; "
+      fi
+      if [[ "$SILICONFLOW_ACTIVE" == "1" ]]; then
+        SILICONFLOW_SECRET="${VOICE_IME_SILICONFLOW_API_KEY_SECRET:-SILICONFLOW_API_KEY}"
+        BWS_INJECT+="if [[ -z \"\${VOICE_IME_SILICONFLOW_API_KEY:-}\" && -n \"\${${SILICONFLOW_SECRET}:-}\" ]]; then export VOICE_IME_SILICONFLOW_API_KEY=\"\${${SILICONFLOW_SECRET}}\"; fi; "
       fi
       exec bws run --project-id "$BWS_PROJECT_ID" --shell bash -- "
 ${BWS_INJECT}

@@ -140,6 +140,7 @@ if [[ $WITH_VOICE -eq 1 ]]; then
   else
     echo "未检测到 NVIDIA GPU，跳过本地语音后端（不算失败）。"
     echo "云端替代（自备 API Key）："
+    echo "  VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh   # 硅基流动（无需 GPU/大陆直连；SenseVoiceSmall 官方标注免费，Qwen3-ASR 按秒计费）"
     echo "  VOICE_IME_MIMO_API_KEY='tp-xxx' ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo"
     echo "  VOICE_IME_VOLC_API_KEY='xxx'  ./scripts/switch-volc-bigmodel-asr.sh    # 火山豆包"
     SKIP_STEPS+=("Qwen3-ASR 本地后端（无 GPU）")
