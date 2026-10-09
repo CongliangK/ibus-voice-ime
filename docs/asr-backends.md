@@ -1,6 +1,6 @@
 # 语音后端支持
 
-本项目把「语音识别」抽象成可插拔后端，通过 `VOICE_IME_ASR_BACKEND` 与一组开关变量选择；`scripts/switch-*.sh` / `setup-*.sh` 负责切换并把配置持久化到 `~/.config/environment.d/ibus-voice-ime.conf`（单一事实源，重启输入法后生效）。各后端的完整环境变量清单见根 [README.md](../README.md)「语音输入」一节。
+本项目把「语音识别」抽象成可插拔后端，通过统一配置的 `asr.backend`（环境变量 `VOICE_IME_ASR_BACKEND` 仍可临时覆盖）与一组开关选择。switch 脚本现在把渠道与后端设置写入 `~/.config/ibus-voice-ime/config.json`（渠道 = `asr.backend`，单一事实源），不再写 environment.d 渠道行（脚本会顺带清掉旧的渠道行残留）。完整配置键位见 [configuration.md](configuration.md)。
 
 ## 后端总览
 

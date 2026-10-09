@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 from typing import Callable
 
+from ibus_voice_ime import config
+
 from ibus_voice_ime.asr import voice_hotkey
 
 import gi
@@ -25,9 +27,7 @@ except Exception:  # pragma: no cover - environment dependent
 
 class VoiceOverlay:
     def __init__(self, on_stop: Callable[[], None] | None = None, on_cancel: Callable[[], None] | None = None):
-        self.available = Gtk is not None and os.environ.get("VOICE_IME_OVERLAY", "1").strip().lower() not in {
-            "0", "false", "no", "off", "disabled"
-        }
+        self.available = Gtk is not None and config.env_bool("VOICE_IME_OVERLAY", True)
         self._on_stop = on_stop
         self._on_cancel = on_cancel
         self._window = None
@@ -51,9 +51,11 @@ class VoiceOverlay:
         self._window.set_resizable(False)
         self._window.set_decorated(False)
         self._window.set_default_size(320, 120)
-        catch_hotkey = os.environ.get("VOICE_IME_OVERLAY_CATCH_HOTKEY", "1").strip().lower() not in {
-            "0", "false", "no", "off", "disabled"
-        }
+        # 默认不接收键盘焦点：悬浮窗抢焦点会触发引擎实例切换（曾把 toggle
+        # 停止变成叠新录音，2026-10-09 事故），且停止热键已由引擎的进程级
+        # 所有权转发兜底，无需悬浮窗自己接键。要 Esc 取消/窗口内接键的用户
+        # 可显式设 VOICE_IME_OVERLAY_CATCH_HOTKEY=1。
+        catch_hotkey = config.env_bool("VOICE_IME_OVERLAY_CATCH_HOTKEY", False)
         self._window.set_accept_focus(catch_hotkey)
         self._window.set_focus_on_map(catch_hotkey)
         self._window.set_can_focus(catch_hotkey)
@@ -83,7 +85,7 @@ class VoiceOverlay:
         self._bar.set_show_text(False)
         box.pack_start(self._bar, False, False, 0)
 
-        if os.environ.get("VOICE_IME_OVERLAY_BUTTONS", "0").strip().lower() not in {"0", "false", "no", "off", "disabled"}:
+        if config.env_bool("VOICE_IME_OVERLAY_BUTTONS", False):
             row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
             box.pack_start(row, False, False, 0)
 
@@ -210,7 +212,7 @@ class VoiceOverlay:
     def _position_window(self) -> None:
         if not self.available or self._window is None or Gtk is None:
             return
-        pos = os.environ.get("VOICE_IME_OVERLAY_POSITION", "top-center").strip().lower()
+        pos = config.env_str("VOICE_IME_OVERLAY_POSITION", "top-center").strip().lower()
         try:
             screen = self._window.get_screen()
             monitor = screen.get_primary_monitor()

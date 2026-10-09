@@ -9,6 +9,8 @@ from __future__ import annotations
 import os
 import re
 
+from ibus_voice_ime import config
+
 _SPACE_RE = re.compile(r"[ \t\r\f\v]+")
 _SPACE_AROUND_CJK_PUNCT_RE = re.compile(r"[ \t\r\f\v]*([，。！？；：、])[ \t\r\f\v]*")
 _CJK_SPACE_CJK_RE = re.compile(r"(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])")
@@ -69,10 +71,7 @@ _DISCOURSE_FILLER_RE = re.compile(r"(?:对吧|怎么说呢|然后呢|首先呢|�
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _exact_voice_command(text: str) -> str | None:
@@ -305,10 +304,7 @@ def auto_punctuate(text: str, *, mode: str | None = None) -> str:
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def apply_replacement_table(text: str) -> str:
@@ -357,7 +353,7 @@ def normalize(text: str, *, mode: str | None = None) -> str:
       - literal: only whitespace cleanup; no command/filler processing.
       - dictation/markdown/prompt/command: apply voice commands and fillers.
     """
-    mode = (mode or os.environ.get("VOICE_IME_VOICE_MODE", "dictation")).strip().lower()
+    mode = (mode or config.env_str("VOICE_IME_VOICE_MODE", "dictation")).strip().lower()
     text = (text or "").strip()
     if not text:
         return ""

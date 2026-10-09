@@ -260,7 +260,7 @@ class DenoiseTierTest(unittest.TestCase):
         return wav
 
     def test_unknown_tier_falls_back_to_none(self) -> None:
-        self.assertEqual(audio_preprocess._denoise_tier(), "notch")  # 默认档
+        self.assertEqual(audio_preprocess._denoise_tier(), "rnnoise")  # 出厂默认档（缺 ffmpeg/模型时自动降级 notch）
         os.environ["VOICE_IME_DENOISE_TIER"] = "bogus"
         self.assertEqual(audio_preprocess._denoise_tier(), "none")
 

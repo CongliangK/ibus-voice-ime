@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+
+from ibus_voice_ime import config
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -154,7 +156,7 @@ def is_plausible_pinyin_code(raw: str) -> bool:
 class EnglishMemory:
     def __init__(self, path: str | Path | None = None):
         if path is None:
-            path = os.environ.get("VOICE_IME_ENGLISH_USER_DICT", "~/.local/share/ibus-voice-ime/english.json")
+            path = config.env_str("VOICE_IME_ENGLISH_USER_DICT", "~/.local/share/ibus-voice-ime/english.json")
         self.path = Path(path).expanduser()
         self.words: dict[str, dict[str, Any]] = {}
         self._load()

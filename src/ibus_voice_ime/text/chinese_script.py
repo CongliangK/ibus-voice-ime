@@ -10,6 +10,8 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import os
+
+from ibus_voice_ime import config
 import re
 from pathlib import Path
 
@@ -24,7 +26,7 @@ _DISABLED_ALIASES = {"", "none", "off", "0", "false", "disabled", "disable"}
 
 
 def _mode() -> str:
-    raw = os.environ.get("VOICE_IME_CHINESE_SCRIPT", "simplified").strip().lower()
+    raw = config.env_str("VOICE_IME_CHINESE_SCRIPT", "simplified").strip().lower()
     if raw in _DISABLED_ALIASES:
         return "none"
     if raw in _TRADITIONAL_ALIASES:
@@ -36,12 +38,12 @@ def _mode() -> str:
 
 def _config_for_mode(mode: str) -> str | None:
     if mode == "simplified":
-        configured = os.environ.get("VOICE_IME_OPENCC_T2S_CONFIG", "").strip()
+        configured = config.env_str("VOICE_IME_OPENCC_T2S_CONFIG", "").strip()
         if configured:
             return configured
         return "/usr/share/opencc/t2s.json"
     if mode == "traditional":
-        configured = os.environ.get("VOICE_IME_OPENCC_S2T_CONFIG", "").strip()
+        configured = config.env_str("VOICE_IME_OPENCC_S2T_CONFIG", "").strip()
         if configured:
             return configured
         return "/usr/share/opencc/s2t.json"

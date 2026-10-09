@@ -22,6 +22,7 @@ import wave
 from array import array
 from pathlib import Path
 
+from ibus_voice_ime import config
 from ibus_voice_ime.asr import (
     audio_preprocess,
     mimo_asr_runtime,
@@ -39,24 +40,15 @@ class VoiceError(RuntimeError):
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_float(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def _log(message: str) -> None:
@@ -130,7 +122,7 @@ def _arecord_device_args() -> list[str]:
     通用性：hw/plughw 设备串若在当前机器上不存在（换机器/换声卡后残留的
     配置），记录一条日志并回退系统默认源，而不是让录音直接失败。
     """
-    device = os.environ.get("VOICE_IME_ARECORD_DEVICE", "").strip()
+    device = config.env_str("VOICE_IME_ARECORD_DEVICE", "").strip()
     if not device or device == "default":
         return []
     if device.startswith(("hw:", "plughw:")):
@@ -147,7 +139,7 @@ def _arecord_device_args() -> list[str]:
 
 def _record_wav_vad(path: str, max_seconds: int) -> None:
     """Record until silence using simple RMS VAD over arecord raw PCM."""
-    max_seconds = max(1, int(os.environ.get("VOICE_IME_MAX_RECORD_SECONDS", str(max_seconds))))
+    max_seconds = max(1, config.env_int("VOICE_IME_MAX_RECORD_SECONDS", max_seconds))
     min_seconds = max(0.0, _env_float("VOICE_IME_MIN_RECORD_SECONDS", 0.4))
     silence_stop_ms = max(100.0, _env_float("VOICE_IME_SILENCE_STOP_MS", 1000.0))
     no_speech_timeout = max(0.5, _env_float("VOICE_IME_NO_SPEECH_TIMEOUT", 2.5))
@@ -255,7 +247,7 @@ def _record_wav(path: str, seconds: int) -> None:
 
 
 def _transcribe_with_command(wav_path: str) -> str | None:
-    template = os.environ.get("VOICE_IME_ASR_CMD", "").strip()
+    template = config.env_str("VOICE_IME_ASR_CMD", "").strip()
     if not template:
         return None
     if "{wav}" in template:
@@ -296,14 +288,14 @@ def _transcribe_with_faster_whisper(wav_path: str) -> str | None:
         return None
 
     global _WHISPER_MODEL_CACHE, _WHISPER_MODEL_KEY
-    model_name = os.environ.get("VOICE_IME_WHISPER_MODEL", "large-v3")
-    device = os.environ.get("VOICE_IME_WHISPER_DEVICE", "cuda")
-    compute_type = os.environ.get("VOICE_IME_WHISPER_COMPUTE", "float16")
+    model_name = config.env_str("VOICE_IME_WHISPER_MODEL", "large-v3")
+    device = config.env_str("VOICE_IME_WHISPER_DEVICE", "cuda")
+    compute_type = config.env_str("VOICE_IME_WHISPER_COMPUTE", "float16")
     device_index = _env_int("VOICE_IME_WHISPER_DEVICE_INDEX", 0)
     require_gpu = _env_bool("VOICE_IME_REQUIRE_GPU_STT", False)
     if require_gpu and device.lower() != "cuda":
         raise VoiceError("已要求 GPU STT，但 VOICE_IME_WHISPER_DEVICE 不是 cuda。")
-    language = os.environ.get("VOICE_IME_WHISPER_LANGUAGE", "zh").strip() or None
+    language = config.env_str("VOICE_IME_WHISPER_LANGUAGE", "zh").strip() or None
     key = (model_name, device, compute_type, device_index)
     if _WHISPER_MODEL_CACHE is None or _WHISPER_MODEL_KEY != key:
         _log(
@@ -409,7 +401,7 @@ def _transcribe_with_siliconflow_asr(wav_path: str) -> str | None:
 
 
 def _transcribe_with_vosk(wav_path: str) -> str | None:
-    model_dir = os.environ.get("VOICE_IME_VOSK_MODEL", "").strip()
+    model_dir = config.env_str("VOICE_IME_VOSK_MODEL", "").strip()
     if not model_dir:
         return None
     try:
@@ -434,11 +426,10 @@ def _transcribe_with_vosk(wav_path: str) -> str | None:
 
 
 def _voice_dictionary_prompt() -> str:
-    punct = (
-        "请更积极地输出自然中文标点：根据语义加入逗号、句号、问号、顿号、分号或冒号，"
-        "避免整段无标点；除识别文字和标点外不要额外解释。"
-    )
-    explicit = os.environ.get("VOICE_IME_WHISPER_PROMPT", "").strip()
+    # 标点提示词外置于 config/defaults.json 的 asr.prompts.whisper_punctuation
+    # （可被用户 config.json / VOICE_IME_PROMPT_WHISPER_PUNCTUATION 覆盖）。
+    punct = config.get_prompt("whisper_punctuation")
+    explicit = config.env_str("VOICE_IME_WHISPER_PROMPT", "").strip()
     if explicit:
         return explicit + "\n" + punct
     # Kept for the faster-whisper fallback.  The active Qwen3-ASR backend gets
@@ -482,7 +473,7 @@ def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
 
 
 def postprocess(raw_text: str, *, skip_llm: bool = False) -> str:
-    mode = os.environ.get("VOICE_IME_VOICE_MODE", "dictation").strip().lower()
+    mode = config.env_str("VOICE_IME_VOICE_MODE", "dictation").strip().lower()
     # When the Volcano bigmodel backend is doing cloud-side semantic smoothing
     # (enable_ddc), suppress the local filler-removal pass so the same
     # disfluencies are not processed twice; the cloud's smoothing is preferred.
@@ -517,7 +508,7 @@ def postprocess(raw_text: str, *, skip_llm: bool = False) -> str:
 
 
 def record_and_transcribe(seconds: int | None = None, *, skip_llm: bool = False) -> str:
-    seconds = int(seconds or os.environ.get("VOICE_IME_RECORD_SECONDS", "5"))
+    seconds = int(seconds or config.env_str("VOICE_IME_RECORD_SECONDS", "5"))
     with tempfile.TemporaryDirectory(prefix="ibus-voice-ime-") as tmp:
         wav_path = str(Path(tmp) / "record.wav")
         _record_wav(wav_path, seconds)

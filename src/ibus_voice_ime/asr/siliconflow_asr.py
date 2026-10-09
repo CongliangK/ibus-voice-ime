@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import os
 import time
+
+from ibus_voice_ime import config
 import urllib.error
 import urllib.request
 import uuid
@@ -41,14 +43,11 @@ _MIME_BY_SUFFIX = {
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def selected() -> bool:
-    backend = os.environ.get("VOICE_IME_ASR_BACKEND", "").strip().lower()
+    backend = config.env_str("VOICE_IME_ASR_BACKEND", "").strip().lower()
     return backend in {"siliconflow", "siliconflow-asr", "sf-asr"} or _env_bool(
         "VOICE_IME_SILICONFLOW_ASR", False
     )
@@ -56,7 +55,7 @@ def selected() -> bool:
 
 def base_url() -> str:
     raw = (
-        os.environ.get("VOICE_IME_SILICONFLOW_BASE_URL")
+        config.env_str("VOICE_IME_SILICONFLOW_BASE_URL", None)
         or os.environ.get("SILICONFLOW_BASE_URL")
         or DEFAULT_BASE_URL
     ).strip()
@@ -66,7 +65,7 @@ def base_url() -> str:
 def model_id() -> str:
     """当前模型名（日志对齐用）。"""
     raw = (
-        os.environ.get("VOICE_IME_SILICONFLOW_MODEL")
+        config.env_str("VOICE_IME_SILICONFLOW_MODEL", None)
         or os.environ.get("SILICONFLOW_MODEL")
         or DEFAULT_MODEL
     ).strip()
@@ -161,7 +160,7 @@ def transcribe(wav_path: str) -> str:
 
     audio_bytes = path.read_bytes()
     # 官方限额单文件 <=50MB（时长 <=1h）；超限提前拒绝，避免整段上传后才报错。
-    limit = int(float(os.environ.get("VOICE_IME_SILICONFLOW_MAX_DATA_MB", "50")) * 1024 * 1024)
+    limit = int(config.env_float("VOICE_IME_SILICONFLOW_MAX_DATA_MB", 50.0) * 1024 * 1024)
     if len(audio_bytes) > limit:
         raise RuntimeError(
             f"硅基流动 ASR 音频过大（{len(audio_bytes) / (1024 * 1024):.1f}MB，"
@@ -175,7 +174,7 @@ def transcribe(wav_path: str) -> str:
         "Content-Type": f"multipart/form-data; boundary={boundary}",
         "Authorization": f"Bearer {_api_key()}",
     }
-    timeout = float(os.environ.get("VOICE_IME_SILICONFLOW_TIMEOUT", "120"))
+    timeout = config.env_float("VOICE_IME_SILICONFLOW_TIMEOUT", 120.0)
     req = urllib.request.Request(_transcribe_url(), data=body, headers=headers, method="POST")
     started = time.monotonic()
     try:

@@ -288,91 +288,15 @@ API Key 推荐通过 BWS 运行时注入 `XIAOMI_TOKEN_PLAN_CN_API_KEY`，不要
    VOICE_IME_SILICONFLOW_API_KEY='sk-xxxxx' ./scripts/switch-siliconflow-asr.sh
    ```
 
-常用语音/STT 环境变量：
+常用语音/STT 配置已统一收敛到 `~/.config/ibus-voice-ime/config.json`，不再需要导出一堆环境变量。优先级一句话：**环境变量 > 用户 config.json > 仓库 `config/defaults.json` > 代码内默认**（临时覆盖仍可用 `VOICE_IME_*` 环境变量）。常用示例（仓库根目录执行）：
 
 ```bash
-export VOICE_IME_TRIGGER_MODE=toggle         # toggle：按一次开始，再按一次停止；fixed：固定时长旧模式（V/B 差异同 toggle：B 仍跳过 LLM 后处理）
-export VOICE_IME_HOTKEYS=Ctrl+Alt+V # 默认语音热键；仅支持 Ctrl+Alt+字母
-export VOICE_IME_RAW_HOTKEYS=Ctrl+Alt+B # 原文语音热键（跳过 LLM 后处理）；与主热键或剪贴板热键（Ctrl+Alt+P）重叠的字母被剔除，全部重叠时自动禁用
-export VOICE_IME_MAX_RECORD_SECONDS=300      # toggle 模式最长录音时长（默认 300 = 5 分钟）
-export VOICE_IME_OVERLAY=0                   # 默认关闭独立语音状态弹窗；设为 1 可开启
-export VOICE_IME_OVERLAY_POSITION=top-center # top-center 或 center
-export VOICE_IME_RECORD_SECONDS=5            # fixed 模式固定录音时长
-export VOICE_IME_ASR_BACKEND=qwen3-asr # 默认：本地 Qwen3-ASR (1.7B)
-export VOICE_IME_QWEN_ASR=1
-export VOICE_IME_QWEN_ASR_MODEL=1.7b
-export VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS=1024 # 单次转写生成 token 上限；过小会把长听写硬截断（默认 1024，约 1000~1800 汉字）
-export VOICE_IME_MIMO_ASR=0
-export VOICE_IME_MIMO_CLOUD_ASR=0
-export VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-export VOICE_IME_MIMO_CLOUD_ASR_MODEL=mimo-v2.5-asr
-export VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE=auto
-
-# faster-whisper 仅作为本地兜底/诊断后端；显式切换时使用：
-# export VOICE_IME_ASR_BACKEND=faster-whisper
-# export VOICE_IME_MIMO_CLOUD_ASR=0
-export VOICE_IME_QWEN_ASR=0
-export VOICE_IME_WHISPER_MODEL=large-v3    # Whisper 最大通用模型；RTX 4080 可用 float16 跑 GPU
-export VOICE_IME_WHISPER_DEVICE=cuda       # faster-whisper 兜底用 GPU STT；不默认使用 CPU
-export VOICE_IME_WHISPER_DEVICE_INDEX=0
-export VOICE_IME_WHISPER_COMPUTE=float16   # 省显存可改 int8_float16
-export VOICE_IME_REQUIRE_GPU_STT=1          # 防止误回退到 CPU
-export VOICE_IME_WHISPER_LANGUAGE=zh        # 设为空可自动检测
-
-# Qwen3-ASR 常用变量
-export VOICE_IME_ASR_BACKEND=qwen3-asr
-export VOICE_IME_QWEN_ASR=1
-export VOICE_IME_QWEN_ASR_MODEL=0.6b        # 0.6b 或 1.7b
-export VOICE_IME_QWEN_ASR_LANGUAGE=Chinese
-export VOICE_IME_QWEN_ASR_PORT=18081
-export VOICE_IME_QWEN_ASR_DTYPE=bfloat16
-export VOICE_IME_QWEN_ASR_DEVICE_MAP=cuda:0
-
-# MiMo-V2.5-ASR 本地 sidecar 常用变量
-export VOICE_IME_ASR_BACKEND=mimo-asr
-export VOICE_IME_MIMO_ASR=1
-export VOICE_IME_MIMO_ASR_MODEL_PATH=$PWD/vendor/models/mimo-asr/MiMo-V2.5-ASR
-export VOICE_IME_MIMO_ASR_TOKENIZER_PATH=$PWD/vendor/models/mimo-asr/MiMo-Audio-Tokenizer
-export VOICE_IME_MIMO_ASR_SOURCE=$PWD/vendor/MiMo-V2.5-ASR
-export VOICE_IME_MIMO_ASR_LANGUAGE=auto     # auto / Chinese / English
-export VOICE_IME_MIMO_ASR_PORT=18082
-export VOICE_IME_MIMO_ASR_DEVICE=cuda
-
-# MiMo 云端 ASR / Token Plan 常用变量
-export VOICE_IME_ASR_BACKEND=mimo-cloud-asr
-export VOICE_IME_MIMO_CLOUD_ASR=1
-export VOICE_IME_MIMO_API_KEY=tp-xxxxx      # Token Plan Key；pay-as-you-go 为 sk-xxxxx
-export VOICE_IME_MIMO_CLOUD_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
-export VOICE_IME_MIMO_CLOUD_ASR_MODEL=mimo-v2.5-asr
-export VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE=auto # auto / zh / en
-
-# 火山引擎豆包 bigmodel ASR（极速版，base64 直传）常用变量
-export VOICE_IME_ASR_BACKEND=volc-bigmodel-asr
-export VOICE_IME_VOLC_BIGMODEL_ASR=1
-export VOICE_IME_VOLC_API_KEY=xxxxx           # X-Api-Key；推荐用 bws 注入，不写这里
-export VOICE_IME_VOLC_API_KEY_SECRET=VOLC_BIGMODEL_ASR_API_KEY  # BWS 密钥名，不持久化原始 key
-export VOICE_IME_VOLC_BIGMODEL_BASE_URL=https://openspeech.bytedance.com
-export VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID=volc.bigasr.auc_turbo
-export VOICE_IME_VOLC_BIGMODEL_MODEL_NAME=bigmodel
-export VOICE_IME_VOLC_BIGMODEL_ENABLE_PUNC=1  # 默认开启标点
-export VOICE_IME_VOLC_BIGMODEL_ENABLE_ITN=1   # 默认开启 ITN（“一百二十三美元”->“$123”）
-export VOICE_IME_VOLC_BIGMODEL_ENABLE_DDC=1   # 默认开启云端语义顺滑（替代本地 filler 移除）
-export VOICE_IME_VOLC_BIGMODEL_LANGUAGE=       # 留空=中英+方言混说最佳；zh=en-only 等可钉死单语
-export VOICE_IME_VOLC_BIGMODEL_HOTWORDS=1      # 默认把 voice-dictionary.txt + english.json 作为热词直传 corpus.context
-export VOICE_IME_VOLC_BIGMODEL_HOTWORDS_MAX=5000  # 热词上限，文档上限 5000
-# 可选：火山控制台“自学习平台”配置的持久热词/替换词表（优先级低于 context 直传）
-# export VOICE_IME_VOLC_BIGMODEL_BOOSTING_TABLE=my_boosting
-# export VOICE_IME_VOLC_BIGMODEL_CORRECT_TABLE=my_correct
-
-# 硅基流动 SiliconFlow ASR 常用变量
-export VOICE_IME_ASR_BACKEND=siliconflow-asr
-export VOICE_IME_SILICONFLOW_ASR=1
-export VOICE_IME_SILICONFLOW_API_KEY=sk-xxxxx       # 推荐用 bws 注入，不写这里
-export VOICE_IME_SILICONFLOW_API_KEY_SECRET=SILICONFLOW_API_KEY  # BWS 密钥名，不持久化原始 key
-export VOICE_IME_SILICONFLOW_BASE_URL=https://api.siliconflow.cn
-export VOICE_IME_SILICONFLOW_MODEL=FunAudioLLM/SenseVoiceSmall  # 官方标注免费；可换 Qwen/Qwen3-ASR-1.7B（约 ¥0.00022/秒）
-export VOICE_IME_SILICONFLOW_TIMEOUT=120
+PYTHONPATH=src python3 -m ibus_voice_ime.config set asr.backend siliconflow-asr   # 切换 STT 渠道
+PYTHONPATH=src python3 -m ibus_voice_ime.config set llm.prompts.system '你是我的听写整理助手……'  # 自定义后处理提示词
+PYTHONPATH=src python3 -m ibus_voice_ime.config set recording.max_seconds 120     # toggle 模式最长录音 2 分钟
 ```
+
+全部 200+ 配置键的默认值、对应环境变量名与说明见 [docs/configuration.md](docs/configuration.md)。API Key 等密钥仍走环境变量 / BWS 运行时注入，不写入 config.json（各渠道 Key 的传法见上面各后端的切换命令）。老用户迁移：environment.d 里的渠道行仍生效但会压过 config.json——重跑 `./install.sh` 自动迁移；switch 脚本每次运行也会自动清理这些旧渠道行。
 
 GPU 验证：
 

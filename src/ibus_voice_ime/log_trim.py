@@ -14,13 +14,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from ibus_voice_ime import config
+
 DEFAULT_KEEP_LINES = 1000
 # 字节门槛：低于它必然不足 keep 行（按每行 ~128B 保守估算），直接跳过。
 _MIN_BYTES_FACTOR = 128
 
 
 def keep_lines_from_env() -> int:
-    raw = os.environ.get("VOICE_IME_LOG_KEEP_LINES", "").strip()
+    raw = config.env_str("VOICE_IME_LOG_KEEP_LINES", "").strip()
     if not raw:
         return DEFAULT_KEEP_LINES
     try:

@@ -15,6 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ibus_voice_ime import config
 from ibus_voice_ime.log_trim import trim_to_last_lines
 from ibus_voice_ime.memory import voice_terms
 
@@ -35,10 +36,7 @@ _FAIL_MSG = ""
 
 
 def _fail_cooldown() -> float:
-    try:
-        return max(0.0, float(os.environ.get("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", "180")))
-    except Exception:
-        return 180.0
+    return max(0.0, config.env_float("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", 180.0))
 
 
 def _record_spawn_failure(key: tuple[str, int, str], message: str) -> RuntimeError:
@@ -82,26 +80,20 @@ def _terminate_process(proc: subprocess.Popen) -> None:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def selected() -> bool:
-    backend = os.environ.get("VOICE_IME_ASR_BACKEND", "").strip().lower()
+    backend = config.env_str("VOICE_IME_ASR_BACKEND", "").strip().lower()
     return backend in {"qwen", "qwen3", "qwen3-asr", "qwen-asr"} or _env_bool("VOICE_IME_QWEN_ASR", False)
 
 
 def _host() -> str:
-    return os.environ.get("VOICE_IME_QWEN_ASR_HOST", DEFAULT_HOST)
+    return config.env_str("VOICE_IME_QWEN_ASR_HOST", DEFAULT_HOST)
 
 
 def _port() -> int:
@@ -113,7 +105,7 @@ def base_url() -> str:
 
 
 def _python() -> str:
-    explicit = os.environ.get("VOICE_IME_QWEN_ASR_PYTHON", "").strip()
+    explicit = config.env_str("VOICE_IME_QWEN_ASR_PYTHON", "").strip()
     if explicit:
         return str(Path(explicit).expanduser())
     venv_python = ROOT_DIR / ".venv-qwen-asr" / "bin" / "python"
@@ -136,11 +128,11 @@ def _local_model_dir(name: str) -> Path | None:
 
 
 def model_id() -> str:
-    explicit_path = os.environ.get("VOICE_IME_QWEN_ASR_MODEL_PATH", "").strip()
+    explicit_path = config.env_str("VOICE_IME_QWEN_ASR_MODEL_PATH", "").strip()
     if explicit_path:
         return str(Path(explicit_path).expanduser())
 
-    raw = os.environ.get("VOICE_IME_QWEN_ASR_MODEL", DEFAULT_MODEL_ALIAS).strip() or DEFAULT_MODEL_ALIAS
+    raw = config.env_str("VOICE_IME_QWEN_ASR_MODEL", DEFAULT_MODEL_ALIAS).strip() or DEFAULT_MODEL_ALIAS
     lower = raw.lower()
     local = _local_model_dir(lower)
     if local is not None:
@@ -274,12 +266,9 @@ def _ensure_server_locked() -> str:
     global _PROCESS, _PROCESS_KEY
     url = base_url()
     key = (_host(), _port(), model_id())
-    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_file = log_dir / "qwen-asr-server.log"
-    try:
-        timeout = max(1.0, float(os.environ.get("VOICE_IME_QWEN_ASR_START_TIMEOUT", "120")))
-    except Exception:
-        timeout = 120.0
+    timeout = max(1.0, config.env_float("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0))
 
     def death_error(code: int | None) -> RuntimeError:
         tail = _log_tail(log_file)
@@ -389,13 +378,15 @@ def _ensure_server_locked() -> str:
 
 def transcribe(wav_path: str) -> str:
     url = ensure_server()
-    language = os.environ.get("VOICE_IME_QWEN_ASR_LANGUAGE", os.environ.get("VOICE_IME_WHISPER_LANGUAGE", "zh"))
+    language = config.env_str("VOICE_IME_QWEN_ASR_LANGUAGE", None)
+    if language is None:
+        language = config.env_str("VOICE_IME_WHISPER_LANGUAGE", "zh")
     payload = {"audio": wav_path, "language": language}
     context = voice_terms.build_asr_context()
     if context:
         payload["context"] = context
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    timeout = float(os.environ.get("VOICE_IME_QWEN_ASR_TIMEOUT", "120"))
+    timeout = config.env_float("VOICE_IME_QWEN_ASR_TIMEOUT", 120.0)
     req = urllib.request.Request(
         url + "/transcribe",
         data=data,
@@ -426,7 +417,7 @@ def transcribe(wav_path: str) -> str:
         raise RuntimeError(str(result["error"]))
     # 日志保留：sidecar 常驻进程的日志只在 spawn 时裁剪，重负载长会话期间
     # 由识别路径顺手兜底（廉价 stat，超阈值才重写）。
-    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     trim_to_last_lines(log_dir / "qwen-asr-server.log")
     return str(result.get("text") or "").strip()
 
@@ -449,7 +440,7 @@ def warm() -> bool:
         return False
     # Give warmup the full sidecar start window: the first warm may itself
     # trigger model loading (~10s from disk on first use, ~1s RAM->GPU after).
-    timeout = float(os.environ.get("VOICE_IME_QWEN_ASR_START_TIMEOUT", "120"))
+    timeout = config.env_float("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0)
     req = urllib.request.Request(
         url + "/warm",
         data=b"{}",

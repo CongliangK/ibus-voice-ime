@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.request
 
+from ibus_voice_ime import config
 from ibus_voice_ime.log_trim import trim_to_last_lines
 from pathlib import Path
 from typing import Any
@@ -23,26 +24,20 @@ _PROCESS_KEY: tuple[str, int, str, str, str] | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def selected() -> bool:
-    backend = os.environ.get("VOICE_IME_ASR_BACKEND", "").strip().lower()
+    backend = config.env_str("VOICE_IME_ASR_BACKEND", "").strip().lower()
     return backend in {"mimo", "mimo-asr", "mimo-v2.5-asr", "mimo-v25-asr"} or _env_bool("VOICE_IME_MIMO_ASR", False)
 
 
 def _host() -> str:
-    return os.environ.get("VOICE_IME_MIMO_ASR_HOST", DEFAULT_HOST)
+    return config.env_str("VOICE_IME_MIMO_ASR_HOST", DEFAULT_HOST)
 
 
 def _port() -> int:
@@ -54,7 +49,7 @@ def base_url() -> str:
 
 
 def _python() -> str:
-    explicit = os.environ.get("VOICE_IME_MIMO_ASR_PYTHON", "").strip()
+    explicit = config.env_str("VOICE_IME_MIMO_ASR_PYTHON", "").strip()
     if explicit:
         return str(Path(explicit).expanduser())
     venv_python = ROOT_DIR / ".venv-mimo-asr" / "bin" / "python"
@@ -64,7 +59,7 @@ def _python() -> str:
 
 
 def _models_base() -> Path:
-    return Path(os.environ.get("VOICE_IME_MIMO_ASR_MODELS_DIR", ROOT_DIR / "vendor" / "models" / "mimo-asr")).expanduser()
+    return Path(config.env_str("VOICE_IME_MIMO_ASR_MODELS_DIR", "") or (ROOT_DIR / "vendor" / "models" / "mimo-asr")).expanduser()
 
 
 def _local_model_dir(name: str) -> Path | None:
@@ -88,10 +83,10 @@ def _local_tokenizer_dir() -> Path | None:
 
 
 def model_id() -> str:
-    explicit_path = os.environ.get("VOICE_IME_MIMO_ASR_MODEL_PATH", "").strip()
+    explicit_path = config.env_str("VOICE_IME_MIMO_ASR_MODEL_PATH", "").strip()
     if explicit_path:
         return str(Path(explicit_path).expanduser())
-    raw = os.environ.get("VOICE_IME_MIMO_ASR_MODEL", "XiaomiMiMo/MiMo-V2.5-ASR").strip()
+    raw = config.env_str("VOICE_IME_MIMO_ASR_MODEL", "XiaomiMiMo/MiMo-V2.5-ASR").strip()
     local = _local_model_dir(raw)
     if local is not None:
         return str(local)
@@ -99,10 +94,10 @@ def model_id() -> str:
 
 
 def tokenizer_id() -> str:
-    explicit_path = os.environ.get("VOICE_IME_MIMO_ASR_TOKENIZER_PATH", "").strip()
+    explicit_path = config.env_str("VOICE_IME_MIMO_ASR_TOKENIZER_PATH", "").strip()
     if explicit_path:
         return str(Path(explicit_path).expanduser())
-    raw = os.environ.get("VOICE_IME_MIMO_ASR_TOKENIZER", "XiaomiMiMo/MiMo-Audio-Tokenizer").strip()
+    raw = config.env_str("VOICE_IME_MIMO_ASR_TOKENIZER", "XiaomiMiMo/MiMo-Audio-Tokenizer").strip()
     local = _local_tokenizer_dir()
     if local is not None:
         return str(local)
@@ -110,7 +105,7 @@ def tokenizer_id() -> str:
 
 
 def source_dir() -> str:
-    explicit = os.environ.get("VOICE_IME_MIMO_ASR_SOURCE", "").strip()
+    explicit = config.env_str("VOICE_IME_MIMO_ASR_SOURCE", "").strip()
     if explicit:
         return str(Path(explicit).expanduser())
     local = ROOT_DIR / "vendor" / "MiMo-V2.5-ASR"
@@ -162,7 +157,7 @@ def ensure_server() -> str:
     if _PROCESS is not None and _PROCESS.poll() is None and _PROCESS_KEY == key:
         return url
 
-    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "mimo-asr-server.log"
     trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
@@ -189,7 +184,7 @@ def ensure_server() -> str:
     )
     _PROCESS_KEY = key
 
-    timeout = float(os.environ.get("VOICE_IME_MIMO_ASR_START_TIMEOUT", "300"))
+    timeout = config.env_float("VOICE_IME_MIMO_ASR_START_TIMEOUT", 300.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _PROCESS.poll() is not None:
@@ -203,13 +198,13 @@ def ensure_server() -> str:
 
 def transcribe(wav_path: str) -> str:
     url = ensure_server()
-    language = os.environ.get("VOICE_IME_MIMO_ASR_LANGUAGE", "auto")
-    audio_tag = os.environ.get("VOICE_IME_MIMO_ASR_AUDIO_TAG", "").strip()
+    language = config.env_str("VOICE_IME_MIMO_ASR_LANGUAGE", "auto")
+    audio_tag = config.env_str("VOICE_IME_MIMO_ASR_AUDIO_TAG", "").strip()
     payload = {"audio": wav_path, "language": language}
     if audio_tag:
         payload["audio_tag"] = audio_tag
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    timeout = float(os.environ.get("VOICE_IME_MIMO_ASR_TIMEOUT", "300"))
+    timeout = config.env_float("VOICE_IME_MIMO_ASR_TIMEOUT", 300.0)
     req = urllib.request.Request(
         url + "/transcribe",
         data=data,

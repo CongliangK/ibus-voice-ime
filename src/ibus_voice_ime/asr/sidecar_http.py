@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from ibus_voice_ime import config
 from typing import Any, BinaryIO, Mapping
 from urllib.parse import urlparse
 
@@ -18,7 +20,7 @@ class RequestError(ValueError):
 
 
 def _max_body_bytes() -> int:
-    raw = os.environ.get("VOICE_IME_ASR_SIDECAR_MAX_BODY_BYTES", "")
+    raw = config.env_str("VOICE_IME_ASR_SIDECAR_MAX_BODY_BYTES", "")
     if not raw.strip():
         return DEFAULT_MAX_BODY_BYTES
     try:

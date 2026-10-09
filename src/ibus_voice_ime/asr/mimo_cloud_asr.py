@@ -6,6 +6,8 @@ import base64
 import json
 import mimetypes
 import os
+
+from ibus_voice_ime import config
 import time
 import urllib.error
 import urllib.request
@@ -17,14 +19,11 @@ DEFAULT_MODEL = "mimo-v2.5-asr"
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def selected() -> bool:
-    backend = os.environ.get("VOICE_IME_ASR_BACKEND", "").strip().lower()
+    backend = config.env_str("VOICE_IME_ASR_BACKEND", "").strip().lower()
     return backend in {"mimo-cloud", "mimo-cloud-asr", "mimo-api", "mimo-api-asr", "mimo-tokenplan-asr"} or _env_bool(
         "VOICE_IME_MIMO_CLOUD_ASR", False
     )
@@ -32,7 +31,7 @@ def selected() -> bool:
 
 def base_url() -> str:
     raw = (
-        os.environ.get("VOICE_IME_MIMO_CLOUD_BASE_URL")
+        config.env_str("VOICE_IME_MIMO_CLOUD_BASE_URL", None)
         or os.environ.get("VOICE_IME_MIMO_BASE_URL")
         or os.environ.get("MIMO_BASE_URL")
         or os.environ.get("MIMO_API_BASE_URL")
@@ -42,7 +41,7 @@ def base_url() -> str:
 
 
 def model_id() -> str:
-    return os.environ.get("VOICE_IME_MIMO_CLOUD_ASR_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    return config.env_str("VOICE_IME_MIMO_CLOUD_ASR_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 
 def _api_key() -> str:
@@ -67,9 +66,8 @@ def _endpoint() -> str:
 
 def _language() -> str:
     raw = (
-        os.environ.get("VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE")
-        or os.environ.get("VOICE_IME_MIMO_ASR_LANGUAGE")
-        or "auto"
+        config.env_str("VOICE_IME_MIMO_CLOUD_ASR_LANGUAGE", None)
+        or config.env_str("VOICE_IME_MIMO_ASR_LANGUAGE", "auto")
     ).strip().lower()
     mapping = {
         "": "auto",
@@ -136,7 +134,7 @@ def transcribe(wav_path: str) -> str:
     audio_bytes = path.read_bytes()
     data_url = f"data:{_mime_type(path)};base64," + base64.b64encode(audio_bytes).decode("ascii")
     # Official docs say the Base64 data URL should not exceed 10 MB.
-    limit = int(float(os.environ.get("VOICE_IME_MIMO_CLOUD_ASR_MAX_DATA_MB", "10")) * 1024 * 1024)
+    limit = int(config.env_float("VOICE_IME_MIMO_CLOUD_ASR_MAX_DATA_MB", 10.0) * 1024 * 1024)
     if len(data_url.encode("utf-8")) > limit:
         raise RuntimeError(
             "MiMo 云端 ASR 音频超过 10MB data URL 限制；请缩短录音时长"
@@ -162,13 +160,13 @@ def transcribe(wav_path: str) -> str:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {"Content-Type": "application/json"}
     key = _api_key()
-    auth_header = os.environ.get("VOICE_IME_MIMO_CLOUD_AUTH_HEADER", "api-key").strip().lower()
+    auth_header = config.env_str("VOICE_IME_MIMO_CLOUD_AUTH_HEADER", "api-key").strip().lower()
     if auth_header in {"authorization", "bearer"}:
         headers["Authorization"] = f"Bearer {key}"
     else:
         headers["api-key"] = key
 
-    timeout = float(os.environ.get("VOICE_IME_MIMO_CLOUD_ASR_TIMEOUT", "120"))
+    timeout = config.env_float("VOICE_IME_MIMO_CLOUD_ASR_TIMEOUT", 120.0)
     started = time.monotonic()
     req = urllib.request.Request(_endpoint(), data=body, headers=headers, method="POST")
     try:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+
+from ibus_voice_ime import config
 from typing import Any
 
 _DEFAULT_HOTKEYS = ("v",)
@@ -31,7 +33,7 @@ def hotkey_letters() -> tuple[str, ...]:
     ``VOICE_IME_HOTKEYS``.  ``VOICE_IME_HOTKEY`` is kept as a single-hotkey
     compatibility alias.
     """
-    raw = os.environ.get("VOICE_IME_HOTKEYS") or os.environ.get("VOICE_IME_HOTKEY") or ""
+    raw = config.env_str("VOICE_IME_HOTKEYS", None) or config.env_str("VOICE_IME_HOTKEY", "") or ""
     return tuple(_parse_hotkey_letters(raw) or _DEFAULT_HOTKEYS)
 
 
@@ -66,7 +68,7 @@ def raw_hotkey_letters() -> tuple[str, ...]:
     - 用户**未配置**：使用默认 ``b``；若 ``b`` 恰好被主热键/剪贴板热键占用，
       同样返回空元组（禁用），绝不崩溃。
     """
-    raw = os.environ.get("VOICE_IME_RAW_HOTKEYS") or ""
+    raw = config.env_str("VOICE_IME_RAW_HOTKEYS", "") or ""
     letters = _parse_hotkey_letters(raw) or list(_DEFAULT_RAW_HOTKEYS)
     blocked = set(hotkey_letters())
     blocked.update(_clipboard_hotkey_letters())

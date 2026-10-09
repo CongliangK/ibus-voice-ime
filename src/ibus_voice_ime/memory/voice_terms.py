@@ -21,6 +21,8 @@ from __future__ import annotations
 import json
 import math
 import os
+
+from ibus_voice_ime import config
 import re
 import time
 from dataclasses import dataclass, field
@@ -41,17 +43,11 @@ class VoiceTerm:
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def _split_items(text: str) -> tuple[str, ...]:
@@ -64,11 +60,11 @@ def _split_items(text: str) -> tuple[str, ...]:
 
 
 def _voice_dictionary_path() -> Path:
-    return Path(os.environ.get("VOICE_IME_VOICE_DICTIONARY", "~/.local/share/ibus-voice-ime/voice-dictionary.txt")).expanduser()
+    return Path(config.env_str("VOICE_IME_VOICE_DICTIONARY", "~/.local/share/ibus-voice-ime/voice-dictionary.txt")).expanduser()
 
 
 def _english_memory_path() -> Path:
-    return Path(os.environ.get("VOICE_IME_ENGLISH_USER_DICT", "~/.local/share/ibus-voice-ime/english.json")).expanduser()
+    return Path(config.env_str("VOICE_IME_ENGLISH_USER_DICT", "~/.local/share/ibus-voice-ime/english.json")).expanduser()
 
 
 def _load_dictionary_terms() -> list[VoiceTerm]:

@@ -18,6 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from ibus_voice_ime import config
 from ibus_voice_ime.asr import sidecar_http
 
 _MODEL = None
@@ -52,7 +53,7 @@ def _load_model(model: str, tokenizer: str, source: str) -> Any:
             "或设置 VOICE_IME_MIMO_ASR_SOURCE 指向 XiaomiMiMo/MiMo-V2.5-ASR 源码目录。"
         ) from exc
 
-    device = os.environ.get("VOICE_IME_MIMO_ASR_DEVICE", "").strip() or None
+    device = config.env_str("VOICE_IME_MIMO_ASR_DEVICE", "").strip() or None
     print(
         f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
         f"MiMo-ASR loading model={model} tokenizer={tokenizer} device={device or 'auto'}",
@@ -135,9 +136,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--tokenizer", required=True)
-    parser.add_argument("--source", default=os.environ.get("VOICE_IME_MIMO_ASR_SOURCE", ""))
-    parser.add_argument("--host", default=os.environ.get("VOICE_IME_MIMO_ASR_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("VOICE_IME_MIMO_ASR_PORT", "18082")))
+    parser.add_argument("--source", default=config.env_str("VOICE_IME_MIMO_ASR_SOURCE", ""))
+    parser.add_argument("--host", default=config.env_str("VOICE_IME_MIMO_ASR_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=config.env_int("VOICE_IME_MIMO_ASR_PORT", 18082))
     args = parser.parse_args()
 
     global _MODEL, _MODEL_ID, _TOKENIZER_ID

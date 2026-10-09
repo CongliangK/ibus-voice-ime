@@ -9,6 +9,8 @@ from __future__ import annotations
 import ctypes
 import os
 import threading
+
+from ibus_voice_ime import config
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,7 +175,7 @@ class RimeService:
 
     @classmethod
     def _initialize(cls) -> None:
-        explicit = os.environ.get("VOICE_IME_RIME_LIBRARY", "").strip()
+        explicit = config.env_str("VOICE_IME_RIME_LIBRARY", "").strip()
         libname = explicit or _vendored_library()
         _preload_vendored_dependencies()
         try:
@@ -211,8 +213,8 @@ class RimeService:
         traits.distribution_code_name = b"ibus-voice-ime"
         traits.distribution_version = b"0.1.0"
         traits.app_name = b"rime.ibus-voice-ime"
-        traits.min_log_level = int(os.environ.get("VOICE_IME_RIME_LOG_LEVEL", "2"))
-        traits.log_dir = _bytes(os.environ.get("VOICE_IME_RIME_LOG_DIR", ""))
+        traits.min_log_level = int(config.env_str("VOICE_IME_RIME_LOG_LEVEL", "2"))
+        traits.log_dir = _bytes(config.env_str("VOICE_IME_RIME_LOG_DIR", ""))
         staging = _staging_dir()
         if staging:
             traits.staging_dir = _bytes(staging)
@@ -258,29 +260,29 @@ def _vendored_library() -> str:
         path = VENDORED_RIME_DIR / "lib" / name
         if path.exists():
             return str(path)
-    if os.environ.get("VOICE_IME_RIME_ALLOW_SYSTEM", "0") == "1":
+    if config.env_str("VOICE_IME_RIME_ALLOW_SYSTEM", "0") == "1":
         return "librime.so.1"
     return str(VENDORED_RIME_DIR / "lib" / "librime.so.1")
 
 
 def _shared_data_dir() -> str:
-    return os.environ.get("VOICE_IME_RIME_SHARED_DATA_DIR", str(VENDORED_RIME_DIR / "share" / "rime-data"))
+    return config.env_str("VOICE_IME_RIME_SHARED_DATA_DIR", "") or str(VENDORED_RIME_DIR / "share" / "rime-data")
 
 
 def _user_data_dir() -> str:
-    path = Path(os.environ.get("VOICE_IME_RIME_USER_DATA_DIR", "~/.local/share/ibus-voice-ime/rime-user")).expanduser()
+    path = Path(config.env_str("VOICE_IME_RIME_USER_DATA_DIR", "~/.local/share/ibus-voice-ime/rime-user")).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     return str(path)
 
 
 def _staging_dir() -> str | None:
-    explicit = os.environ.get("VOICE_IME_RIME_STAGING_DIR", "").strip()
+    explicit = config.env_str("VOICE_IME_RIME_STAGING_DIR", "").strip()
     if explicit:
         return explicit
     vendored = VENDORED_RIME_DIR / "build"
     if vendored.exists():
         return str(vendored)
-    if os.environ.get("VOICE_IME_RIME_ALLOW_SYSTEM", "0") == "1":
+    if config.env_str("VOICE_IME_RIME_ALLOW_SYSTEM", "0") == "1":
         for candidate in (
             "~/.config/ibus/rime/build",
             "~/.local/share/fcitx5/rime/build",
@@ -322,7 +324,7 @@ class RimeSession:
         self.session_id = self.api.create_session()
         if not self.session_id:
             raise RimeError("创建 Rime 会话失败")
-        schema = schema or os.environ.get("VOICE_IME_RIME_SCHEMA", "rime_ice")
+        schema = schema or config.env_str("VOICE_IME_RIME_SCHEMA", "rime_ice")
         # rime-ice (default) needs its dictionary sources + compiled artifacts.
         # A fresh checkout only carries the git-tracked schema file; without
         # cn_dicts the deployment degrades to zero candidates. Fall back to the

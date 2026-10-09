@@ -24,55 +24,36 @@ import urllib.request
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from ibus_voice_ime import config
 from ibus_voice_ime.memory import voice_terms
 from ibus_voice_ime.text import llm_cloud_config, llm_runtime, text_postprocess
 
 DEFAULT_BASE_URL = llm_runtime.DEFAULT_BASE_URL
 DEFAULT_MODEL = llm_runtime.DEFAULT_MODEL_ALIAS
 
-MODE_INSTRUCTIONS: dict[str, str] = {
-    "dictation": "主要任务：补齐标点，并把内容整理成适合 AI 消费的规范 Markdown——任务/指令整理成任务简报（目标/背景/任务/约束/验收），叙述内容按主题分节。除标点、空白与结构化排版外，尽量不要改动任何文字。",
-    "literal": "尽量原样输出；除添加/调整标点、空白和明显识别错误外，不要改动文字。",
-    "markdown": "积极补齐标点；不要主动整理结构，除非原文已经明显是 Markdown。",
-    "prompt": "补齐标点并整理成清晰的提示词/任务简报结构（目标/背景/任务/约束/验收）；不得自作主张追加用户没说过的要求。",
-    "command": "尽量原样保留命令、路径、参数和英文符号；只在安全时补标点。",
-}
+# 提示词已外置到 config/defaults.json（llm.prompts.*），用户可在
+# ~/.config/ibus-voice-ime/config.json 里覆盖 llm.prompts.system 等键自定义。
+# 原模块级常量名（SYSTEM_PROMPT / CANDIDATE_SYSTEM_PROMPT / MODE_INSTRUCTIONS /
+# FORMAT_REQUIREMENT）保留为动态弃用别名，读取时实时走 config，老引用不破坏。
+def _mode_instructions() -> dict[str, str]:
+    merged = config.get("llm.prompts.mode_instructions") or {}
+    base = {key: str(value) for key, value in merged.items() if isinstance(value, str)}
+    if "dictation" not in base:
+        base["dictation"] = ""
+    return base
 
-SYSTEM_PROMPT = """你是语音输入法的后处理器。用户的听写绝大多数是发给 AI 编程助手的指令，你的任务是把口语听写整理成「AI 可直接执行」的规范 Markdown。
 
-当前优先目标：积极补齐中文标点；判断内容性质，用最合适的结构输出。
+def __getattr__(name: str):  # noqa: D103 - PEP 562 module attribute hook
+    if name == "SYSTEM_PROMPT":
+        return config.get_prompt("system")
+    if name == "CANDIDATE_SYSTEM_PROMPT":
+        return config.get_prompt("candidate_system")
+    if name == "FORMAT_REQUIREMENT":
+        return config.get_prompt("format_requirement")
+    if name == "MODE_INSTRUCTIONS":
+        return _mode_instructions()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-当内容是给 AI/智能体的任务或指令时，整理成任务简报。只为听写中实际存在的部分生成对应小节（用原文关键词，没有就跳过该节，绝不编造）：
-## 目标 —— 一句话说清要做什么（只能压缩用户原话）；
-## 背景 —— 已知的上下文、现状、环境；
-## 任务 —— 分解为编号步骤，每步引用用户原话；
-## 约束 —— 用户提到的限制、禁区、注意事项（如「不要动某文件」）；
-## 验收 —— 用户给出的完成标准（如覆盖率、预期行为）。
-
-当内容是叙述、讨论或问答时，按主题用 # / ## / ### 标题组织，并列内容用 - 分点；只有真正的连续叙述才保持自然段落；不要强行套任务简报。
-
-通用规则：
-- **积极分点（重要）**：凡是并列的要点、步骤、选项、条件、对象、要求、注意事项，一律用 `- ` 无序列表逐条列出；哪怕挤在同一句话里、用顿号/逗号串联的并列项，也要拆成列表。原则是「能分点就分点」，避免把并列内容留在大段文字里；
-- 顺序性动作用 `1. 2. 3.` 编号列表，非顺序的并列用 `- `；
-- 命令、路径、文件名、代码、配置项用行内代码或代码块（```）包裹；
-- 听写文本不能整段没有标点；按语气和语义加入逗号、句号、问号、顿号、分号或冒号。
-
-严格限制：
-1. 只做标点、空白与结构化排版，不改动任何文字本身的含义。
-2. 可以拆分长句、归类分节；但不要润色、扩写、替换主语，尤其不能自作主张追加用户没说过的要求、步骤或标准。
-3. 不要丢失信息；小节标题和「目标」只能使用或压缩原文已有内容。
-4. 只有在极其明确时，才修正明显识别错字或删除明确无意义的独立口水词；不确定就保留原词。
-
-默认使用简体中文输出；如果原文或模型输出里出现繁体中文，请转换为简体中文。
-只输出整理后的 Markdown，不要解释，不要把整个输出包进代码块，不要加引号。
-""".strip()
-
-CANDIDATE_SYSTEM_PROMPT = """你是语音输入法的轻量后处理器。
-只生成积极补齐标点后的文本；候选之间主要只能有标点差异。
-除添加/调整标点和必要空白外，尽量不要改动任何文字；不要润色、总结、压缩、扩写、重排或改变主语。
-默认使用简体中文输出；如果原文或模型输出里出现繁体中文，请转换为简体中文。
-输出必须是 JSON 字符串数组，例如 ["候选一。", "候选二。"]，不要输出其它内容。
-""".strip()
 
 _PROTECTED_TOKEN_RE = re.compile(
     r"https?://\S+|~?/(?:[\w.\-]+/?)+|[A-Za-z_][A-Za-z0-9_./:+\-]*|\d+(?:\.\d+)?[A-Za-z%]*|Ctrl\+Alt\+\w+|/[A-Za-z][\w\-]*"
@@ -86,24 +67,15 @@ _UNREQUESTED_ACTION_RE = re.compile(r"执行|运行|打开|关闭|删除|清空|
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_float(name, default)
 
 
 def enabled() -> bool:
@@ -128,7 +100,7 @@ def active_model_label() -> str:
         return cloud.model
     if llm_runtime.internal_enabled():
         return llm_runtime.model_alias()
-    return os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL)
+    return config.env_str("VOICE_IME_LLM_MODEL", DEFAULT_MODEL)
 
 
 def rerank_enabled() -> bool:
@@ -165,7 +137,7 @@ def _endpoint(base_url: str) -> str:
 
 
 def _resolve_base_url() -> str:
-    configured = os.environ.get("VOICE_IME_LLM_BASE_URL", "").strip()
+    configured = config.env_str("VOICE_IME_LLM_BASE_URL", "").strip()
     if llm_runtime.internal_enabled():
         return llm_runtime.ensure_server()
     return configured or DEFAULT_BASE_URL
@@ -203,7 +175,7 @@ def _active_endpoint(mode: str) -> _Endpoint:
     temperature = _env_float("VOICE_IME_LLM_TEMPERATURE", 0.25 if _aggressive_enabled(mode) else 0.1)
     return _Endpoint(
         base_url=_resolve_base_url(),
-        model=llm_runtime.model_alias() if llm_runtime.internal_enabled() else os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL),
+        model=llm_runtime.model_alias() if llm_runtime.internal_enabled() else config.env_str("VOICE_IME_LLM_MODEL", DEFAULT_MODEL),
         api_key=os.environ.get("VOICE_IME_LLM_API_KEY", "local"),
         timeout=_env_float("VOICE_IME_LLM_TIMEOUT", 4.0),
         temperature=temperature,
@@ -220,16 +192,21 @@ def _load_custom_dictionary() -> str:
         return ""
 
 
+def _mode_instruction(mode: str) -> str:
+    instructions = _mode_instructions()
+    return instructions.get(mode, instructions["dictation"])
+
+
 def _build_messages(raw_text: str, mode: str) -> list[dict[str, str]]:
     dictionary = _load_custom_dictionary()
-    mode_instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["dictation"])
-    extra = os.environ.get("VOICE_IME_LLM_EXTRA_PROMPT", "").strip()
+    mode_instruction = _mode_instruction(mode)
+    extra = config.env_str("VOICE_IME_LLM_EXTRA_PROMPT", "").strip()
 
     user_parts = [
         f"模式：{mode}",
         f"要求：{mode_instruction}",
         "标点要求：要更积极地补标点，不能整段无标点；优先添加逗号、句号、问号、顿号、分号或冒号。",
-        "格式要求：输出规范 Markdown，能分点就分点——并列的要点/步骤/条件/要求一律用 - 列表逐条呈现（顿号串联的并列也要拆开），顺序动作用编号列表。若内容是给 AI/智能体的指令，整理成任务简报——## 目标 / ## 背景 / ## 任务（编号步骤）/ ## 约束 / ## 验收，只为听写中实际存在的部分生成小节，标题用原文关键词；连续叙述才保持自然段落；命令/路径/代码用行内代码或代码块；不强行套结构。",
+        config.get_prompt("format_requirement"),
         "文字要求：除标点、空白与结构化排版外，不要润色、总结、压缩、扩写或改写主语；不得追加用户没说过的要求、步骤或标准；默认输出简体中文。",
     ]
     if dictionary:
@@ -239,14 +216,14 @@ def _build_messages(raw_text: str, mode: str) -> list[dict[str, str]]:
     user_parts.append("原始识别文本：\n" + raw_text)
 
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": config.get_prompt("system")},
         {"role": "user", "content": "\n\n".join(user_parts)},
     ]
 
 
 def _build_candidate_messages(raw_text: str, mode: str, count: int) -> list[dict[str, str]]:
     dictionary = _load_custom_dictionary()
-    mode_instruction = MODE_INSTRUCTIONS.get(mode, MODE_INSTRUCTIONS["dictation"])
+    mode_instruction = _mode_instruction(mode)
     parts = [
         f"模式：{mode}",
         f"要求：{mode_instruction}",
@@ -256,7 +233,7 @@ def _build_candidate_messages(raw_text: str, mode: str, count: int) -> list[dict
         parts.append("必须优先保留这些用户词典/技术词：\n" + dictionary)
     parts.append("STT 原文：\n" + raw_text)
     return [
-        {"role": "system", "content": CANDIDATE_SYSTEM_PROMPT},
+        {"role": "system", "content": config.get_prompt("candidate_system")},
         {"role": "user", "content": "\n\n".join(parts)},
     ]
 
@@ -669,7 +646,11 @@ def rerank(raw_text: str, candidates: list[str], *, mode: str) -> tuple[str, lis
 
 def _log(raw_text: str, final_text: str, error: str | None = None,
          candidates: list[dict[str, Any]] | None = None) -> None:
-    log_path = os.environ.get("VOICE_IME_LLM_LOG", "").strip()
+    # logging.llm_log 在 defaults.json 里是 null（$HOME 无法静态展开）：
+    # 调用点兜底恢复旧默认 ~/.local/share/ibus-voice-ime/llm.json。
+    log_path = config.env_str(
+        "VOICE_IME_LLM_LOG", "~/.local/share/ibus-voice-ime/llm.json"
+    ).strip()
     if not log_path:
         return
     try:
@@ -709,7 +690,7 @@ def refine(raw_text: str, *, mode: str | None = None) -> str:
     if len(raw_text) < min_chars:
         return raw_text
 
-    mode = (mode or os.environ.get("VOICE_IME_VOICE_MODE", "dictation")).strip().lower()
+    mode = (mode or config.env_str("VOICE_IME_VOICE_MODE", "dictation")).strip().lower()
     ep = _active_endpoint(mode)
 
     if trust_llm_output() or not rerank_enabled():

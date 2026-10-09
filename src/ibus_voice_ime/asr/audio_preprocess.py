@@ -33,6 +33,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+from ibus_voice_ime import config
 from pathlib import Path
 
 
@@ -41,24 +43,15 @@ class _PreprocessSkipped(Exception):
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_float(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def _log(message: str) -> None:
@@ -72,7 +65,7 @@ _TIER_NOTCHES = ((50.0, -30.0, 6.0), (100.0, -20.0, 6.0), (150.0, -15.0, 8.0))
 
 def _denoise_tier() -> str:
     """none=旧行为 / notch=陷波 / rnnoise=陷波+RNNoise；未知值按 none（最保守）。"""
-    tier = os.environ.get("VOICE_IME_DENOISE_TIER", "notch").strip().lower()
+    tier = config.env_str("VOICE_IME_DENOISE_TIER", "notch").strip().lower()
     if tier not in {"none", "notch", "rnnoise"}:
         _log(f"未知降噪档 {tier!r}，按 none（仅旧链）处理")
         return "none"
@@ -80,7 +73,7 @@ def _denoise_tier() -> str:
 
 
 def _rnnoise_model_path() -> str:
-    env = os.environ.get("VOICE_IME_AUDIO_RNNOISE_MODEL")
+    env = config.env_str("VOICE_IME_AUDIO_RNNOISE_MODEL", "")
     if env:
         return env
     root = Path(__file__).resolve().parents[3]

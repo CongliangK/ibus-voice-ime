@@ -8,6 +8,7 @@
 |---|---|
 | [architecture.md](architecture.md) | 技术框架与选型：为什么选 IBus、Rime + 雾凇拼音、默认语音模型 Qwen3-ASR；组件结构与语音流水线 |
 | [asr-backends.md](asr-backends.md) | 语音后端支持：七种识别后端的形态、依赖、切换方式与选型建议 |
+| [configuration.md](configuration.md) | 统一 JSON 配置：四层优先级、config.json 与 defaults.json 的关系、CLI 六命令、完整配置键位参考表（由 tools/gen-config-docs.py 生成）与老用户迁移 |
 | [self-developed.md](self-developed.md) | 自主研发部分：自研代码清单与复用的第三方组件边界 |
 | [validation.md](validation.md) | 测试平台与验证门禁：实测环境、CI、本地门禁与单元测试覆盖 |
 | [limitations.md](limitations.md) | 目前的不足：适配性、硬件门槛、功能与工程层面的客观局限 |
@@ -19,6 +20,6 @@
 
 ## 文档维护约定
 
-- 本目录文档描述**为什么这样设计**与**整体结构**；具体环境变量、命令用法以根 README 为准，避免两处维护同一份配置清单。
+- 本目录文档描述**为什么这样设计**与**整体结构**；配置键位与环境变量清单以 [configuration.md](configuration.md) 的生成表为准，具体安装命令以根 README 为准，避免两处维护同一份配置清单。
 - 文档声明的事实必须能在代码或提交历史中找到依据；行为变更时同步更新对应文档。
 - `validation.md` 的文件名被 `tools/validate.py` 的 REQUIRED_FILES 检查引用，不可重命名。

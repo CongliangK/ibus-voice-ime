@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import ctypes
 import os
+
+from ibus_voice_ime import config
 import sys
 import time
 from pathlib import Path
@@ -74,7 +76,9 @@ class DeployError(RuntimeError):
 
 
 def _env(name: str, default: str) -> str:
-    return os.environ.get(name, default)
+    # defaults.json 里这些路径类键为空串（""=自动定位 vendored 运行时）；
+    # json 空值或未配置时回落到本函数的计算式默认，保持旧行为。
+    return config.env_str(name, "") or default
 
 
 def _resolve_paths(root_dir: Path) -> tuple[Path, Path, Path]:
@@ -133,7 +137,7 @@ def deploy(root_dir: Path | None = None) -> None:
     traits.distribution_code_name = b"rime-ice"
     traits.distribution_version = b"0.1.0"
     traits.app_name = b"rime.ibus-voice-ime.deployer"
-    traits.min_log_level = int(os.environ.get("VOICE_IME_RIME_LOG_LEVEL", "1"))
+    traits.min_log_level = int(config.env_str("VOICE_IME_RIME_LOG_LEVEL", "1"))
 
     print(f"==> 部署 Rime 字典/方案")
     print(f"    shared_data_dir = {shared_dir}")

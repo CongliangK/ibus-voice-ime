@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+
+from ibus_voice_ime import config
 import shutil
 import subprocess
 
@@ -26,7 +28,7 @@ def hotkey_letters() -> tuple[str, ...]:
     的 ``VOICE_IME_CLIPBOARD_HOTKEYS``（``VOICE_IME_CLIPBOARD_HOTKEY`` 为单键
     兼容别名）。
     """
-    raw = os.environ.get("VOICE_IME_CLIPBOARD_HOTKEYS") or os.environ.get("VOICE_IME_CLIPBOARD_HOTKEY") or ""
+    raw = config.env_str("VOICE_IME_CLIPBOARD_HOTKEYS", None) or config.env_str("VOICE_IME_CLIPBOARD_HOTKEY", "") or ""
     letters: list[str] = []
     for item in re.split(r"[,;\s]+", raw):
         token = item.strip()

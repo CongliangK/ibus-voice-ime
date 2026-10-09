@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from ibus_voice_ime import config
 from ibus_voice_ime.asr import sidecar_http
 
 _MODEL = None
@@ -37,8 +38,8 @@ def _build_model_kwargs() -> dict[str, Any]:
     Mirrors the kwargs the old ``_load_model`` produced, kept here so the
     multi-model manager can build fresh kwargs for each model it loads.
     """
-    dtype_name = (os.environ.get("VOICE_IME_QWEN_ASR_DTYPE", "bfloat16") or "bfloat16").lower()
-    device_map = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
+    dtype_name = (config.env_str("VOICE_IME_QWEN_ASR_DTYPE", "bfloat16") or "bfloat16").lower()
+    device_map = config.env_str("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
     # pre-Ampere（GTX 10xx/16xx、RTX 20xx，sm<80）没有原生 bfloat16：默认 bf16 会在
     # 首个 kernel 报 "not implemented for 'BFloat16'"。这些卡 fp16 完全可用，自动降档
     # 并打日志，用户无感。torch 只在 sidecar venv 里存在，import 失败则保持原值。
@@ -57,17 +58,17 @@ def _build_model_kwargs() -> dict[str, Any]:
         except Exception:
             pass
     dtype = _dtype(dtype_name)
-    max_batch = int(os.environ.get("VOICE_IME_QWEN_ASR_MAX_BATCH", "1"))
+    max_batch = config.env_int("VOICE_IME_QWEN_ASR_MAX_BATCH", 1)
     # 256 会把约 250~450 字的长听写硬截断（生成到上限即停、余下语音静默丢弃）；
     # 1024 覆盖 5 分钟录音的典型字数量级。代价仅是长文本极端生成时间变长。
-    max_tokens = int(os.environ.get("VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS", "1024"))
+    max_tokens = config.env_int("VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS", 1024)
     kwargs: dict[str, Any] = {
         "dtype": dtype,
         "device_map": device_map,
         "max_inference_batch_size": max_batch,
         "max_new_tokens": max_tokens,
     }
-    attn = os.environ.get("VOICE_IME_QWEN_ASR_ATTN", "").strip()
+    attn = config.env_str("VOICE_IME_QWEN_ASR_ATTN", "").strip()
     if attn:
         kwargs["attn_implementation"] = attn
     return kwargs
@@ -296,7 +297,7 @@ class ModelManager:
             import torch  # type: ignore
 
             index = 0
-            device_map = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
+            device_map = config.env_str("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
             if ":" in device_map:
                 try:
                     index = int(device_map.rsplit(":", 1)[1])
@@ -309,7 +310,7 @@ class ModelManager:
 
     def _resolve_gpu_device(self) -> Any:
         """Resolve the cuda device object/string from the device_map env var."""
-        device_map = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
+        device_map = config.env_str("VOICE_IME_QWEN_ASR_DEVICE_MAP", "cuda:0")
         try:
             import torch  # type: ignore
 
@@ -457,7 +458,9 @@ _MANAGER: ModelManager | None = None
 
 
 def _language() -> str | None:
-    raw = os.environ.get("VOICE_IME_QWEN_ASR_LANGUAGE", os.environ.get("VOICE_IME_WHISPER_LANGUAGE", "zh"))
+    raw = config.env_str("VOICE_IME_QWEN_ASR_LANGUAGE", None)
+    if raw is None:
+        raw = config.env_str("VOICE_IME_WHISPER_LANGUAGE", "zh")
     raw = (raw or "").strip().lower()
     if not raw or raw in {"auto", "none"}:
         return None
@@ -644,24 +647,18 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _env_float(name: str, default: float) -> float:
-    try:
-        return float(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_float(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
-    parser.add_argument("--host", default=os.environ.get("VOICE_IME_QWEN_ASR_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("VOICE_IME_QWEN_ASR_PORT", "18081")))
+    parser.add_argument("--host", default=config.env_str("VOICE_IME_QWEN_ASR_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=config.env_int("VOICE_IME_QWEN_ASR_PORT", 18081))
     args = parser.parse_args()
 
     global _MODEL_ID, _MANAGER
@@ -711,7 +708,7 @@ def main() -> None:
     interval = _env_float("VOICE_IME_QWEN_ASR_IDLE_CHECK_INTERVAL", 1.0)
     vram_min_17b = _env_int("VOICE_IME_QWEN_ASR_VRAM_MIN_MIB_1_7B", 5000)
     vram_min_06b = _env_int("VOICE_IME_QWEN_ASR_VRAM_MIN_MIB_0_6B", 2000)
-    offload_target = os.environ.get("VOICE_IME_QWEN_ASR_DEVICE_OFFLOAD_TARGET", "cpu").strip() or "cpu"
+    offload_target = config.env_str("VOICE_IME_QWEN_ASR_DEVICE_OFFLOAD_TARGET", "cpu").strip() or "cpu"
     _MANAGER = ModelManager(
         primary_path=primary,
         secondary_path=secondary,

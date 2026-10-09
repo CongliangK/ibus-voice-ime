@@ -45,7 +45,7 @@ THIS_DIR = Path(__file__).resolve().parent
 SRC_DIR = THIS_DIR.parent.parent
 sys.path.insert(0, str(SRC_DIR))
 
-from ibus_voice_ime import clipboard_paste, core  # noqa: E402
+from ibus_voice_ime import clipboard_paste, config, core  # noqa: E402
 from ibus_voice_ime.asr import audio_session, qwen_asr_runtime, voice, voice_hotkey, voice_overlay  # noqa: E402
 from ibus_voice_ime.memory import chinese_memory, english_memory  # noqa: E402
 from ibus_voice_ime.rime import rime_backend  # noqa: E402
@@ -96,30 +96,21 @@ CANDIDATE_NEXT_KEYS = (IBus.KEY_Down, IBus.KEY_Right, IBus.KEY_KP_Down, IBus.KEY
 CANDIDATE_PAGE_PREV_KEYS = (IBus.KEY_Page_Up, IBus.KEY_KP_Page_Up)
 CANDIDATE_PAGE_NEXT_KEYS = (IBus.KEY_Page_Down, IBus.KEY_KP_Page_Down)
 try:
-    LOOKUP_PAGE_SIZE = max(1, int(os.environ.get("VOICE_IME_CANDIDATE_PAGE_SIZE", "5")))
+    LOOKUP_PAGE_SIZE = max(1, config.env_int("VOICE_IME_CANDIDATE_PAGE_SIZE", 5, minimum=1))
 except ValueError:
     LOOKUP_PAGE_SIZE = 5
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
-    try:
-        return max(minimum, int(os.environ.get(name, str(default))))
-    except ValueError:
-        return max(minimum, default)
+    return config.env_int(name, default, minimum=minimum)
 
 
 def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
-    try:
-        return max(minimum, float(os.environ.get(name, str(default))))
-    except ValueError:
-        return max(minimum, default)
+    return config.env_float(name, default, minimum=minimum)
 
 
 def text(s: str) -> IBus.Text:
@@ -145,7 +136,7 @@ def log_error(message: str) -> None:
     tracebacks printed with traceback.print_exc() are otherwise lost.
     """
     try:
-        log_path = Path(os.environ.get("VOICE_IME_ERROR_LOG", "~/.local/share/ibus-voice-ime/error.log")).expanduser()
+        log_path = Path(config.env_str("VOICE_IME_ERROR_LOG", "~/.local/share/ibus-voice-ime/error.log")).expanduser()
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
@@ -158,12 +149,53 @@ def log_error(message: str) -> None:
 
 
 _FOCUSED_ENGINE = None
+# 进程级语音录音所有权：IBus 为每个输入上下文创建独立引擎实例，而语音状态
+# （_voice_state/_audio_session）存在实例上。焦点切换（悬浮窗抢焦点、应用切换）
+# 会让停止热键落在一个新建的空闲实例上——它不知道有录音在跑，会把"停止"误判
+# 成"开始"，叠出第二个弹窗并泄漏 arecord（2026-10-09 报障）。所有权全局化后，
+# 任何实例收到热键都先转发给真正持有录音的实例。
+_VOICE_OWNER: "VoiceCustomEngine | None" = None
+
+
+def _claim_voice_owner(engine: "VoiceCustomEngine") -> None:
+    global _VOICE_OWNER
+    _VOICE_OWNER = engine
+
+
+def _release_voice_owner(engine: "VoiceCustomEngine") -> None:
+    global _VOICE_OWNER
+    if _VOICE_OWNER is engine:
+        _VOICE_OWNER = None
+
+
+def _forward_voice_hotkey_to_owner(recipient: "VoiceCustomEngine", raw: bool) -> bool:
+    """Route a voice hotkey to the engine instance that owns the live recording.
+
+    Returns True when the hotkey was forwarded (recipient must do nothing more).
+    """
+    owner = _VOICE_OWNER
+    if owner is None or owner is recipient:
+        return False
+    if getattr(owner, "_voice_state", "idle") == "idle" and not getattr(owner, "_voice_busy", False):
+        return False
+    log_error(
+        f"语音热键转发：按键实例未持有录音，转发给持有实例（owner_state={owner._voice_state}）"
+    )
+    try:
+        owner._handle_voice_hotkey(raw)
+    except Exception as exc:
+        # 持有实例可能已被 ibus-daemon 销毁（对象失效）；释放所有权避免永久卡死。
+        log_error(f"语音热键转发失败（释放所有权）：{exc}")
+        _release_voice_owner(owner)
+    return True
+
+
 _IPC_SERVER_STARTED = False
 _IPC_SERVER_LOCK = threading.Lock()
 
 
 def voice_ipc_socket_path() -> Path:
-    explicit = os.environ.get("VOICE_IME_IPC_SOCKET", "").strip()
+    explicit = config.env_str("VOICE_IME_IPC_SOCKET", "").strip()
     if explicit:
         return Path(explicit).expanduser()
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "").strip()
@@ -180,7 +212,7 @@ def _start_voice_ipc_server() -> None:
     focused engine then runs the same voice-hotkey path as a normal IBus key.
     """
     global _IPC_SERVER_STARTED
-    if os.environ.get("VOICE_IME_IPC", "1").strip().lower() in {"0", "false", "no", "off", "disabled"}:
+    if not config.env_bool("VOICE_IME_IPC", True):
         return
     with _IPC_SERVER_LOCK:
         if _IPC_SERVER_STARTED:
@@ -344,12 +376,14 @@ class VoiceCustomEngine(IBus.Engine):
     __gtype_name__ = "IBusEngineVoiceCustom"
 
     def __init__(self, bus: IBus.Bus, object_path: str):
-        global _FOCUSED_ENGINE
         kwargs = dict(engine_name=ENGINE_NAME, connection=bus.get_connection(), object_path=object_path)
         if hasattr(IBus.Engine.props, "has_focus_id"):
             kwargs["has_focus_id"] = True
         super().__init__(**kwargs)
-        _FOCUSED_ENGINE = self
+        # 不在此设置 _FOCUSED_ENGINE：新实例未必持有焦点，无条件劫持会让 IPC
+        # 热键分发给"最新的空闲实例"而不是真正有焦点的实例（配合悬浮窗抢焦点
+        # 的实例切换，曾把 toggle 停止变成叠新录音）。焦点归属由 do_focus_in /
+        # do_process_key_event 维护。
         self._bus = bus
         self._buffer = ""
         self._candidates: list[core.Candidate] = []
@@ -380,11 +414,11 @@ class VoiceCustomEngine(IBus.Engine):
         self._last_input_leak_log_at = 0.0
         self._rime_page_no = 0
         self._rime_is_last_page = True
-        self._ascii_mode = os.environ.get("VOICE_IME_START_ASCII", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._ascii_mode = config.env_str("VOICE_IME_START_ASCII", "0").strip().lower() in {"1", "true", "yes", "on"}
         self._pending_shift_toggle: int | None = None
         self._rime: rime_backend.RimeSession | None = None
         _start_voice_ipc_server()
-        if os.environ.get("VOICE_IME_KEYBOARD_BACKEND", "rime").lower() != "demo":
+        if config.env_str("VOICE_IME_KEYBOARD_BACKEND", "rime").lower() != "demo":
             try:
                 self._rime = rime_backend.RimeSession()
             except Exception:
@@ -661,7 +695,7 @@ class VoiceCustomEngine(IBus.Engine):
         geometry, so the safer fix is _use_inline_candidates().  This mirror is
         kept as a fallback for explicit popup mode.
         """
-        mode = os.environ.get("VOICE_IME_PREEDIT_MIRROR", "off").strip().lower()
+        mode = config.env_str("VOICE_IME_PREEDIT_MIRROR", "off").strip().lower()
         if mode in {"0", "false", "no", "off", "disabled", "none"}:
             return False
         if mode in {"auto", "adaptive"}:
@@ -680,7 +714,7 @@ class VoiceCustomEngine(IBus.Engine):
             self._composition_aux_visible = False
 
     def _candidate_ui_mode(self) -> str:
-        return os.environ.get("VOICE_IME_CANDIDATE_UI", "popup").strip().lower()
+        return config.env_str("VOICE_IME_CANDIDATE_UI", "popup").strip().lower()
 
     def _use_inline_candidates(self) -> bool:
         """Render candidates inside preedit instead of the IBus popup.
@@ -737,7 +771,7 @@ class VoiceCustomEngine(IBus.Engine):
         return page_size
 
     def _shift_toggle_enabled(self) -> bool:
-        return os.environ.get("VOICE_IME_SHIFT_TOGGLE_ASCII", "1").strip().lower() not in {"0", "false", "no", "off", "disabled"}
+        return config.env_bool("VOICE_IME_SHIFT_TOGGLE_ASCII", True)
 
     def _handle_shift_toggle_press(self, keyval: int, state: int) -> bool:
         if keyval not in ASCII_TOGGLE_KEYS or not self._shift_toggle_enabled():
@@ -788,7 +822,7 @@ class VoiceCustomEngine(IBus.Engine):
         return self._buffer
 
     def _should_forward_ascii_slash(self, keyval: int, state: int) -> bool:
-        if os.environ.get("VOICE_IME_ASCII_SLASH", "1") == "0":
+        if config.env_str("VOICE_IME_ASCII_SLASH", "1") == "0":
             return False
         if keyval not in (IBus.KEY_slash, IBus.KEY_KP_Divide):
             return False
@@ -1246,10 +1280,7 @@ class VoiceCustomEngine(IBus.Engine):
         return False
 
     def _voice_env_enabled(self, name: str, default: bool = False) -> bool:
-        raw = os.environ.get(name)
-        if raw is None:
-            return default
-        return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+        return config.env_bool(name, default)
 
     def _flush_composition_before_voice(self) -> None:
         if self._rime is not None:
@@ -1270,7 +1301,11 @@ class VoiceCustomEngine(IBus.Engine):
         空闲时才按 raw 标志以对应模式开始新的录音。
         """
         log_error(f"语音热键触发：state={self._voice_state}, busy={self._voice_busy}, raw={raw}")
-        mode = os.environ.get("VOICE_IME_TRIGGER_MODE", "toggle").strip().lower()
+        # 本实例未持有录音时，热键语义（停止/提示处理中）只对持有实例成立：
+        # 先转发，防止焦点切换后的空闲实例把"停止"当"开始"。
+        if _forward_voice_hotkey_to_owner(self, raw):
+            return
+        mode = config.env_str("VOICE_IME_TRIGGER_MODE", "toggle").strip().lower()
         if mode == "fixed":
             # fixed 模式同样尊重 raw 标志：V/B 的差异（是否跳过 LLM 后处理）
             # 与 toggle 模式一致，只是录音方式仍是旧的固定时长。
@@ -1304,6 +1339,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._voice_raw = raw
         self._voice_seen_sound = False
         self._voice_last_sound_at = time.monotonic()
+        _claim_voice_owner(self)
         log_error(f"开始 toggle 语音录音 raw={raw}")
         # Pre-warm the ASR model onto the GPU concurrently with recording so
         # that by the time the user stops talking the model is already loaded
@@ -1319,7 +1355,7 @@ class VoiceCustomEngine(IBus.Engine):
             on_cancel=self._cancel_toggle_voice_recording,
         )
         self._overlay.show_recording(
-            mode=os.environ.get("VOICE_IME_VOICE_MODE", "dictation"),
+            mode=config.env_str("VOICE_IME_VOICE_MODE", "dictation"),
             # raw 模式先短路，避免无谓读取 llm.json 判断 LLM 是否开启。
             llm_enabled=not raw and llm_postprocess.enabled(),
             max_seconds=max_seconds,
@@ -1446,6 +1482,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._voice_state = "idle"
         self._voice_busy = False
         self._voice_raw = False
+        _release_voice_owner(self)
         self.update_preedit_text(text(""), 0, False)
         self.update_auxiliary_text(text(""), False)
         if self._overlay is not None:
@@ -1455,20 +1492,20 @@ class VoiceCustomEngine(IBus.Engine):
     def _voice_processing_detail(self, llm: bool = False) -> str:
         if llm and llm_postprocess.enabled():
             return llm_postprocess.active_model_label()
-        backend = os.environ.get("VOICE_IME_ASR_BACKEND", "qwen3-asr").strip().lower()
+        backend = config.env_str("VOICE_IME_ASR_BACKEND", "qwen3-asr").strip().lower() or "qwen3-asr"
         if backend in {"qwen", "qwen3", "qwen3-asr", "qwen-asr"}:
-            model = os.environ.get("VOICE_IME_QWEN_ASR_MODEL", "1.7b")
+            model = config.env_str("VOICE_IME_QWEN_ASR_MODEL", "1.7b")
             return f"Qwen3-ASR {model}"
         if backend in {"mimo-cloud", "mimo-cloud-asr"}:
-            return f"MiMo 云端 {os.environ.get('VOICE_IME_MIMO_CLOUD_ASR_MODEL', 'mimo-v2.5-asr')}"
+            return f"MiMo 云端 {config.env_str('VOICE_IME_MIMO_CLOUD_ASR_MODEL', 'mimo-v2.5-asr')}"
         if backend in {"volc", "volc-bigmodel", "volc-bigmodel-asr"}:
             return "火山引擎 bigmodel ASR"
         if backend == "mimo-asr":
             return "MiMo-V2.5-ASR 本地"
-        model = os.environ.get("VOICE_IME_WHISPER_MODEL", "large-v3")
-        device = os.environ.get("VOICE_IME_WHISPER_DEVICE", "cuda")
-        compute = os.environ.get("VOICE_IME_WHISPER_COMPUTE", "float16")
-        index = os.environ.get("VOICE_IME_WHISPER_DEVICE_INDEX", "0")
+        model = config.env_str("VOICE_IME_WHISPER_MODEL", "large-v3")
+        device = config.env_str("VOICE_IME_WHISPER_DEVICE", "cuda")
+        compute = config.env_str("VOICE_IME_WHISPER_COMPUTE", "float16")
+        index = config.env_str("VOICE_IME_WHISPER_DEVICE_INDEX", "0")
         return f"faster-whisper {model} / {device}:{index} / {compute}"
 
     def _show_voice_processing(self, status: str, detail: str = "") -> bool:
@@ -1485,7 +1522,8 @@ class VoiceCustomEngine(IBus.Engine):
         self._flush_composition_before_voice()
         self._voice_busy = True
         self._voice_state = "processing"
-        seconds = int(os.environ.get("VOICE_IME_RECORD_SECONDS", "5"))
+        _claim_voice_owner(self)
+        seconds = int(config.env_str("VOICE_IME_RECORD_SECONDS", "5"))
         self.update_preedit_text(text(f"🎙️ 录音 {seconds} 秒……"), 0, True)
         self._overlay = voice_overlay.VoiceOverlay(on_cancel=lambda: None)
         self._overlay.show_processing(f"🎙️ 录音 {seconds} 秒……", "固定时长录音")
@@ -1507,6 +1545,7 @@ class VoiceCustomEngine(IBus.Engine):
         self._voice_state = "idle"
         self._audio_session = None
         self._voice_raw = False
+        _release_voice_owner(self)
         log_error(f"语音输入完成：error={bool(error)}, result_len={len(result or '')}")
         self.update_preedit_text(text(""), 0, False)
         self.update_auxiliary_text(text(""), False)
@@ -1518,7 +1557,7 @@ class VoiceCustomEngine(IBus.Engine):
         elif result:
             if self._overlay is not None:
                 self._overlay.hide()
-            delay = int(os.environ.get("VOICE_IME_COMMIT_DELAY_MS", "200"))
+            delay = int(config.env_str("VOICE_IME_COMMIT_DELAY_MS", "200"))
             GLib.timeout_add(max(0, delay), self._commit_voice_result, result)
         else:
             if self._overlay is not None:

@@ -15,6 +15,8 @@
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PYTHON="$ROOT_DIR/.venv/bin/python"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
 MODE="check"
 case "${1:-}" in
   "") MODE="check" ;;
@@ -49,8 +51,12 @@ rime_ice_build_present() {
 }
 
 current_asr_backend() {
+  # 渠道唯一事实源 = config.json 的 asr.backend（env > json > defaults）；
+  # environment.d 的旧渠道行仅作兜底显示。
+  local v
+  v="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m ibus_voice_ime.config get asr.backend 2>/dev/null || true)"
+  [[ -n "$v" ]] && { echo "$v"; return; }
   if [[ -r "$ENV_FILE" ]]; then
-    local v
     v="$(grep -m1 '^VOICE_IME_ASR_BACKEND=' "$ENV_FILE" | cut -d= -f2- || true)"
     [[ -n "$v" ]] && { echo "$v"; return; }
   fi
@@ -74,6 +80,76 @@ check_env_dependencies() {
     warn "check-environment.sh 不存在或不可执行"
   fi
   rm -f "$out"
+}
+
+# ------------------------------------------------------------ 统一配置 --
+check_unified_config() {
+  header "统一配置（config.json）"
+  local cfg_json="${VOICE_IME_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ibus-voice-ime/config.json}"
+  if [[ -f "$cfg_json" ]]; then
+    ok "用户配置存在：$cfg_json"
+    local vout
+    if vout="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m ibus_voice_ime.config validate 2>&1)"; then
+      ok "config validate 通过"
+    else
+      fail "用户 config.json 校验失败（修复后重跑 ./install.sh 或手动编辑）："
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && printf '         %s\n' "$line"
+      done <<< "$vout"
+      FAILED_ITEMS+=(config-validate)
+    fi
+  else
+    ok "未创建用户配置（全默认值生效；可运行 ./install.sh 生成骨架）"
+  fi
+  local backend
+  backend="$(current_asr_backend)"
+  ok "生效 asr.backend：$backend"
+  # enabled 残留一致性：install.sh 迁移可能留下 asr.<x>.enabled=true 的旧
+  # 渠道标志；voice.py 渠道链先命中先赢，残留会压过 asr.backend 的选择
+  # （switch 脚本已改为写全互斥五叶，任一 switch 运行即可修复）。
+  local mismatch
+  mismatch="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" - <<'PY' 2>/dev/null
+from ibus_voice_ime import config
+from ibus_voice_ime.asr import (
+    mimo_asr_runtime,
+    mimo_cloud_asr,
+    qwen_asr_runtime,
+    siliconflow_asr,
+    volc_bigmodel_asr,
+)
+# voice.py 的渠道判定顺序（先命中先赢）
+chain = [
+    ("qwen3-asr", qwen_asr_runtime),
+    ("mimo-asr", mimo_asr_runtime),
+    ("mimo-cloud-asr", mimo_cloud_asr),
+    ("volc-bigmodel-asr", volc_bigmodel_asr),
+    ("siliconflow-asr", siliconflow_asr),
+]
+winner = next((name for name, mod in chain if mod.selected()), None)
+backend = str(config.get("asr.backend", default="")).strip().lower()
+alias = {}
+for names, canon in (
+    (("qwen", "qwen3", "qwen3-asr", "qwen-asr"), "qwen3-asr"),
+    (("mimo", "mimo-asr", "mimo-v2.5-asr", "mimo-v25-asr"), "mimo-asr"),
+    (("mimo-cloud", "mimo-cloud-asr", "mimo-api", "mimo-api-asr", "mimo-tokenplan-asr"), "mimo-cloud-asr"),
+    (("volc", "volc-asr", "volc-engine-asr", "volc-bigmodel", "volc-bigmodel-asr", "doubao-asr", "doubao-bigmodel-asr"), "volc-bigmodel-asr"),
+    (("siliconflow", "siliconflow-asr", "sf-asr"), "siliconflow-asr"),
+):
+    for name in names:
+        alias[name] = canon
+expected = alias.get(backend)
+if winner and expected and winner != expected:
+    print(f"{winner}|{backend}")
+PY
+)"
+  if [[ -n "$mismatch" ]]; then
+    warn "enabled 标志使 voice.py 实际命中 ${mismatch%%|*}，与 asr.backend=${mismatch##*|} 不一致（迁移残留？运行任一 scripts/switch-*-asr.sh 写全互斥五叶修复）"
+  else
+    ok "渠道 enabled 标志与 asr.backend 一致"
+  fi
+  if [[ -r "$ENV_FILE" ]] && grep -qE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD|VOICE_IME_VOLC_|VOICE_IME_SILICONFLOW)' "$ENV_FILE"; then
+    warn "environment.d 仍含渠道配置行（会压过 config.json；重跑 ./install.sh 可迁移到 config.json）"
+  fi
 }
 
 # ------------------------------------------------------------- IBus 注册 --
@@ -228,7 +304,11 @@ check_asr_backend() {
         have_venv=0
       fi
       local model_dir
-      model_dir="$(grep -m1 '^VOICE_IME_QWEN_ASR_MODEL_PATH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+      # 模型路径优先读 config.json（asr.qwen3.model_path），environment.d 旧行兜底。
+      model_dir="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m ibus_voice_ime.config get asr.qwen3.model_path 2>/dev/null || true)"
+      if [[ -z "$model_dir" || ! -d "$model_dir" ]]; then
+        model_dir="$(grep -m1 '^VOICE_IME_QWEN_ASR_MODEL_PATH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+      fi
       [[ -n "$model_dir" ]] || model_dir="$ROOT_DIR/vendor/models/qwen3-asr/Qwen3-ASR-1.7B"
       if [[ -d "$model_dir" ]]; then
         ok "Qwen3-ASR 模型就绪（$model_dir）"
@@ -460,6 +540,7 @@ do_fix() {
 
 # ------------------------------------------------------------------- 主流程 --
 check_env_dependencies
+check_unified_config
 check_ibus_registration
 check_rime_assets
 check_asr_backend
@@ -471,6 +552,7 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
   do_fix
   printf '\n== 修复后复查 ==\n'
   FAILS=0; WARNINGS=0; FAILED_ITEMS=()
+  check_unified_config
   check_ibus_registration
   check_rime_assets
   check_asr_backend

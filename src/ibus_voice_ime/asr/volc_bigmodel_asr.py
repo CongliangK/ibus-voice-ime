@@ -19,6 +19,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+
+from ibus_voice_ime import config
 import time
 import urllib.error
 import urllib.request
@@ -39,21 +41,15 @@ STATUS_SILENT = "20000003"
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def selected() -> bool:
-    backend = os.environ.get("VOICE_IME_ASR_BACKEND", "").strip().lower()
+    backend = config.env_str("VOICE_IME_ASR_BACKEND", "").strip().lower()
     return backend in {
         "volc",
         "volc-asr",
@@ -67,7 +63,7 @@ def selected() -> bool:
 
 def base_url() -> str:
     raw = (
-        os.environ.get("VOICE_IME_VOLC_BIGMODEL_BASE_URL")
+        config.env_str("VOICE_IME_VOLC_BIGMODEL_BASE_URL", None)
         or os.environ.get("VOLC_BIGMODEL_BASE_URL")
         or os.environ.get("VOLC_ASR_BASE_URL")
         or DEFAULT_BASE_URL
@@ -76,11 +72,11 @@ def base_url() -> str:
 
 
 def resource_id() -> str:
-    return os.environ.get("VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID", DEFAULT_RESOURCE_ID).strip() or DEFAULT_RESOURCE_ID
+    return config.env_str("VOICE_IME_VOLC_BIGMODEL_RESOURCE_ID", DEFAULT_RESOURCE_ID).strip() or DEFAULT_RESOURCE_ID
 
 
 def model_name() -> str:
-    return os.environ.get("VOICE_IME_VOLC_BIGMODEL_MODEL_NAME", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
+    return config.env_str("VOICE_IME_VOLC_BIGMODEL_MODEL_NAME", DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME
 
 
 def model_id() -> str:
@@ -147,7 +143,7 @@ def _language() -> str | None:
     VOICE_IME_VOLC_BIGMODEL_LANGUAGE env var for users who want a single
     language pinned.
     """
-    raw = os.environ.get("VOICE_IME_VOLC_BIGMODEL_LANGUAGE", "").strip()
+    raw = config.env_str("VOICE_IME_VOLC_BIGMODEL_LANGUAGE", "").strip()
     if not raw or raw.lower() in {"auto", "none", "mixed", "zh-mix"}:
         return None  # empty -> best Chinese/English/dialect mixing
     mapping = {
@@ -213,10 +209,10 @@ def _corpus() -> dict[str, str] | None:
         # Documented format: {"hotwords":[{"word":"..."}, ...]}
         context = json.dumps({"hotwords": [{"word": w} for w in hotwords]}, ensure_ascii=False)
         corpus["context"] = context
-    boosting = os.environ.get("VOICE_IME_VOLC_BIGMODEL_BOOSTING_TABLE", "").strip()
+    boosting = config.env_str("VOICE_IME_VOLC_BIGMODEL_BOOSTING_TABLE", "").strip()
     if boosting:
         corpus["boosting_table_name"] = boosting
-    correct = os.environ.get("VOICE_IME_VOLC_BIGMODEL_CORRECT_TABLE", "").strip()
+    correct = config.env_str("VOICE_IME_VOLC_BIGMODEL_CORRECT_TABLE", "").strip()
     if correct:
         corpus["correct_table_name"] = correct
     return corpus or None
@@ -280,7 +276,7 @@ def _submit(task_id: str, audio_b64: str, audio_format: str, *, skip_llm: bool =
     }
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(_submit_url(), data=data, headers=headers, method="POST")
-    timeout = float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_SUBMIT_TIMEOUT", "30"))
+    timeout = config.env_float("VOICE_IME_VOLC_BIGMODEL_SUBMIT_TIMEOUT", 30.0)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - user-configured API endpoint
             status = resp.headers.get("X-Api-Status-Code", "")
@@ -315,7 +311,7 @@ def _query(task_id: str, logid: str) -> tuple[str, str, str]:
         headers["X-Tt-Logid"] = logid
     data = json.dumps({}).encode("utf-8")
     req = urllib.request.Request(_query_url(), data=data, headers=headers, method="POST")
-    timeout = float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_QUERY_TIMEOUT", "30"))
+    timeout = config.env_float("VOICE_IME_VOLC_BIGMODEL_QUERY_TIMEOUT", 30.0)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - user-configured API endpoint
             status = resp.headers.get("X-Api-Status-Code", "")
@@ -371,7 +367,7 @@ def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
     audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
     # The turbo API does not document a hard base64 size cap, but keep a sane
     # guard so a runaway recording does not produce an enormous single request.
-    limit = int(float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_MAX_DATA_MB", "25")) * 1024 * 1024)
+    limit = int(config.env_float("VOICE_IME_VOLC_BIGMODEL_MAX_DATA_MB", 25.0) * 1024 * 1024)
     if len(audio_b64.encode("utf-8")) > limit:
         raise RuntimeError("火山引擎 ASR 音频过大；请缩短录音时长或改用本地后端。")
 
@@ -379,8 +375,8 @@ def transcribe(wav_path: str, *, skip_llm: bool = False) -> str:
     started = time.monotonic()
     logid = _submit(task_id, audio_b64, _audio_format(path), skip_llm=skip_llm)
 
-    interval = max(0.3, float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_POLL_INTERVAL", "1.0")))
-    max_wait = max(5.0, float(os.environ.get("VOICE_IME_VOLC_BIGMODEL_TOTAL_TIMEOUT", "120")))
+    interval = max(0.3, config.env_float("VOICE_IME_VOLC_BIGMODEL_POLL_INTERVAL", 1.0))
+    max_wait = max(5.0, config.env_float("VOICE_IME_VOLC_BIGMODEL_TOTAL_TIMEOUT", 120.0))
     deadline = started + max_wait
     last_message = ""
     while True:

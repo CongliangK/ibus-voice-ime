@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import atexit
 import os
+
+from ibus_voice_ime import config
 import shlex
 import shutil
 import subprocess
@@ -29,17 +31,11 @@ _PROCESS: subprocess.Popen | None = None
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in {"0", "false", "no", "off", "disabled"}
+    return config.env_bool(name, default)
 
 
 def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except Exception:
-        return default
+    return config.env_int(name, default)
 
 
 def _log(message: str) -> None:
@@ -60,10 +56,10 @@ def internal_enabled() -> bool:
 
     if llm_cloud_config.load() is not None:
         return False
-    raw = os.environ.get("VOICE_IME_LLM_INTERNAL")
+    raw = config.get("llm.internal", env="VOICE_IME_LLM_INTERNAL")
     if raw is not None:
         return _env_bool("VOICE_IME_LLM_INTERNAL", True)
-    configured = os.environ.get("VOICE_IME_LLM_BASE_URL", "").strip()
+    configured = config.env_str("VOICE_IME_LLM_BASE_URL", "").strip()
     if not configured:
         return True
     return configured.rstrip("/") in {
@@ -74,14 +70,14 @@ def internal_enabled() -> bool:
 
 def base_url() -> str:
     if internal_enabled():
-        host = os.environ.get("VOICE_IME_LLAMA_HOST", DEFAULT_HOST)
+        host = config.env_str("VOICE_IME_LLAMA_HOST", DEFAULT_HOST)
         port = _env_int("VOICE_IME_LLAMA_PORT", DEFAULT_PORT)
         return f"http://{host}:{port}/v1"
-    return os.environ.get("VOICE_IME_LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
+    return config.env_str("VOICE_IME_LLM_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
 
 
 def model_alias() -> str:
-    alias = os.environ.get("VOICE_IME_LLM_MODEL", DEFAULT_MODEL_ALIAS).strip() or DEFAULT_MODEL_ALIAS
+    alias = config.env_str("VOICE_IME_LLM_MODEL", DEFAULT_MODEL_ALIAS).strip() or DEFAULT_MODEL_ALIAS
     # Older setup versions used this Ollama example as a persisted default.  Do
     # not let that stale value rename the built-in Qwen3.5 sidecar.
     if alias == "qwen2.5:7b-instruct" and internal_enabled():
@@ -90,7 +86,7 @@ def model_alias() -> str:
 
 
 def _server_bin() -> str:
-    explicit = os.environ.get("VOICE_IME_LLAMA_SERVER", "").strip()
+    explicit = config.env_str("VOICE_IME_LLAMA_SERVER", "").strip()
     candidates = []
     if explicit:
         candidates.append(Path(explicit).expanduser())
@@ -126,7 +122,7 @@ def _find_gguf_in(directory: Path) -> Path | None:
 
 
 def model_path() -> Path:
-    explicit = os.environ.get("VOICE_IME_LLAMA_MODEL_PATH", "").strip()
+    explicit = config.env_str("VOICE_IME_LLAMA_MODEL_PATH", "").strip()
     if explicit:
         path = Path(explicit).expanduser()
         if path.exists():
@@ -172,7 +168,7 @@ def _default_threads() -> int:
 
 
 def _build_command() -> list[str]:
-    host = os.environ.get("VOICE_IME_LLAMA_HOST", DEFAULT_HOST)
+    host = config.env_str("VOICE_IME_LLAMA_HOST", DEFAULT_HOST)
     port = _env_int("VOICE_IME_LLAMA_PORT", DEFAULT_PORT)
     ctx_size = _env_int("VOICE_IME_LLAMA_CTX_SIZE", 2048)
     threads = _env_int("VOICE_IME_LLAMA_THREADS", _default_threads())
@@ -189,7 +185,7 @@ def _build_command() -> list[str]:
         "--batch-size", str(batch_size),
     ]
 
-    n_gpu_layers = os.environ.get("VOICE_IME_LLAMA_N_GPU_LAYERS", "").strip()
+    n_gpu_layers = config.env_str("VOICE_IME_LLAMA_N_GPU_LAYERS", "").strip()
     if n_gpu_layers:
         cmd.extend(["--n-gpu-layers", n_gpu_layers])
 
@@ -200,16 +196,16 @@ def _build_command() -> list[str]:
 
     # Qwen3.5 supports thinking mode, but an input method post-processor should
     # be fast and direct.  Current llama.cpp builds use --reasoning off.
-    reasoning = os.environ.get("VOICE_IME_LLAMA_REASONING", "off").strip()
+    reasoning = config.env_str("VOICE_IME_LLAMA_REASONING", "off").strip()
     if reasoning:
         cmd.extend(["--reasoning", reasoning])
 
     # Kept as an escape hatch for custom/older templates; empty by default.
-    template_kwargs = os.environ.get("VOICE_IME_LLAMA_CHAT_TEMPLATE_KWARGS", "").strip()
+    template_kwargs = config.env_str("VOICE_IME_LLAMA_CHAT_TEMPLATE_KWARGS", "").strip()
     if template_kwargs:
         cmd.extend(["--chat-template-kwargs", template_kwargs])
 
-    extra = os.environ.get("VOICE_IME_LLAMA_ARGS", "").strip()
+    extra = config.env_str("VOICE_IME_LLAMA_ARGS", "").strip()
     if extra:
         cmd.extend(shlex.split(extra))
     return cmd
@@ -227,7 +223,7 @@ def ensure_server() -> str:
     if _PROCESS is not None and _PROCESS.poll() is None:
         return url
 
-    log_dir = Path(os.environ.get("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
+    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "llama-server.log"
     cmd = _build_command()
@@ -241,7 +237,7 @@ def ensure_server() -> str:
         start_new_session=True,
     )
 
-    timeout = float(os.environ.get("VOICE_IME_LLAMA_START_TIMEOUT", "20"))
+    timeout = config.env_float("VOICE_IME_LLAMA_START_TIMEOUT", 20.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _PROCESS.poll() is not None:

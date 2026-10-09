@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+
+from ibus_voice_ime import config
 import re
 import time
 from dataclasses import dataclass
@@ -39,7 +41,7 @@ def starts_with_cjk(text: str) -> bool:
 class ChineseMemory:
     def __init__(self, path: str | Path | None = None):
         if path is None:
-            path = os.environ.get("VOICE_IME_CHINESE_USER_DICT", "~/.local/share/ibus-voice-ime/chinese.json")
+            path = config.env_str("VOICE_IME_CHINESE_USER_DICT", "~/.local/share/ibus-voice-ime/chinese.json")
         self.path = Path(path).expanduser()
         self.items: dict[str, dict[str, dict[str, Any]]] = {}
         self._load()
