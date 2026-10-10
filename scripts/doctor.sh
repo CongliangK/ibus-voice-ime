@@ -344,13 +344,31 @@ check_asr_backend() {
         have_model=0
       fi
       if [[ $have_venv -eq 1 ]]; then
-        if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
-          printf '%s\n' "$preflight_out"
-          ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
-          warn "此体检未执行模型推理；完整验收：./scripts/setup-qwen-asr.sh --verify-only"
+        # 先跑轻量静态验收（解释器版本/Python.h 编译探测/C 编译器，秒级），
+        # 把"旧版安装脚本用系统 Python 建的 venv 缺开发头文件"这类问题在
+        # 加载 torch/GPU 之前就归类报出，doctor fix 可精准一键重建。
+        local static_out
+        if static_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage static 2>&1)"; then
+          printf '%s\n' "$static_out"
+          if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
+            printf '%s\n' "$preflight_out"
+            ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
+            warn "此体检未执行模型推理；完整验收：./scripts/setup-qwen-asr.sh --verify-only"
+          else
+            printf '%s\n' "$preflight_out"
+            fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
+            have_venv=0
+          fi
         else
-          printf '%s\n' "$preflight_out"
-          fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
+          printf '%s\n' "$static_out"
+          if grep -q '\[FAIL:python_headers\]' <<<"$static_out"; then
+            fail "sidecar 解释器缺 Python.h 开发头文件（旧版安装脚本用系统 Python 建 venv 的遗留问题；Triton 首次编译内核必失败）"
+            fail "  一键修复：$0 fix（自动备份旧 venv、用自带头文件的 Python 3.12 重建；模型不重新下载）"
+            FAILED_ITEMS+=(qwen-python-headers)
+          else
+            fail "Qwen 静态验收失败（见上方 [FAIL:xxx] 类别）"
+            FAILED_ITEMS+=(qwen-setup)
+          fi
           have_venv=0
         fi
       fi
@@ -547,6 +565,17 @@ do_fix() {
           restarted=1
         else
           fail "install.sh 重跑失败，请手动排查"
+        fi
+        ;;
+      qwen-python-headers)
+        echo "==> 重建 Qwen sidecar 环境（解释器不匹配会自动备份旧 venv，"
+        echo "    改用 uv 管理的 Python 3.12——自带头文件，无需 root；已存在的模型不重新下载）"
+        if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
+          fixed "Qwen sidecar 环境已重建并通过静态/运行时验收（Python.h 完整）"
+          restarted=1
+        else
+          fail "重建失败（uv/网络？）。备选：为当前解释器补装头文件后重跑体检——"
+          echo "         Fedora: sudo dnf install python3-devel；Debian/Ubuntu: sudo apt install python3-dev build-essential"
         fi
         ;;
       qwen-setup)
