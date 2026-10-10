@@ -1,6 +1,14 @@
 # Application-level baseline; torch selects its matching Triton dependency.
 # Not a cross-platform CUDA lock: driver/wheel compatibility is checked by the
 # bounded runtime gate. Do not blindly upgrade the inference API on every run.
+#
+# torch upper bound: 2.13 introduced torch/_native/ops routing (e.g.
+# bmm_outer_product) through Triton, forcing a runtime gcc + Python.h compile
+# on first inference. Without this pin, pip drifts to the newest torch on
+# every reinstall and breaks environments lacking Python dev headers
+# (verified incident 2026-10-10). Lift the bound only deliberately, then
+# re-run the full preflight acceptance (scripts/setup-qwen-asr.sh).
 qwen-asr==0.0.6
 transformers==4.57.6
 modelscope>=1.22,<2
+torch>=2.12,<2.13
