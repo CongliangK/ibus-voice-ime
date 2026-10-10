@@ -16,7 +16,7 @@ from typing import Any
 
 from ibus_voice_ime import config
 from ibus_voice_ime.asr import sidecar_http
-from ibus_voice_ime.asr.qwen_diagnostics import classify_error
+from ibus_voice_ime.asr.qwen_diagnostics import classify_error, missing_python_header_hint
 
 _MODEL = None
 _MODEL_ID = ""
@@ -546,6 +546,25 @@ def _qwen_language(payload: dict[str, Any]) -> Any:
         return None
     return language
 
+def _classified_error_payload(detail: str) -> dict[str, str]:
+    """Build the 500 body, upgrading generic triton/compiler errors.
+
+    Triton swallows gcc's stderr (the ``fatal error: Python.h`` line only
+    lands in the server log), so the HTTP-visible exception is a bare
+    ``CalledProcessError: ... returned non-zero exit status``.  When that
+    generic text is all we have, probe the running interpreter for Python.h
+    and, if missing, reclassify as ``python_headers`` with a version-matched
+    fix command instead of a multi-cause guess.
+    """
+    category = classify_error(detail)[0]
+    if category in {"triton_compile", "compiler"}:
+        hint = missing_python_header_hint()
+        if hint:
+            category = "python_headers"
+            detail = f"{detail}\n{hint}"
+    return {"error": detail, "error_code": category}
+
+
 def _handle_transcribe(handler: BaseHTTPRequestHandler) -> None:
     # Reject malformed/oversized/remote input BEFORE importing/loading the GPU
     # model or taking its lock. Invalid requests must never trigger heavy work.
@@ -651,7 +670,7 @@ class Handler(BaseHTTPRequestHandler):
                 import traceback
 
                 traceback.print_exc()
-                _send_json(self, 500, {"error": str(exc), "error_code": classify_error(str(exc))[0]})
+                _send_json(self, 500, _classified_error_payload(str(exc)))
             return
         if path != "/transcribe":
             _send_json(self, 404, {"error": "not found"})
@@ -664,7 +683,7 @@ class Handler(BaseHTTPRequestHandler):
             import traceback
 
             traceback.print_exc()
-            _send_json(self, 500, {"error": str(exc), "error_code": classify_error(str(exc))[0]})
+            _send_json(self, 500, _classified_error_payload(str(exc)))
 
 
 def _env_float(name: str, default: float) -> float:
@@ -707,7 +726,16 @@ def main() -> None:
             flush=True,
         )
         sys.exit(2)
-
+    # Early, loud warning when the interpreter lacks Python.h: Triton will try
+    # to compile its CUDA driver helper on the first kernel launch and fail
+    # with a generic CalledProcessError.  Do not exit — a warm ~/.triton cache
+    # may already hold a prebuilt helper, in which case everything still works.
+    header_hint = missing_python_header_hint()
+    if header_hint:
+        print(
+            f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 警告 [python_headers]：{header_hint}",
+            flush=True,
+        )
     # Resolve the primary model and, if its sibling size is also on disk, a
     # secondary so the manager can auto-downgrade on VRAM pressure.  Loading is
     # deferred to the first request so the manager can probe free VRAM first

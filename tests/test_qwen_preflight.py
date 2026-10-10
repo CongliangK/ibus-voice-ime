@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -166,6 +167,25 @@ class ErrorClassificationTest(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.assertEqual(classify_error(json.dumps({'error': message}))[0], expected)
+
+
+class HeaderProbeTest(unittest.TestCase):
+    def test_probe_reports_version_matched_fix_when_header_missing(self):
+        from ibus_voice_ime.asr import qwen_diagnostics as diagnostics
+        with mock.patch.object(diagnostics.sysconfig, 'get_path', return_value='/nonexistent/include/python3.14'), \
+             mock.patch.object(diagnostics.sys, 'version_info', types.SimpleNamespace(major=3, minor=14)):
+            hint = diagnostics.missing_python_header_hint()
+        self.assertIn('缺少 Python.h', hint)
+        self.assertIn('python3.14-devel', hint)
+        self.assertIn('python3.14-dev', hint)
+        self.assertIn('/nonexistent/include/python3.14', hint)
+
+    def test_probe_silent_when_header_present(self):
+        from ibus_voice_ime.asr import qwen_diagnostics as diagnostics
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, 'Python.h').write_text('')
+            with mock.patch.object(diagnostics.sysconfig, 'get_path', return_value=directory):
+                self.assertEqual(diagnostics.missing_python_header_hint(), '')
 
 
 if __name__ == '__main__':

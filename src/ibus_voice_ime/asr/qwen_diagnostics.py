@@ -2,6 +2,37 @@
 from __future__ import annotations
 
 import json
+import sys
+import sysconfig
+from pathlib import Path
+
+
+def missing_python_header_hint() -> str:
+    """Probe the RUNNING interpreter for Python.h; return '' when present.
+
+    Triton compiles its CUDA driver helper on first kernel launch, and gcc's
+    ``fatal error: Python.h`` goes to the process stderr — it never reaches the
+    HTTP error body, which only carries CalledProcessError's generic "returned
+    non-zero exit status".  This probe turns that guess into a verified
+    diagnosis with a version-matched fix command.
+    """
+    directories = []
+    for key in ("include", "platinclude"):
+        directory = sysconfig.get_path(key)
+        if directory and directory not in directories:
+            directories.append(directory)
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    if any((Path(d) / "Python.h").is_file() for d in directories):
+        return ""
+    listing = "、".join(directories) or "（未获取到 include 路径）"
+    return (
+        f"已检测到当前解释器（Python {version}，{sys.executable}）缺少 Python.h"
+        f"（查找目录：{listing}）。Triton 首次启动内核时编译失败即由此导致。"
+        f"修复：Fedora 运行 sudo dnf install python{version}-devel；"
+        f"Debian/Ubuntu 运行 sudo apt install python{version}-dev build-essential；"
+        f"或用 ./scripts/setup-qwen-asr.sh 以 uv 管理的 Python 3.12 重建环境（自带头文件）。"
+        f"装好后删除 ~/.triton 缓存下对应版本的旧编译产物再重启。"
+    )
 
 
 def error_detail(raw: str) -> str:

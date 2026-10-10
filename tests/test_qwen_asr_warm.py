@@ -99,10 +99,34 @@ class WarmEndpointTest(unittest.TestCase):
     def test_warm_fails_when_no_model_was_loaded(self) -> None:
         self._fake._alias = None
         self._fake.load_error = "gcc returned non-zero exit status 1"
-        status, body = self._serve_once()
+        # Headers present on this interpreter → classification stays generic.
+        with mock.patch.object(qwen_asr_server, "missing_python_header_hint", return_value=""):
+            status, body = self._serve_once()
         self.assertEqual(status, 500)
         self.assertEqual(body["error_code"], "triton_compile")
         self.assertEqual(self._fake.release_calls, 1)
+
+    def test_triton_error_upgrades_to_python_headers_when_probe_fails(self) -> None:
+        # Reproduces the reported incident: Triton's CalledProcessError carries
+        # only a gcc command + exit status; gcc's "fatal error: Python.h" line
+        # goes to stderr and never reaches the HTTP body.  The header probe
+        # must turn the generic triton_compile into an actionable fix.
+        self._fake._alias = None
+        self._fake.load_error = (
+            "Command '['/usr/bin/gcc', '.../triton/backends/nvidia/driver.c', '-O3', "
+            "'-I/usr/include/python3.14']' returned non-zero exit status 1."
+        )
+        hint = "已检测到当前解释器（Python 3.14）缺少 Python.h。修复：sudo dnf install python3.14-devel。"
+        with mock.patch.object(qwen_asr_server, "missing_python_header_hint", return_value=hint):
+            status, body = self._serve_once()
+        self.assertEqual(status, 500)
+        self.assertEqual(body["error_code"], "python_headers")
+        self.assertIn("缺少 Python.h", body["error"])
+        self.assertIn("dnf install", body["error"])
+        # Client-side re-classification of the enriched body must agree.
+        from ibus_voice_ime.asr.qwen_diagnostics import classify_error
+
+        self.assertEqual(classify_error(body["error"])[0], "python_headers")
 
     def test_warm_fails_even_when_stale_model_remains_after_load_error(self) -> None:
         self._fake.load_error = "CUDA out of memory"
