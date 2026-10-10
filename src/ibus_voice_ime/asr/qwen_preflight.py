@@ -89,7 +89,11 @@ def check_static(python: str) -> dict:
         print("[WARN] 非推荐 Python 3.12：必须通过运行时和模型推理验收，不能仅凭版本判定不兼容。", flush=True)
     header = Path(info["include"]) / "Python.h"
     if not header.is_file():
-        raise RuntimeError(f"缺少 Python.h：{header}（解释器 {python}）")
+        raise RuntimeError(
+            f"缺少 Python.h：{header}（解释器 {python}，Python {major}.{minor}）。"
+            f"Fedora: sudo dnf install python3.{minor}-devel；"
+            f"Debian/Ubuntu: sudo apt install python3.{minor}-dev build-essential"
+        )
     cc = os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang")
     if not cc or not shutil.which(cc):
         raise RuntimeError("缺少 C 编译器：gcc/clang（或 CC 指定的编译器不存在）")
