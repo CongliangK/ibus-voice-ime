@@ -58,24 +58,41 @@ cd ibus-voice-ime
 
 ### 本地语音的安装验收
 
-Qwen 使用独立 Python：默认只自动选择 **Python 3.12**，不沿用系统 `python3`（IBus/PyGObject 仍使用系统环境）。若无 3.12 且已安装 `uv`，安装器通过 `uv python install 3.12` 准备包含开发头文件的独立解释器；不修改系统 Python，也不会自行安装 uv 或运行 sudo。没有 uv 时，请先安装 Python 3.12、对应的 venv/开发包和 C 编译器；安装器会明确失败，而非假报语音可用。其他版本需显式指定并通过全部检查，不能仅凭 3.14 版本号断定不兼容。
+Qwen 默认自动准备**仓库内 CPython 3.12（含开发头文件）**，不沿用系统 `python3`。Fedora 即使只有系统 3.14、没有 pip/uv，也不必先找系统 3.12 包：安装器使用系统 Python 的标准库校验 uv wheel 并自举到仓库，再由 uv 安装 3.12。已有可用 PATH uv 会经版本检查后使用；否则自举固定版本到仓库。**不运行 sudo，不修改系统 Python、全局 uv 或用户 pip 配置**；IBus/PyGObject 的系统环境不变。仍需 NVIDIA/CUDA 驱动、C 编译器、磁盘空间与网络，不能把自举成功当作推理成功。
+
+在仓库根目录运行（已有旧 3.14 venv 会自动备份迁移；不必手动删除）：
 
 ```bash
-./init.sh
-# 已有环境的完整只读验收（不下载、不改渠道配置；临时检查缓存会自动清理）：
+# 推荐：先准备/验收，保留用户渠道配置，不重启 IBus：
+VOICE_IME_ENABLE_QWEN_ASR=0 ./scripts/setup-qwen-asr.sh
+# 海外下载不可达时使用你的实际代理地址（不是必须固定此端口）：
+VOICE_IME_ENABLE_QWEN_ASR=0 ./scripts/setup-qwen-asr.sh --proxy http://127.0.0.1:7890
+# 准备成功后，明确激活 0.6B（写用户配置并重启 IBus）：
+./scripts/switch-qwen-asr.sh 0.6b
+# 检查实际持久化解释器/模型，不下载、不切换配置：
 ./scripts/setup-qwen-asr.sh --verify-only
-# 显式使用另一个解释器（解释器不匹配时自动备份旧 venv 后重建）：
+# 必要时明确使用系统 3.12（必须已有 venv/ensurepip、Python.h）：
 VOICE_IME_QWEN_ASR_SETUP_PYTHON=/usr/bin/python3.12 ./scripts/setup-qwen-asr.sh
-# 安装/验收较慢时，每个检查子进程的超时可调（最大 1800 秒）：
+# 每个推理验收子进程最长 1800 秒：
 VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 ```
+
+不加 `VOICE_IME_ENABLE_QWEN_ASR=0` 时，安装器验收成功会默认激活 1.7B 并重启 IBus。**准备环境、写入配置、桌面激活、真实热键语音是四种不同状态**：switch 的重启/引擎选择失败会非零退出，保留已写配置与已验收环境，不能声称桌面就绪。旧 JSON 或 environment.d 中显式指定的外部解释器不会被修复模式覆盖；完整迁移激活需检查这些覆盖并运行 switch，再执行只读验收。另一台 Fedora 在安装系统 3.12 后卡住的新 traceback 尚未提供，不能断言此次补丁已修复那台机器。
+
+下载源互不替代：
+- **pip 依赖包**：默认清华；`VOICE_IME_PIP_INDEX_URL=default` 明确使用 `https://pypi.org/simple`，忽略用户 pip.conf 和额外索引；可按次传入自己的包源 URL。
+- **CPython**：uv 的官方 GitHub python-build-standalone 发布；可设置 `UV_PYTHON_INSTALL_MIRROR` 为兼容的 HTTPS 镜像根地址。清华 pip 源不提供解释器。
+- **uv 自举**：PyPI 固定版本元数据与 wheel，通过发布 SHA256、解压大小及 `uv --version` 校验；元数据源可用 `VOICE_IME_UV_METADATA_URL` 指定可信兼容 HTTPS JSON 源。SHA256 是来源一致性校验，不是独立签名认证。
+
+自动缓存均在仓库（`.python`、`.tools`、`.cache/uv`），拒绝这些目录的符号链接。损坏的缓存 uv 会明确失败：检查并移走项目内损坏的二进制再重试，不会静默执行坏缓存或回退系统 Python。uv 自举总下载时限 180s、CPython 安装 600s；失败不会提前替换旧 venv。
 
 安装阶段依次检查：目标解释器和 `Python.h` 的实际编译 → pip 依赖一致性 → CUDA 张量运算和 Triton 驱动辅助模块编译/加载 → 模型配置及全部权重分片 → 短音频推理。短音频为静音，只验证执行链路，不验证识别准确率。GPU 显存不足时可使用现有 0.6B 自动降档，输出显示实际验收模型。
 
 - 应用依赖基线在 [requirements-qwen-asr.txt](requirements-qwen-asr.txt)；不是跨平台 CUDA 锁文件。torch/Triton 仍需匹配驱动，由运行验收兜底。已有解释器和基线匹配时不盲目升级包；实际版本记录在 venv 的 `installed-requirements.txt` 中。
 - 重建失败时恢复原 venv，失败环境和旧环境备份保留供排查，不删除模型或用户配置。使用文件锁阻止并发安装；拒绝修改指向其他项目的 venv 符号链接。安装中的 venv 重命名会写入 journal（`.qwen-asr-setup.state`）：SIGKILL/断电中断后，下次安装自动恢复原环境并把半成品移入 `.failed-crash-*` 留档。
 - `--force` 只允许无 GPU 时准备调试环境：不做 GPU 推理验收、不启用后端、不宣称语音就绪。
-- doctor 检查实际 sidecar 解释器、编译条件、CUDA 运算、Triton 和模型分片；不会默认加载整个模型。完整推理验收使用上面的 `--verify-only`。
+- doctor 检查实际 sidecar 解释器、编译条件、CUDA 运算、Triton 和模型分片；不会默认加载整个模型。完整推理验收使用上面的 `--verify-only`。[doctor](<scripts/doctor.sh>) 的 `fix` 对缺头文件/旧 venv 调用同一个新 setup（每次修复只调用一次），保留当前渠道及显式覆盖，修复成功可能重启 IBus，也可能修复其他资产；仅修复 Qwen 且不动桌面请用上面的 `VOICE_IME_ENABLE_QWEN_ASR=0` 命令。
+- 识别/预热超时只回收本输入法拥有的 sidecar，外部服务交给其管理者处理；下一次听写可重新启动。总处理 watchdog 恢复 UI 空闲并丢弃迟到结果，可按次设置 `VOICE_IME_PROCESSING_TIMEOUT`（秒，最大 1800）。它不是任意 Python 工作线程的强制取消器。录音停止采用有界读、TERM→KILL→wait 和非管道 stderr 诊断；成功返回前必须封口 WAV。
 - `/health` 的 `idle/ready/error` 区分懒加载/空闲卸载、模型就绪、加载失败；HTTP 200 只代表服务存活。`/warm` 只有模型真正加载成功才返回成功。稳定加载故障会冷却重试；显存不足不缓存，释放显存后可立即再试。
 
 健康检查（体检，不修改不下载）：

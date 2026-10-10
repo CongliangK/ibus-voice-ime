@@ -6,6 +6,8 @@ keeps a lightweight RMS level for the status overlay.
 """
 from __future__ import annotations
 
+import os
+import select
 import shutil
 import subprocess
 import tempfile
@@ -38,10 +40,12 @@ class AudioSession:
         self._tmpdir_obj: tempfile.TemporaryDirectory[str] | None = None
         self.wav_path = ""
         self._proc: subprocess.Popen[bytes] | None = None
+        self._stderr = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._done_event = threading.Event()
         self._lock = threading.Lock()
+        self._process_lock = threading.Lock()
         self._started_at = 0.0
         self._level = 0.0
         self._recording = False
@@ -62,7 +66,9 @@ class AudioSession:
 
         cmd[1:1] = _arecord_device_args()
         try:
-            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # A file cannot fill up a pipe or block stderr.read on a live child.
+            self._stderr = tempfile.TemporaryFile()
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=self._stderr)
         except FileNotFoundError as exc:
             self.cleanup()
             raise AudioSessionError(
@@ -88,7 +94,12 @@ class AudioSession:
                 wf.setsampwidth(2)
                 wf.setframerate(16000)
                 while not self._stop_event.is_set():
-                    data = self._proc.stdout.read(chunk_bytes)
+                    if self.elapsed() >= self.max_seconds:
+                        break
+                    readable, _, _ = select.select([self._proc.stdout], [], [], 0.1)
+                    if not readable:
+                        continue
+                    data = os.read(self._proc.stdout.fileno(), chunk_bytes)
                     if not data:
                         break
                     wf.writeframes(data)
@@ -102,21 +113,37 @@ class AudioSession:
             self._error = str(exc)
         finally:
             self._recording = False
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.terminate()
+            try:
+                self._stop_process()
+            except Exception as exc:
+                self._error = self._error or str(exc)
+            finally:
+                self._done_event.set()
+
+    def _stop_process(self) -> None:
+        # Reader finally and UI stop may arrive together. Serialize only process
+        # control, never the done_event wait; both lock and child waits are bounded.
+        if not self._process_lock.acquire(timeout=3):
+            raise AudioSessionError("停止录音器超时：进程控制锁不可用。")
+        try:
+            proc = self._proc
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
                 try:
-                    self._proc.wait(timeout=1)
+                    proc.wait(timeout=1)
                 except subprocess.TimeoutExpired:
-                    self._proc.kill()
-                    self._proc.wait(timeout=1)
-            self._done_event.set()
+                    proc.kill()
+                    proc.wait(timeout=1)
+        except Exception as exc:
+            raise AudioSessionError(f"停止/回收录音器失败：{exc}") from exc
+        finally:
+            self._process_lock.release()
 
     def stop(self) -> str:
         self._stop_event.set()
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-        if self._thread is not None:
-            self._done_event.wait(timeout=5)
+        self._stop_process()
+        if self._thread is not None and not self._done_event.wait(timeout=3):
+            raise AudioSessionError("录音线程未能关闭 WAV，拒绝识别未完成音频。")
         if self._error:
             raise AudioSessionError("录音失败：" + self._error)
         if self._canceled:
@@ -124,8 +151,10 @@ class AudioSession:
         if not self.wav_path or not Path(self.wav_path).exists() or Path(self.wav_path).stat().st_size <= 44:
             detail = ""
             try:
-                if self._proc is not None and self._proc.stderr is not None:
-                    detail = self._proc.stderr.read().decode("utf-8", errors="replace").strip()
+                if self._stderr is not None:
+                    self._stderr.seek(0, os.SEEK_END)
+                    self._stderr.seek(max(0, self._stderr.tell() - 8192))
+                    detail = self._stderr.read(8192).decode("utf-8", errors="replace").strip()
             except Exception:
                 detail = ""
             raise AudioSessionError("没有录到有效音频" + (f"：{detail}" if detail else ""))
@@ -134,13 +163,19 @@ class AudioSession:
     def cancel(self) -> None:
         self._canceled = True
         self._stop_event.set()
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-        if self._thread is not None:
-            self._done_event.wait(timeout=2)
+        self._stop_process()
+        if self._thread is not None and not self._done_event.wait(timeout=3):
+            raise AudioSessionError("取消录音超时：WAV 仍在写入。")
         self.cleanup()
 
     def cleanup(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return  # do not delete a WAV still being written
+        if self._proc is not None and self._proc.stdout is not None:
+            self._proc.stdout.close()
+        if self._stderr is not None:
+            self._stderr.close()
+            self._stderr = None
         if self._tmpdir_obj is not None:
             try:
                 self._tmpdir_obj.cleanup()

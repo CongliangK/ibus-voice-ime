@@ -1333,6 +1333,8 @@ class VoiceCustomEngine(IBus.Engine):
             self._show_aux("语音录音失败：" + str(exc), 6000)
             return
 
+        self._clear_voice_watchdog()
+        self._voice_generation = getattr(self, "_voice_generation", 0) + 1
         self._audio_session = session
         self._voice_state = "recording"
         self._voice_busy = True
@@ -1441,24 +1443,27 @@ class VoiceCustomEngine(IBus.Engine):
             self._overlay = None
         self.update_auxiliary_text(text("🧠 正在识别语音……"), True)
 
+        token = self._arm_voice_watchdog()
+        skip_llm = self._voice_raw
+
         def worker() -> None:
             try:
                 wav_path = session.stop()
                 # skip_llm 传给 transcribe：volc-bigmodel 后端据此强制关闭云端
                 # DDC 语义平滑，保证 raw 模式拿到未经云端改写的识别原文。
-                raw = voice.transcribe(wav_path, skip_llm=self._voice_raw)
+                raw = voice.transcribe(wav_path, skip_llm=skip_llm)
                 log_error(f"STT 完成，长度={len(raw)}")
                 # raw 模式（Ctrl+Alt+B）彻底跳过 LLM 后处理分支（min_chars
                 # 逻辑因此不参与）；悬浮窗/状态 detail 也不显示 LLM 开启。
                 # 先判断 raw 再读 llm.json，raw 模式下避免无谓的配置读取。
-                llm_active = not self._voice_raw and llm_postprocess.enabled()
+                llm_active = not skip_llm and llm_postprocess.enabled()
                 # raw 模式只做确定性规整，提示文案不能暗示 LLM 参与。
-                processing_hint = "📋 正在规整文本……" if self._voice_raw else "✨ 正在整理文本……"
-                GLib.idle_add(self._show_voice_processing, processing_hint, self._voice_processing_detail(llm=llm_active))
-                result = voice.postprocess(raw, skip_llm=self._voice_raw)
+                processing_hint = "📋 正在规整文本……" if skip_llm else "✨ 正在整理文本……"
+                GLib.idle_add(self._voice_callback, token, self._show_voice_processing, processing_hint, self._voice_processing_detail(llm=llm_active))
+                result = voice.postprocess(raw, skip_llm=skip_llm)
                 log_error(f"后处理完成，长度={len(result)}")
                 session.cleanup()
-                GLib.idle_add(self._finish_voice_input, result, None)
+                GLib.idle_add(self._voice_callback, token, self._finish_voice_input, result, None)
             except Exception as exc:
                 tb = traceback.format_exc()
                 log_error("语音输入失败\n" + tb)
@@ -1467,11 +1472,13 @@ class VoiceCustomEngine(IBus.Engine):
                     session.cleanup()
                 except Exception:
                     pass
-                GLib.idle_add(self._finish_voice_input, "", str(exc))
+                GLib.idle_add(self._voice_callback, token, self._finish_voice_input, "", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _cancel_toggle_voice_recording(self, message: str = "已取消语音输入") -> None:
+        self._clear_voice_watchdog()
+        self._voice_generation = getattr(self, "_voice_generation", 0) + 1
         log_error("取消 toggle 语音录音：" + message)
         if self._voice_state == "recording" and self._audio_session is not None:
             try:
@@ -1528,19 +1535,62 @@ class VoiceCustomEngine(IBus.Engine):
         self._overlay = voice_overlay.VoiceOverlay(on_cancel=lambda: None)
         self._overlay.show_processing(f"🎙️ 录音 {seconds} 秒……", "固定时长录音")
 
+        token = self._arm_voice_watchdog(extra_seconds=seconds)
+
         def worker() -> None:
             try:
                 result = voice.record_and_transcribe(seconds, skip_llm=raw)
-                GLib.idle_add(self._finish_voice_input, result, None)
+                GLib.idle_add(self._voice_callback, token, self._finish_voice_input, result, None)
             except Exception as exc:  # keep engine alive
                 tb = traceback.format_exc()
                 log_error("语音输入失败\n" + tb)
                 traceback.print_exc()
-                GLib.idle_add(self._finish_voice_input, "", str(exc))
+                GLib.idle_add(self._voice_callback, token, self._finish_voice_input, "", str(exc))
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _clear_voice_watchdog(self) -> None:
+        source = getattr(self, "_voice_watchdog_source", None)
+        self._voice_watchdog_source = None
+        if source is not None:
+            GLib.source_remove(source)
+
+    def _arm_voice_watchdog(self, extra_seconds: float = 0) -> int:
+        self._clear_voice_watchdog()
+        self._voice_generation = getattr(self, "_voice_generation", 0) + 1
+        token = self._voice_generation
+        # Includes startup, queued warmup, ASR and postprocessing. Transport
+        # timeouts alone do not cover hung plugins, session.stop or a slow body.
+        default = 2 * qwen_asr_runtime._timeout("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0) + qwen_asr_runtime._timeout("VOICE_IME_QWEN_ASR_TIMEOUT", 120.0) + 60
+        timeout = qwen_asr_runtime._timeout("VOICE_IME_PROCESSING_TIMEOUT", min(default + extra_seconds, 1800.0))
+        self._voice_watchdog_source = GLib.timeout_add(int(timeout * 1000), self._voice_watchdog_expired, token, timeout)
+        return token
+
+    def _voice_callback(self, token: int, callback, *args) -> bool:
+        if token != getattr(self, "_voice_generation", 0) or not self._voice_busy:
+            return False  # discarded late completion; never commit into a new dictation
+        callback(*args)
+        return False
+
+    def _voice_watchdog_expired(self, token: int, timeout: float) -> bool:
+        if (token != getattr(self, "_voice_generation", 0) or not self._voice_busy
+                or self._voice_state != "processing"):
+            return False
+        # This source is already dispatching and will return False; do not remove
+        # it again in finish. Stale callbacks must never clear a newer source.
+        self._voice_watchdog_source = None
+        self._voice_generation += 1
+        proc = qwen_asr_runtime._PROCESS
+        # UI recovery runs on GLib immediately; child reaping never blocks IBus.
+        self._finish_voice_input("", f"语音处理超时（{timeout:g}s），已恢复空闲，可再次按热键重试。请检查 ASR 日志。")
+        threading.Thread(target=qwen_asr_runtime.recover_timeout, args=(proc,), daemon=True).start()
+        return False
+
     def _finish_voice_input(self, result: str, error: str | None) -> bool:
+        self._clear_voice_watchdog()
+        self._voice_generation = getattr(self, "_voice_generation", 0) + 1
+        # Accepted results keep their independent delayed commit below; advancing
+        # the worker generation must not discard a successful pending commit.
         self._voice_busy = False
         self._voice_state = "idle"
         self._audio_session = None

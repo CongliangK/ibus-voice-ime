@@ -97,10 +97,7 @@ def _companion_path(model_path: str) -> str | None:
         for cand in [base / "Qwen3-ASR-0.6B", base / "0.6B"]:
             if (cand / "config.json").exists():
                 return str(cand)
-    else:
-        for cand in [base / "Qwen3-ASR-1.7B", base / "1.7B"]:
-            if (cand / "config.json").exists():
-                return str(cand)
+    # Explicit 0.6B is a ceiling, not permission to silently upgrade to 1.7B.
     return None
 
 
@@ -142,8 +139,8 @@ class ModelManager:
         offload_target: str = "cpu",
     ) -> None:
         # Build alias -> path map; drop missing/empty entries.
-        paths: dict[str, str] = {"1.7b": primary_path}
-        if secondary_path:
+        paths: dict[str, str] = {_resolve_alias(primary_path): primary_path}
+        if secondary_path and _resolve_alias(primary_path) == "1.7b":
             paths["0.6b"] = secondary_path
         # Normalize: ensure each path is filed under the alias matching its name.
         self._paths: dict[str, str] = {}
@@ -208,7 +205,11 @@ class ModelManager:
         Holds the lock so the watchdog cannot migrate mid-request.  Must be
         paired with ``release_after_inference``.
         """
-        self._lock.acquire()
+        wait = config.env_float("VOICE_IME_QWEN_ASR_TIMEOUT", 120.0)
+        import math
+        wait = min(1800.0, max(0.1, wait)) if math.isfinite(wait) and wait > 0 else 120.0
+        if not self._lock.acquire(timeout=wait):
+            raise sidecar_http.RequestError(503, "模型正在处理上一请求，等待超时；请稍后重试或重启 sidecar。")
         try:
             cooldown = max(0.0, config.env_float("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", 180.0))
             if self._load_error and self._load_failed_at > 0 and time.monotonic() - self._load_failed_at < cooldown:
@@ -243,11 +244,11 @@ class ModelManager:
         """Decide which model should be on the GPU and make it so.
 
         See the class docstring for the state machine.  When the active alias
-        is the configured primary (1.7b) we trust it and skip probing; every
-        other state re-probes free VRAM so we react to other processes (e.g.
-        ComfyUI) grabbing or releasing memory.
+        is the largest configured model we trust its existing allocation.
+        Cold activation (including RAM->GPU after idle offload) still probes;
+        a downgraded model in a dual-model configuration probes for upgrades.
         """
-        if self._active == "1.7b" and "1.7b" in self._paths:
+        if self._active in self._paths and (len(self._paths) == 1 or self._active == "1.7b"):
             return  # already serving the largest model; do not re-probe
         free_mib = self._probe_free_vram_mib()
         want = self._pick_target(free_mib)

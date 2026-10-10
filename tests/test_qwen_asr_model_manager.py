@@ -83,6 +83,28 @@ def _make_manager(
 # Pure decision logic (no torch, no I/O).
 # --------------------------------------------------------------------------- #
 class PickTargetTest(unittest.TestCase):
+    def test_busy_model_lock_is_bounded(self) -> None:
+        import threading
+        m = _make_manager()
+        acquired, release = threading.Event(), threading.Event()
+        def hold():
+            with m._lock:
+                acquired.set()
+                release.wait(3)
+        thread = threading.Thread(target=hold)
+        thread.start()
+        try:
+            self.assertTrue(acquired.wait(1))
+            with mock.patch.object(qwen_asr_server.config, 'env_float', return_value=0.1):
+                started = time.monotonic()
+                with self.assertRaisesRegex(qwen_asr_server.sidecar_http.RequestError, '等待超时'):
+                    m.acquire_for_inference()
+                self.assertLess(time.monotonic() - started, 1)
+        finally:
+            release.set()
+            thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+
     def test_prefers_17b_when_vram_sufficient(self) -> None:
         self.assertEqual(_make_manager()._pick_target(8000), "1.7b")
 
@@ -106,6 +128,69 @@ class PickTargetTest(unittest.TestCase):
         # 探测失败（None）保持旧“照常尝试加载”语义，让真实加载错误浮出。
         m = _make_manager(secondary=None)
         self.assertEqual(m._pick_target(None), "1.7b")
+
+    def test_explicit_06b_is_ceiling_even_with_large_companion(self) -> None:
+        m = _make_manager(primary='/models/Qwen3-ASR-0.6B', secondary='/models/Qwen3-ASR-1.7B')
+        self.assertEqual(m._pick_target(16000), '0.6b')
+        self.assertNotIn('1.7b', m._paths)
+        small = _FakeWrapper()
+        m._set_model_for_test('0.6b', small)
+        with mock.patch.object(m, '_probe_free_vram_mib', return_value=16000):
+            for _ in range(3):
+                m.acquire_for_inference()
+                self.assertEqual(m.active_alias, '0.6b')
+                m.release_after_inference()
+
+    def test_resident_single_06b_reuses_allocation_after_free_vram_drops(self) -> None:
+        m = _make_manager(primary='/models/Qwen3-ASR-0.6B', secondary='/models/Qwen3-ASR-1.7B')
+        wrapper = _FakeWrapper()
+        m._set_model_for_test('0.6b', wrapper)
+        with mock.patch.object(m, '_probe_free_vram_mib', side_effect=[3000, 1000]) as probe, \
+             mock.patch.object(m, '_load_to_ram_locked') as load:
+            for _ in range(2):
+                m.acquire_for_inference()
+                try:
+                    self.assertEqual(m.active_alias, '0.6b')
+                    self.assertEqual(m.load_error, '')
+                finally:
+                    m.release_after_inference()
+            self.assertEqual(probe.call_count, 1)
+            load.assert_not_called()
+        self.assertEqual(wrapper.model.to_calls, ['cuda:0'])  # first activation only
+
+    def test_single_model_cold_and_idle_return_still_require_vram(self) -> None:
+        for alias in ('0.6b', '1.7b'):
+            with self.subTest(alias=alias):
+                m = _make_manager(primary=f'/models/Qwen3-ASR-{alias}', secondary=None)
+                with mock.patch.object(m, '_probe_free_vram_mib', return_value=1000), \
+                     mock.patch.object(m, '_load_to_ram_locked') as load:
+                    m.acquire_for_inference()
+                    try:
+                        self.assertIn('显存不足', m.load_error)
+                        self.assertIsNone(m.active_alias)
+                        load.assert_not_called()
+                    finally:
+                        m.release_after_inference()
+                wrapper = _FakeWrapper()
+                m._set_model_for_test(alias, wrapper)
+                m._set_state_for_test(alias, gpu_device='cuda:0')
+                m._to_cpu_locked(alias)  # exact idle-watchdog migration primitive
+                with mock.patch.object(m, '_probe_free_vram_mib', side_effect=[1000, 8000]), \
+                     mock.patch.object(m, '_load_to_ram_locked') as load:
+                    for fits in (False, True):
+                        m.acquire_for_inference()
+                        try:
+                            if fits:
+                                self.assertEqual(m.load_error, '')
+                                self.assertEqual(m.active_alias, alias)
+                            else:
+                                self.assertIn('显存不足', m.load_error)
+                                self.assertIsNone(m.active_alias)
+                                self.assertEqual(wrapper.model.to_calls, ['cpu'])
+                        finally:
+                            m.release_after_inference()
+                    load.assert_not_called()
+                self.assertEqual(wrapper.model.to_calls, ['cpu', 'cuda:0'])
 
     def test_single_06b_model(self) -> None:
         m = _make_manager(primary="/models/Qwen3-ASR-0.6B", secondary=None)
@@ -330,7 +415,7 @@ class AliasResolutionTest(unittest.TestCase):
             (big / "config.json").write_text("{}")
             (small / "config.json").write_text("{}")
             self.assertEqual(qwen_asr_server._companion_path(str(big)), str(small))
-            self.assertEqual(qwen_asr_server._companion_path(str(small)), str(big))
+            self.assertIsNone(qwen_asr_server._companion_path(str(small)))
 
 
 # --------------------------------------------------------------------------- #

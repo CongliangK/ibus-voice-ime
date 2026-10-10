@@ -43,7 +43,8 @@ GitHub Actions（`ubuntu-latest`），push / PR / 手动触发均运行 **releas
 
 | 测试文件 | 用例数 | 守护的内容 |
 |---|---|---|
-| test_qwen_asr_model_manager.py | 27 | sidecar 模型管理器（加载 / 切换 / 错误面） |
+| test_qwen_asr_model_manager.py | 32 | sidecar 模型管理器（加载 / 切换 / 错误面），含唯一驻留模型复用及冷加载/idle 迁回显存门禁 |
+| test_voice_failure_recovery.py | 36 | pytest 收集数（含导入/继承的 IPC 用例）；watchdog 代际/计时器、延迟提交、锁竞争后身份核验回收、录音器有界回收 |
 | test_llm_cloud_config.py | 28 | LLM 云端 JSON 配置（字段/权限/优先级） |
 | test_audio_preprocess.py | 12 | 降噪链（陷波 / RNNoise 档、降级路径、fail-safe） |
 | test_volc_bigmodel_asr.py | 12 | 火山后端（请求构造、热词直传、轮询解析） |
@@ -70,7 +71,11 @@ GitHub Actions（`ubuntu-latest`），push / PR / 手动触发均运行 **releas
 - **语音端到端质量**：录音 → 识别 → 提交的准确率与延迟依赖真实麦克风与 GPU，CI 不加载真实模型。安装器的短静音推理只验收执行链路，不验证质量；新默认 Python 3.12/依赖基线的跨平台 GPU 行为仍需真实机器验收，不能由 mock 测试推断。
 - **安装器对抗测试（2026-10 轮次）**：在假解释器/假 GPU/假模型下载器构成的模拟环境中以真实 `setup-qwen-asr.sh` + 真实 `qwen-preflight.py` 跑通 6 轮共 116 项断言（全新安装矩阵、旧环境升级、各门失败回滚、SIGKILL/SIGTERM/并发中断、残留数据恢复、错误分类）。该装置位于会话临时目录不入库；发布前应在干净环境重放。
 - **无 GPU 虚拟机实测（2026-10，Ubuntu 24.04 cloud/QEMU）**：真实机器验证了裸机失败路径（无 GPU 拒绝 → 缺 Python.h 分类与带版本号的包名指引 → 真实 gcc 编译通过后 ensurepip 指引）、真实 pip 依赖解析（torch/triton 随解析日期浮动，证实"非跨平台锁"设计）、`--verify-only` 与 doctor 的真实 CUDA 不可用如实失败、幂等重跑复用（<1s）、损坏 config.json 自愈、以及一次计划外 VM 崩溃叠加的 SIGKILL journal 恢复闭环。GPU 直通下的真实推理验收仍未覆盖。
-- **跨发行版 / 桌面兼容性**：无第二台验证环境（见上文声明）。
+- **本轮自举/恢复回归（2026-10-10）**：仓库内测试覆盖无 pip/uv 的自举逻辑、缓存目录越界/符号链接、先拒绝外部解释器再探测、自动分支严格 3.12、损坏 uv/元数据/下载 deadline、journal 范围及提交时机、torch 版本门禁、doctor 去重调用新 setup、switch 激活失败、owned/external 超时、0.6B 上限、模型锁等待、录音器强杀回收及迟到结果。均为隔离测试，不代表另一台 Fedora 已恢复。
+- **F1/F2/F3 精确阻塞修复回归（2026-10-10）**：执行 `.venv/bin/python -m pytest tests -q -p no:cacheprovider`，**432 passed，58 subtests passed，28.88s**；`git diff --check` 通过。新增 11 个定向测试方法，覆盖正常 A 完成→B 录音→A 旧 watchdog、processing 状态核验、成功延迟提交不丢弃、finish/error/cancel/rearm 清理、唯一 GPU 驻留模型低剩余显存复用与冷加载/idle 迁回门禁、超时锁竞争→下次 ensure 先恢复、replacement/external 不误杀、回收失败保留 pending 并阻止健康复用、dead owner/shutdown 清理。仅隔离 mocks/临时假录音子进程；本轮无网络下载、真实模型验收、真实系统或 IBus 操作，未修改 shell，未额外运行 shell 语法检查。环境准备、持久配置、进程激活、真实中文/热键听写仍是不同验收状态，以下既有有限 GPU 成功与真实新 bootstrap 未完成边界不变。
+- **本轮有限本机验收（2026-10-10）**：RTX 4080、现有独立 Python 3.12.13、torch 2.12.1 / Triton 3.7.1 / qwen-asr 0.0.6 / transformers 4.57.6，通过头文件实际编译、CUDA 运算、私有缓存 Triton 初始化与一次 0.6B 短静音推理。HOME/配置/缓存隔离，不碰麦克风或 IBus；这套现有 venv 的 base Python 在原有全局 uv 目录，不是本轮新项目内安装，不能等同于新安装全流程。
+- **真实自举的未完成项**：在全新临时仓库、空 PATH（无 uv/pip）中，真实下载并校验项目内 uv 0.11.20 成功；CPython 3.12.13 的 32.5 MiB 下载在本轮外部 240s 验收预算内未完成（出现再次下载），已终止并回收隔离进程组，未把这一步记为成功。安装器自身 CPython deadline 为 600s；网络/代理原因尚未有完整失败 traceback，用户仍需在自己的环境验收。
+- **跨发行版 / 桌面兼容性**：未在另一台 Fedora 上验证；其安装系统 3.12 后卡住的新 traceback 尚缺。
 - **词库候选质量**：雾凇拼音体验属上游方案范畴。
 
 报 bug 时请附 `./scripts/check-environment.sh` 输出与三份日志（`engine.log` / `error.log` / `qwen-asr-server.log`，默认已自动裁剪到最近 1000 行）。

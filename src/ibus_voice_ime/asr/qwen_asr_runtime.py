@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import math
 import os
 import shlex
 import socket
@@ -25,14 +26,18 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 18081
 DEFAULT_MODEL_ALIAS = "1.7b"
 _PROCESS: subprocess.Popen | None = None
-_PROCESS_KEY: tuple[str, int, str] | None = None
+_PROCESS_KEY: tuple[str, int, str, str] | None = None
 # 录音开始的预热线程与停止后的识别线程可能并发首拉 sidecar；不加锁会双拉
 # 进程，输家死于端口冲突并报出假错误（实际幸存方健康）。
 _ENSURE_LOCK = threading.Lock()
+# Publishing a timeout must not wait for slow health/startup work. The pending
+# identity is consumed under the ensure lock before any healthy-owner reuse.
+_RECOVERY_LOCK = threading.Lock()
+_PENDING_RECOVERY: subprocess.Popen | None = None
 # 拉起失败熔断：sidecar 依赖缺失/驱动不匹配等“稳定秒退”故障下，每次听写都会
 # 重复支付 python+torch import（10-40s）后失败。冷却窗内直接抛缓存错误。
 _FAIL_AT = 0.0
-_FAIL_KEY: tuple[str, int, str] | None = None
+_FAIL_KEY: tuple[str, int, str, str] | None = None
 _FAIL_MSG = ""
 
 
@@ -40,7 +45,7 @@ def _fail_cooldown() -> float:
     return max(0.0, config.env_float("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", 180.0))
 
 
-def _record_spawn_failure(key: tuple[str, int, str], message: str) -> RuntimeError:
+def _record_spawn_failure(key: tuple[str, int, str, str], message: str) -> RuntimeError:
     global _FAIL_AT, _FAIL_KEY, _FAIL_MSG
     _FAIL_AT = time.monotonic()
     _FAIL_KEY = key
@@ -48,7 +53,7 @@ def _record_spawn_failure(key: tuple[str, int, str], message: str) -> RuntimeErr
     return RuntimeError(message)
 
 
-def _raise_cached_failure(key: tuple[str, int, str]) -> None:
+def _raise_cached_failure(key: tuple[str, int, str, str]) -> None:
     cooldown = _fail_cooldown()
     if cooldown <= 0 or not _FAIL_MSG or _FAIL_KEY != key:
         return
@@ -76,8 +81,8 @@ def _terminate_process(proc: subprocess.Popen) -> None:
         try:
             proc.kill()
             proc.wait(timeout=1)
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError(f"无法在时限内回收自有 Qwen sidecar（PID {proc.pid}）：{exc}") from exc
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -110,9 +115,9 @@ def _python() -> str:
     if explicit:
         return str(Path(explicit).expanduser())
     venv_python = ROOT_DIR / ".venv-qwen-asr" / "bin" / "python"
-    if venv_python.exists():
-        return str(venv_python)
-    return os.environ.get("PYTHON", "python3")
+    # Missing/broken venv must fail with repair guidance, never silently run
+    # rolling distro Python (or a foreign activated environment).
+    return str(venv_python)
 
 
 def _local_model_dir(name: str) -> Path | None:
@@ -235,18 +240,79 @@ def _humanize_transcribe_error(code: int, detail: str) -> str:
     )
 
 
+def _timeout(name: str, default: float) -> float:
+    value = config.env_float(name, default)
+    return min(1800.0, max(0.1, value)) if math.isfinite(value) and value > 0 else default
+
+
+def recover_timeout(expected: subprocess.Popen | None = None) -> bool:
+    """Reap only our timed-out child, never a separately managed service.
+
+    Identity check prevents a late warmup timeout from killing a replacement
+    spawned by a later dictation. No cooldown: the next request can retry.
+    """
+    global _PENDING_RECOVERY
+    with _RECOVERY_LOCK:
+        if expected is None or _PROCESS is not expected:
+            return False
+        _PENDING_RECOVERY = expected
+    if not _ENSURE_LOCK.acquire(timeout=0.2):
+        return False  # next ensure takes over, rather than reusing the failed child
+    try:
+        try:
+            return _recover_pending_locked() is expected
+        except RuntimeError as exc:
+            _log(str(exc))
+            return False  # retain ownership and pending state for another attempt
+    finally:
+        _ENSURE_LOCK.release()
+
+
+def _recover_pending_locked() -> subprocess.Popen | None:
+    """Consume an identity-checked recovery while holding _ENSURE_LOCK."""
+    global _PROCESS, _PROCESS_KEY, _PENDING_RECOVERY
+    with _RECOVERY_LOCK:
+        expected = _PENDING_RECOVERY
+    if expected is None:
+        return None
+    recovered = None
+    if _PROCESS is expected:
+        if expected.poll() is None:
+            _terminate_process(expected)  # failure must prevent healthy fast reuse
+        _PROCESS, _PROCESS_KEY = None, None
+        _clear_failure()
+        recovered = expected
+    with _RECOVERY_LOCK:
+        if _PENDING_RECOVERY is expected:
+            _PENDING_RECOVERY = None  # also discard stale replacement/external identities
+    return recovered
+
+
 def ensure_server() -> str:
-    with _ENSURE_LOCK:
+    timeout = _timeout("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0)
+    if not _ENSURE_LOCK.acquire(timeout=timeout):
+        raise RuntimeError(f"Qwen3-ASR 等待启动锁超时（{timeout:g}s），请稍后重试。")
+    try:
+        _recover_pending_locked()
         return _ensure_server_locked()
+    finally:
+        _ENSURE_LOCK.release()
 
 
 def _ensure_server_locked() -> str:
     global _PROCESS, _PROCESS_KEY
     url = base_url()
-    key = (_host(), _port(), model_id())
+    options = {name: config.env_str(name, "") for name in (
+        "VOICE_IME_QWEN_ASR_DEVICE_MAP", "VOICE_IME_QWEN_ASR_DTYPE",
+        "VOICE_IME_QWEN_ASR_ATTN", "VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS",
+        "VOICE_IME_QWEN_ASR_MAX_BATCH", "VOICE_IME_QWEN_ASR_DEVICE_OFFLOAD_TARGET",
+        "VOICE_IME_QWEN_ASR_IDLE_TIMEOUT", "VOICE_IME_QWEN_ASR_IDLE_CHECK_INTERVAL",
+        "VOICE_IME_QWEN_ASR_VRAM_MIN_MIB_1_7B", "VOICE_IME_QWEN_ASR_VRAM_MIN_MIB_0_6B",
+        "VOICE_IME_QWEN_ASR_TIMEOUT", "VOICE_IME_QWEN_ASR_FAIL_COOLDOWN")}
+    key = (_host(), _port(), model_id(), _python() + json.dumps(options, sort_keys=True))
     log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     log_file = log_dir / "qwen-asr-server.log"
-    timeout = max(1.0, config.env_float("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0))
+    timeout = _timeout("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0)
 
     def death_error(code: int | None) -> RuntimeError:
         tail = _log_tail(log_file)
@@ -258,13 +324,15 @@ def _ensure_server_locked() -> str:
             f"Qwen3-ASR sidecar 启动失败（退出码 {code}）。\n{tail}\n完整日志：{log_file}{hint}",
         )
 
+    if _PROCESS is not None and _PROCESS.poll() is not None:
+        _PROCESS, _PROCESS_KEY = None, None  # a dead owner cannot describe an external service
     if _server_matches(key[2]) and (_PROCESS_KEY is None or _PROCESS_KEY == key):
         _clear_failure()
         return url
-    if is_ready() and not _server_matches(key[2]):
+    if is_ready() and not _server_matches(key[2]) and (_PROCESS is None or _PROCESS.poll() is not None):
         raise RuntimeError(
             "Qwen3-ASR sidecar 已在运行但模型与当前配置不同；"
-            "请先执行 pkill -f qwen_asr_server.py，或使用 scripts/switch-qwen-asr.sh 切换。"
+            "这是外部管理的服务，本输入法不会终止它；请由其管理者重启或为当前配置选择其他端口。"
         )
 
     _raise_cached_failure(key)
@@ -292,8 +360,8 @@ def _ensure_server_locked() -> str:
                     return url
                 time.sleep(0.5)
             # 超时：杀掉卡死的子进程再报错，不留占显存/端口的僵尸。
-            proc, _PROCESS, _PROCESS_KEY = _PROCESS, None, None
-            _terminate_process(proc)
+            _terminate_process(_PROCESS)
+            _PROCESS, _PROCESS_KEY = None, None
             raise _record_spawn_failure(
                 key,
                 f"Qwen3-ASR sidecar 启动超时（{timeout:.0f}s），已终止进程。详见日志：{log_file}",
@@ -310,6 +378,11 @@ def _ensure_server_locked() -> str:
             "或用 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端后端（无需 GPU）。"
         )
 
+    if not Path(_python()).is_file() or not os.access(_python(), os.X_OK):
+        raise RuntimeError(
+            f"Qwen3-ASR 本地解释器不存在或不可执行：{_python()}\n"
+            "请运行 ./scripts/setup-qwen-asr.sh 重建隔离环境；不会回退系统 Python。"
+        )
     log_dir.mkdir(parents=True, exist_ok=True)
     trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
     cmd = [
@@ -346,8 +419,8 @@ def _ensure_server_locked() -> str:
             _clear_failure()
             return url
         time.sleep(0.5)
-    proc, _PROCESS, _PROCESS_KEY = _PROCESS, None, None
-    _terminate_process(proc)
+    _terminate_process(_PROCESS)
+    _PROCESS, _PROCESS_KEY = None, None
     raise _record_spawn_failure(
         key,
         f"Qwen3-ASR sidecar 启动超时（{timeout:.0f}s），已终止进程。详见日志：{log_file}",
@@ -356,6 +429,7 @@ def _ensure_server_locked() -> str:
 
 def transcribe(wav_path: str) -> str:
     url = ensure_server()
+    request_process = _PROCESS
     language = config.env_str("VOICE_IME_QWEN_ASR_LANGUAGE", None)
     if language is None:
         language = config.env_str("VOICE_IME_WHISPER_LANGUAGE", "zh")
@@ -364,7 +438,7 @@ def transcribe(wav_path: str) -> str:
     if context:
         payload["context"] = context
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    timeout = config.env_float("VOICE_IME_QWEN_ASR_TIMEOUT", 120.0)
+    timeout = _timeout("VOICE_IME_QWEN_ASR_TIMEOUT", 120.0)
     req = urllib.request.Request(
         url + "/transcribe",
         data=data,
@@ -385,9 +459,11 @@ def transcribe(wav_path: str) -> str:
         # 与“服务崩了”是两回事，混在一条文案里会把排障方向带偏。
         reason = getattr(exc, "reason", None)
         if isinstance(exc, socket.timeout) or isinstance(reason, (socket.timeout, TimeoutError)):
+            recovered = recover_timeout(request_process)
+            recovery = "已回收本输入法启动的 sidecar，下次听写会重新启动。" if recovered else "未终止外部服务；或自有进程暂未能回收，请检查日志及服务管理者。"
             raise RuntimeError(
-                f"Qwen3-ASR 识别超时（>{timeout:.0f}s）：缩短录音长度，"
-                "或调大 VOICE_IME_QWEN_ASR_TIMEOUT。"
+                f"Qwen3-ASR 识别超时（>{timeout:g}s）：{recovery}"
+                "缩短录音长度，或调大 VOICE_IME_QWEN_ASR_TIMEOUT。"
             ) from exc
         raise RuntimeError(
             f"Qwen3-ASR sidecar 连接失败（{exc}）：服务可能已崩溃或未监听。"
@@ -428,7 +504,8 @@ def warm() -> bool:
         return False
     # Give warmup the full sidecar start window: the first warm may itself
     # trigger model loading (~10s from disk on first use, ~1s RAM->GPU after).
-    timeout = config.env_float("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0)
+    timeout = _timeout("VOICE_IME_QWEN_ASR_START_TIMEOUT", 120.0)
+    request_process = _PROCESS
     req = urllib.request.Request(
         url + "/warm",
         data=b"{}",
@@ -440,25 +517,25 @@ def warm() -> bool:
             info = json.loads(resp.read(65536).decode("utf-8"))
             return 200 <= resp.status < 300 and isinstance(info, dict) and info.get("status") == "warm" and info.get("loaded") is True
     except Exception as exc:
+        if isinstance(exc, TimeoutError) or isinstance(getattr(exc, 'reason', None), TimeoutError):
+            recover_timeout(request_process)
         _log(f"ASR 预热失败（best-effort，忽略）：{exc}")
         return False
 
 
 def shutdown() -> None:
-    global _PROCESS, _PROCESS_KEY
+    global _PROCESS, _PROCESS_KEY, _PENDING_RECOVERY
+    with _RECOVERY_LOCK:
+        _PENDING_RECOVERY = None
     proc = _PROCESS
     _PROCESS = None
     _PROCESS_KEY = None
     if proc is None or proc.poll() is not None:
         return
     try:
-        proc.terminate()
-        proc.wait(timeout=2)
-    except Exception:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        _terminate_process(proc)
+    except RuntimeError as exc:
+        _log(str(exc))
 
 
 atexit.register(shutdown)

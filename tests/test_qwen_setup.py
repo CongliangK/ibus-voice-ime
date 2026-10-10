@@ -25,6 +25,7 @@ class QwenSetupTest(unittest.TestCase):
         (self.root / 'scripts').mkdir()
         shutil.copy2(ROOT / 'scripts/setup-qwen-asr.sh', self.root / 'scripts/setup-qwen-asr.sh')
         shutil.copy2(ROOT / 'scripts/env-file-load.sh', self.root / 'scripts/env-file-load.sh')
+        shutil.copy2(ROOT / 'scripts/setup-qwen-python.py', self.root / 'scripts/setup-qwen-python.py')
         shutil.copy2(ROOT / 'requirements-qwen-asr.txt', self.root / 'requirements-qwen-asr.txt')
         (self.root / 'src').symlink_to(ROOT / 'src')
         self.log = self.root / 'events'
@@ -83,9 +84,11 @@ if a[:2] == ['-m', 'venv']:
     sys.exit(0)
 if a[:2] == ['-m', 'pip']:
     rest = a[2:]
+    assert rest[0] == '--isolated', rest
+    rest = rest[1:]
     if os.environ.get('FAKE_PIP_UPGRADE_FAIL') == '1' and '--upgrade' in rest and '-r' not in rest:
         sys.exit(1)
-    with (root / 'events').open('a') as f: f.write('pip:' + ' '.join(a[2:]) + '\\n')
+    with (root / 'events').open('a') as f: f.write('pip:' + ' '.join(rest) + '\\n')
     sys.exit(0)
 if a == ['-V']: print('Python 3.{minor}.0')
 # stdin metadata baseline probe: succeed without importing real packages.
@@ -103,6 +106,37 @@ if a == ['-V']: print('Python 3.{minor}.0')
 
     def events(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
+
+    def run_doctor_repair(self, **environment):
+        # Source only the actual doctor definitions; no host desktop/asset checks.
+        definitions = (ROOT / 'scripts/doctor.sh').read_text().split('# ------------------------------------------------------------------- 主流程 --')[0]
+        self.make_script(self.root / 'scripts/doctor-definitions.sh', definitions)
+        self.make_script(self.root / 'scripts/ibus-restart.sh', '#!/bin/sh\necho restart >> "$FAKE_ROOT/events"\nexit "${FAKE_RESTART_CODE:-0}"\n')
+        env = dict(self.env, VOICE_IME_QWEN_ASR_PYTHON=str(self.venv / 'bin/python'))
+        env.update(environment)
+        return subprocess.run(['bash', '-c', 'source "$1" fix; FAILED_ITEMS=(qwen-python-headers qwen-setup); do_fix; echo "repair-failures=$FIX_FAILURES"', '--', str(self.root / 'scripts/doctor-definitions.sh')], env=env, capture_output=True, text=True, timeout=25)
+
+    def test_doctor_header_repair_calls_new_setup_only_once(self):
+        self.seed_old_venv()
+        result = self.run_doctor_repair(DOCTOR_PROXY='http://proxy.invalid:1234')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events().count('create-venv'), 1)
+        self.assertEqual(self.events().count('smoke'), 1)
+        self.assertNotIn('activate', self.events())  # repair leaves configuration intact
+        self.assertIn('仓库内自动准备', result.stdout)
+        self.assertTrue(list(self.root.glob('.venv-qwen-asr.bak-*/original-marker')))
+        self.assertIn('repair-failures=0', result.stdout)
+
+    def test_doctor_setup_failure_remembered_and_not_repeated(self):
+        result = self.run_doctor_repair(FAKE_FAIL_STAGE='static')
+        self.assertEqual(self.events().count('static'), 1)
+        self.assertIn('repair-failures=1', result.stdout)
+        self.assertNotIn('restart', self.events())
+
+    def test_doctor_external_python_override_not_claimed_repaired(self):
+        result = self.run_doctor_repair(VOICE_IME_QWEN_ASR_PYTHON='/external/python')
+        self.assertIn('不能声称当前 sidecar 已修复', result.stdout)
+        self.assertNotIn('restart', self.events())
 
     def test_full_gate_runs_before_activation(self):
         result = self.run_setup()
@@ -154,11 +188,12 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.log.unlink(missing_ok=True)
         result = self.run_setup(VOICE_IME_PIP_INDEX_URL='https://mirrors.aliyun.com/pypi/simple')
         self.assertIn('mirrors.aliyun.com', result.stdout)
-        # 'default' 禁用镜像：命令行不携带 --index-url
+        # 'default' 明确官方源；即使调用者已 export PIP_INDEX_URL 也不继承它。
         self.log.unlink(missing_ok=True)
-        result = self.run_setup(VOICE_IME_PIP_INDEX_URL='default')
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL='default', PIP_INDEX_URL='https://bad.test/simple')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue(all('--index-url' not in e for e in self.events() if e.startswith('pip:install')))
+        self.assertIn('https://pypi.org/simple', result.stdout)
+        self.assertTrue(all('--index-url https://pypi.org/simple' in e for e in self.events() if e.startswith('pip:install')))
 
     def test_switch_failure_keeps_verified_env_with_guidance(self):
         # 激活（写 config.json）失败时：已验收的环境必须保留，且给出单独重试指引，
@@ -166,7 +201,7 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.make_script(self.root / 'scripts/switch-qwen-asr.sh', '#!/bin/sh\nexit 1\n')
         result = self.run_setup()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('启用后端失败', result.stdout + result.stderr)
+        self.assertIn('桌面激活失败', result.stdout + result.stderr)
         self.assertIn('switch-qwen-asr.sh', result.stdout + result.stderr)
         self.assertTrue((self.venv / 'installed-requirements.txt').exists())
         self.assertFalse(list(self.root.glob('.venv-qwen-asr.failed-*')))
@@ -192,10 +227,62 @@ if a == ['-V']: print('Python 3.{minor}.0')
 
     def test_stale_journal_is_ignored_and_cleaned(self):
         # journal 指向的备份已被用户删除：忽略而不是阻塞，且清理状态文件。
-        (self.root / '.qwen-asr-setup.state').write_text('backup=/nonexistent/bak\n')
+        (self.root / '.qwen-asr-setup.state').write_text(f'backup={self.root}/.venv-qwen-asr.bak-missing\n')
         result = self.run_setup()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse((self.root / '.qwen-asr-setup.state').exists())
+
+    def test_journal_cannot_move_foreign_directory(self):
+        outside = self.root / 'important-data'
+        outside.mkdir()
+        (outside / 'keep').write_text('user data')
+        state = self.root / '.qwen-asr-setup.state'
+        state.write_text(f'backup={outside}\n')
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((outside / 'keep').exists())
+        self.assertTrue(state.exists())
+        self.assertFalse(self.venv.exists())
+
+    def test_journal_symlink_backup_and_destination_rejected(self):
+        outside = self.root / 'external'
+        outside.mkdir()
+        (outside / 'keep').write_text('preserve')
+        backup = self.root / '.venv-qwen-asr.bak-link'
+        backup.symlink_to(outside, target_is_directory=True)
+        state = self.root / '.qwen-asr-setup.state'
+        state.write_text(f'backup={backup}\n')
+        self.assertNotEqual(self.run_setup().returncode, 0)
+        self.assertTrue((outside / 'keep').exists())
+        backup.unlink()
+        backup.mkdir()
+        self.venv.symlink_to(self.root / 'missing', target_is_directory=True)
+        self.assertNotEqual(self.run_setup().returncode, 0)
+        self.assertTrue(self.venv.is_symlink())
+        self.assertTrue(backup.exists())
+
+    def test_committed_environment_clears_journal_before_activation(self):
+        self.seed_old_venv()
+        self.make_script(self.root / 'scripts/switch-qwen-asr.sh', '#!/bin/sh\nif [ -e "$FAKE_ROOT/.qwen-asr-setup.state" ]; then echo stale-journal >> "$FAKE_ROOT/events"; fi\nexit 1\n')
+        result = self.run_setup()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('stale-journal', self.events())
+        self.assertFalse((self.venv / 'original-marker').exists())
+        self.assertTrue(list(self.root.glob('.venv-qwen-asr.bak-*/original-marker')))
+
+    def test_torch_baseline_checks_project_range_not_just_pip_check(self):
+        from unittest import mock
+        import importlib.metadata
+        # Execute the installer baseline's actual Python, with synthetic metadata.
+        script = (ROOT / 'scripts/setup-qwen-asr.sh').read_text()
+        code = script.split('import importlib.metadata as m\n', 1)[1].split('\nPY', 1)[0]
+        code = 'import importlib.metadata as m\n' + code
+        for torch, expected in (('2.5.1', 1), ('2.6.0', 0), ('2.12.0', 0), ('2.13.0', 1), ('invalid', 1)):
+            versions = {'qwen-asr': '0.0.6', 'transformers': '4.57.6', 'modelscope': '1.22.0', 'torch': torch}
+            with self.subTest(torch=torch), mock.patch.object(importlib.metadata, 'version', side_effect=versions.__getitem__):
+                with self.assertRaises(SystemExit) as error:
+                    exec(code, {})
+                self.assertEqual(error.exception.code, expected)
 
     def test_no_gpu_is_failure_not_fake_success(self):
         result = self.run_setup(FAKE_GPU='none')

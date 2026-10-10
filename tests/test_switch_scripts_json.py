@@ -268,12 +268,73 @@ class MigratedStateSwitchTest(_SwitchSandbox):
         self.assertFalse(qwen_asr_runtime.selected())
 
 
+class QwenActivationFailureTest(_SwitchSandbox):
+    def setUp(self):
+        for tool in _STUB_TOOLS:
+            _make_stub(self.sb / 'bin', tool)
+        self.config_json.parent.mkdir(parents=True, exist_ok=True)
+        self.config_json.write_text('{"custom": "preserve", "asr": {"backend": "siliconflow-asr"}}')
+        self._seed_env_file()
+
+    def fail_ibus(self, operation):
+        stub = self.sb / 'bin/ibus'
+        stub.write_text(f'#!/bin/sh\nif [ "$1" = "{operation}" ]; then echo fake-{operation}-failure >&2; exit 7; fi\nexit 0\n')
+        stub.chmod(0o755)
+
+    def assert_failed_activation(self, result, stage):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('桌面激活失败', result.stderr)
+        self.assertIn(stage, result.stderr)
+        self.assertNotIn('已切换到', result.stdout)
+        data = json.loads(self.config_json.read_text())
+        self.assertEqual(data['asr']['backend'], 'qwen3-asr')
+        self.assertEqual(data['custom'], 'preserve')
+
+    def test_restart_failure_not_success(self):
+        self.fail_ibus('restart')
+        self.assert_failed_activation(self._run_script('switch-qwen-asr.sh', '0.6b'), '重启命令失败')
+
+    def test_engine_selection_failure_not_success(self):
+        self.fail_ibus('engine')
+        self.assert_failed_activation(self._run_script('switch-qwen-asr.sh', '0.6b'), '选择 voice-custom')
+
+    def test_missing_ibus_never_uses_real_desktop(self):
+        # Isolated PATH: no fallback to a host ibus/daemon, even if installed.
+        bin_dir = self.sb / 'bin'
+        for name in ('bash', 'python3', 'dirname', 'mkdir', 'mktemp', 'grep', 'mv', 'chmod', 'sleep'):
+            target = bin_dir / name
+            if not target.exists():
+                target.symlink_to(shutil.which(name))
+        (bin_dir / 'ibus').unlink()
+        (bin_dir / 'ibus-daemon').unlink()
+        self.assert_failed_activation(self._run_script('switch-qwen-asr.sh', '0.6b', extra_env={'PATH': str(bin_dir)}), '重启命令失败')
+
+    def test_corrupt_json_does_not_modify_config_or_legacy_env(self):
+        for content in ('{bad json', 'null', '[]'):
+            self.config_json.write_text(content)
+            before = self.env_file.read_text()
+            result = self._run_script('switch-qwen-asr.sh', '0.6b')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(self.config_json.read_text(), content)
+            self.assertEqual(self.env_file.read_text(), before)
+            self.assertNotIn('已切换到', result.stdout)
+
+    def test_config_write_failure_not_partial_switch(self):
+        blocked = self.sb / 'blocked-config'
+        blocked.write_text('not a directory')
+        original = self.config_json.read_text()
+        result = self._run_script('switch-qwen-asr.sh', '0.6b', extra_env={'VOICE_IME_CONFIG': str(blocked / 'config.json')})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.config_json.read_text(), original)
+        self.assertNotIn('已切换到', result.stdout)
+
+
 class SwitchScriptTextPolicyTest(unittest.TestCase):
     def test_all_switch_scripts_use_cfg_set_and_systemctl_unset(self) -> None:
         for name in SWITCH_SCRIPTS:
             with self.subTest(script=name):
                 script = (ROOT / "scripts" / name).read_text(encoding="utf-8")
-                self.assertIn("cfg set asr.backend", script)
+                self.assertIn("config.set('asr.backend'" if name == 'switch-qwen-asr.sh' else "cfg set asr.backend", script)
                 self.assertIn("systemctl --user unset-environment", script)
                 # environment.d 只删不写回：不允许再向 ENV_FILE 追加任何行。
                 self.assertNotIn('>> "$ENV_FILE"', script)

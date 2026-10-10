@@ -91,8 +91,10 @@ def check_static(python: str) -> dict:
     if not header.is_file():
         raise RuntimeError(
             f"缺少 Python.h：{header}（解释器 {python}，Python {major}.{minor}）。"
-            f"Fedora: sudo dnf install python3.{minor}-devel；"
-            f"Debian/Ubuntu: sudo apt install python3.{minor}-dev build-essential"
+            "推荐运行 ./scripts/setup-qwen-asr.sh，用仓库内带头文件的 Python 3.12 重建。"
+            f"坚持系统解释器时：Fedora 用 dnf provides '*/Python.h' 查询（默认版本通常为 python3-devel，"
+            f"非默认版本可能为 python3.{minor}-devel，不保证仓库有此包）；"
+            f"Debian/Ubuntu 通常为 python3.{minor}-dev 与 build-essential。"
         )
     cc = os.environ.get("CC") or shutil.which("gcc") or shutil.which("clang")
     if not cc or not shutil.which(cc):

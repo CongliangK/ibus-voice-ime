@@ -28,10 +28,11 @@ def missing_python_header_hint() -> str:
     return (
         f"已检测到当前解释器（Python {version}，{sys.executable}）缺少 Python.h"
         f"（查找目录：{listing}）。Triton 首次启动内核时编译失败即由此导致。"
-        f"修复：Fedora 运行 sudo dnf install python{version}-devel；"
-        f"Debian/Ubuntu 运行 sudo apt install python{version}-dev build-essential；"
-        f"或用 ./scripts/setup-qwen-asr.sh 以 uv 管理的 Python 3.12 重建环境（自带头文件）。"
-        f"装好后删除 ~/.triton 缓存下对应版本的旧编译产物再重启。"
+        f"推荐运行 ./scripts/setup-qwen-asr.sh，用仓库内 Python 3.12 重建环境（自带头文件，旧环境会备份）。"
+        f"若坚持系统解释器：Fedora 开发包通常为 python{version}-devel，但默认版本可能名为 python3-devel，"
+        f"请先用 dnf provides '*/Python.h' 查询，不能假设该版本包存在；"
+        f"Debian/Ubuntu 通常为 python{version}-dev 与 build-essential。"
+        f"验收成功后重启输入法，无需删除用户 Triton 缓存。"
     )
 
 

@@ -31,7 +31,6 @@ if [[ ! -x "$PYTHON" ]]; then
   PYTHON="$(command -v python3)"
 fi
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
-cfg() { "$PYTHON" -m ibus_voice_ime.config "$@"; }
 
 CONFIG_JSON="${VOICE_IME_CONFIG:-$HOME/.config/ibus-voice-ime/config.json}"
 ENV_FILE="$HOME/.config/environment.d/ibus-voice-ime.conf"
@@ -76,27 +75,35 @@ CHANNEL_ENV_KEYS=(
 
 # 渠道唯一事实源 = config.json 的 asr.backend：先把渠道选择与后端设置写进 JSON
 # （键位与旧版写入 environment.d 的清单一一映射）。
-cfg set asr.backend qwen3-asr
-# 渠道互斥：显式写全五个 enabled 叶子。install.sh 迁移可能把旧
-# VOICE_IME_QWEN_ASR=1 之类迁成 asr.<x>.enabled=true 残留；不清掉的话
-# voice.py 渠道链（qwen 在最前，先命中先赢）会仍走旧渠道——复刻旧 env
-# 互斥语义：目标渠道=1，其余=0。
-cfg set asr.qwen3.enabled 1
-cfg set asr.mimo.enabled 0
-cfg set asr.mimo_cloud.enabled 0
-cfg set asr.volc.enabled 0
-cfg set asr.siliconflow.enabled 0
-cfg set asr.qwen3.model "$MODEL"
-cfg set asr.qwen3.model_path "$MODEL_PATH"
-cfg set asr.qwen3.python "$ROOT_DIR/.venv-qwen-asr/bin/python"
-cfg set asr.qwen3.host 127.0.0.1
-cfg set asr.qwen3.port 18081
-cfg set asr.qwen3.language Chinese
-cfg set asr.qwen3.dtype "${VOICE_IME_QWEN_SWITCH_DTYPE:-bfloat16}"
-cfg set asr.qwen3.device_map "${VOICE_IME_QWEN_SWITCH_DEVICE_MAP:-cuda:0}"
-cfg set asr.qwen3.max_new_tokens 1024
-cfg set asr.qwen3.start_timeout 180
-cfg set asr.qwen3.timeout 180
+# One atomic JSON replacement, never half-switch a backend. Corrupt user JSON
+# must be repaired explicitly rather than overwritten as an empty config.
+"$PYTHON" - "$MODEL" "$MODEL_PATH" "$ROOT_DIR/.venv-qwen-asr/bin/python" <<'PY'
+import json, os, sys
+from ibus_voice_ime import config
+path = config.user_config_path()
+if path.exists():
+    existing = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(existing, dict):
+        raise ValueError('用户 config.json 根节点必须为对象；未修改配置')
+model, model_path, python = sys.argv[1:]
+config.set('asr.backend', 'qwen3-asr')
+for backend in ('qwen3', 'mimo', 'mimo_cloud', 'volc', 'siliconflow'):
+    config.set(f'asr.{backend}.enabled', backend == 'qwen3')
+values = dict(model=model, model_path=model_path, python=python, host='127.0.0.1',
+              port=18081, language='Chinese', max_new_tokens=1024,
+              dtype=os.environ.get('VOICE_IME_QWEN_SWITCH_DTYPE', 'bfloat16'),
+              device_map=os.environ.get('VOICE_IME_QWEN_SWITCH_DEVICE_MAP', 'cuda:0'),
+              start_timeout=180, timeout=180)
+for key, value in values.items():
+    config.set('asr.qwen3.' + key, value)
+config.save()
+PY
+echo "配置已写入 config.json：$CONFIG_JSON（尚未确认桌面激活）"
+activation_failed() {
+  echo "桌面激活失败：$1。配置已保留，但不能视为语音可用。" >&2
+  echo "处理后重试：./scripts/switch-qwen-asr.sh $MODEL；或重新登录后选择 voice-custom。" >&2
+  exit 1
+}
 
 # environment.d 渠道行只删不写回；systemctl 用户环境同步 unset。
 mkdir -p "$(dirname "$ENV_FILE")"
@@ -133,8 +140,8 @@ VOICE_IME_LLM_BASE_URL="${VOICE_IME_SWITCH_LLM_BASE_URL:-http://127.0.0.1:18080/
 VOICE_IME_LLM_API_KEY="${VOICE_IME_SWITCH_LLM_API_KEY:-local}" \
 VOICE_IME_LLM_MODEL="${VOICE_IME_SWITCH_LLM_MODEL:-qwen3.5-0.8b}" \
 VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$HOME/.local/share/ibus-voice-ime/llm.jsonl}" \
-"$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null || true
+"$ROOT_DIR/scripts/ibus-restart.sh" || activation_failed "IBus 重启命令失败"
 sleep 1
-ibus engine voice-custom >/dev/null 2>&1 || true
-echo "已切换到 Qwen3-ASR $MODEL：$MODEL_PATH"
-echo "配置已写入 config.json：$CONFIG_JSON"
+command -v ibus >/dev/null 2>&1 || activation_failed "未找到 ibus 命令"
+ibus engine voice-custom || activation_failed "无法选择 voice-custom 引擎"
+echo "已切换到 Qwen3-ASR $MODEL：$MODEL_PATH（IBus 命令成功；真实热键/语音仍需实测）"

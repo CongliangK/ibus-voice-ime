@@ -16,7 +16,7 @@ while [[ $# -gt 0 ]]; do
     --proxy=*) PROXY="${1#--proxy=}"; shift ;;
     -h|--help)
       echo "用法：$0 [--verify-only] [--force] [--proxy http://127.0.0.1:7890]"
-      echo "默认选择独立 Python 3.12；uv 存在时可自动准备。--force 仅跳过 GPU 门控，无 GPU 时只准备不启用。"
+      echo "默认自动准备仓库内 Python 3.12（含头文件）及 uv；不安装系统包。--force 仅跳过 GPU 门控，无 GPU 时只准备不启用。"
       echo "--verify-only 不下载/不改配置：静态检查 + CUDA/Triton + 模型短音频推理。"
       exit 0 ;;
     *) echo "未知参数：$1（查看 --help）" >&2; exit 2 ;;
@@ -48,6 +48,7 @@ fi
 # Single writer: init/doctor/manual installation must not mutate the same venv
 # concurrently. Kernel lock is released even on interruption; no stale PID file.
 command -v flock >/dev/null || { echo "缺少 flock（util-linux），无法安全串行安装。" >&2; exit 1; }
+[[ ! -L "$ROOT_DIR/.qwen-asr-setup.lock" ]] || { echo "拒绝使用符号链接安装锁" >&2; exit 1; }
 exec 9>"$ROOT_DIR/.qwen-asr-setup.lock"
 flock -n 9 || { echo "另一个 Qwen 安装/修复正在运行，请等待完成。" >&2; exit 1; }
 
@@ -56,11 +57,13 @@ flock -n 9 || { echo "另一个 Qwen 安装/修复正在运行，请等待完成
 #   VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple ./scripts/setup-qwen-asr.sh
 #   VOICE_IME_PIP_INDEX_URL=default ./scripts/setup-qwen-asr.sh   # 官方 PyPI
 PIP_INDEX_URL="${VOICE_IME_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
-PIP_INDEX_ARGS=()
-if [[ "$PIP_INDEX_URL" != "default" ]]; then
-  PIP_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
-  echo "pip 镜像：$PIP_INDEX_URL（VOICE_IME_PIP_INDEX_URL=default 可切回官方源）"
-fi
+[[ "$PIP_INDEX_URL" != "default" ]] || PIP_INDEX_URL="https://pypi.org/simple"
+# Explicit URL even when the caller exported PIP_INDEX_URL; ignore unrelated
+# extra indices/pip.conf without editing any user configuration.
+export PIP_CONFIG_FILE=/dev/null PIP_INDEX_URL
+unset PIP_EXTRA_INDEX_URL
+PIP_INDEX_ARGS=(--index-url "$PIP_INDEX_URL" --timeout 30 --retries 2)
+echo "pip 包源：$PIP_INDEX_URL（VOICE_IME_PIP_INDEX_URL=default 使用官方 PyPI；不是 Python 下载源）"
 
 # Crash recovery journal: SIGKILL/power loss during an install can leave the
 # user's original venv parked in a .bak- dir with a half-built replacement in
@@ -68,9 +71,15 @@ fi
 # next run restores the original before doing anything else.
 STATE_FILE="$ROOT_DIR/.qwen-asr-setup.state"
 recover_interrupted() {
+  [[ ! -L "$STATE_FILE" ]] || { echo "拒绝使用符号链接安装状态文件：$STATE_FILE" >&2; exit 1; }
   [[ -f "$STATE_FILE" ]] || return 0
+  [[ ! -L "$VENV" ]] || { echo "拒绝恢复到符号链接 venv：$VENV" >&2; exit 1; }
   local recorded
   recorded="$(sed -n 's/^backup=//p' "$STATE_FILE" | head -n1)"
+  # A journal is data, not authority to move arbitrary user directories.
+  [[ "$recorded" == "$ROOT_DIR"/.venv-qwen-asr.bak-* && "${recorded##*/}" != *..* && ! -L "$recorded" && "$(dirname "$recorded")" == "$ROOT_DIR" ]] || {
+    echo "拒绝恢复非预期/符号链接备份：$recorded（保留状态文件供检查）" >&2; exit 1;
+  }
   if [[ -n "$recorded" && -d "$recorded" ]]; then
     if [[ -d "$VENV" && ! -L "$VENV" ]]; then
       local failed="$ROOT_DIR/.venv-qwen-asr.failed-crash-$(date +%Y%m%d-%H%M%S)-$$"
@@ -111,18 +120,10 @@ if [[ "$ENABLE_NOW" != "0" ]]; then
   export VOICE_IME_QWEN_ASR_DTYPE="${VOICE_IME_QWEN_ASR_DTYPE:-bfloat16}"
 fi
 
-# Explicit user choices are never silently replaced. Default is 3.12, NOT the
-# system python3. uv's managed Python includes development headers and does not
-# replace distro Python (needed by PyGObject/IBus).
-EXPLICIT="${VOICE_IME_QWEN_ASR_SETUP_PYTHON:-}"
-if [[ -z "$EXPLICIT" ]] && ! command -v python3.12 >/dev/null; then
-  if command -v uv >/dev/null; then
-    echo "用 uv 准备独立 Python 3.12（不修改系统 python3）……"
-    uv python install 3.12
-    EXPLICIT="$(uv python find --managed-python 3.12 2>/dev/null || uv python find 3.12 2>/dev/null || true)"
-  fi
-fi
-PYTHON_BIN="$("$BOOTSTRAP" "$CHECK" --select-python --explicit "$EXPLICIT")"
+# CPython downloads are independent from the pip package mirror. Default is
+# repository-local managed 3.12, including headers, even if distro 3.12 exists.
+# The helper bootstraps local uv when absent; explicit choices never fall back.
+PYTHON_BIN="$("$BOOTSTRAP" "$ROOT_DIR/scripts/setup-qwen-python.py")"
 # Check before moving an existing venv or downloading dependencies/models.
 "$BOOTSTRAP" "$CHECK" --python "$PYTHON_BIN" --stage static
 if ! "$PYTHON_BIN" -c 'import ensurepip' >/dev/null 2>&1; then
@@ -170,15 +171,16 @@ PY
   then
     REBUILD=1
   fi
-  if [[ $REBUILD -eq 0 ]] && "$VENV/bin/python" -m pip check && \
+  if [[ $REBUILD -eq 0 ]] && "$VENV/bin/python" -m pip --isolated check && \
     "$VENV/bin/python" - <<'PY'
 import importlib.metadata as m
 import sys
 try:
-    modelscope_version = tuple(int(part) for part in m.version('modelscope').split('.')[:2])
+    from packaging.version import Version
     ok = (m.version('qwen-asr') == '0.0.6' and m.version('transformers') == '4.57.6'
-          and (1, 22) <= modelscope_version < (2, 0))
-except (m.PackageNotFoundError, ValueError):
+          and Version('1.22') <= Version(m.version('modelscope')) < Version('2')
+          and Version('2.6') <= Version(m.version('torch')) < Version('2.13'))
+except (m.PackageNotFoundError, ValueError, ImportError):
     ok = False
 sys.exit(0 if ok else 1)
 PY
@@ -206,15 +208,15 @@ PY="$VENV/bin/python"
 echo "Qwen3-ASR venv Python：$("$PY" -V 2>&1)"
 if [[ $REUSE -eq 0 ]]; then
   # pip 自升级失败不致命：旧 pip 仍可能完成依赖安装，真正的安装错误由下一行报告
-  if ! "$PY" -m pip install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then
+  if ! "$PY" -m pip --isolated install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then
     echo "⚠ pip 自升级失败（网络？），继续使用现有 pip 安装依赖……" >&2
   fi
-  if ! "$PY" -m pip install -r "$ROOT_DIR/requirements-qwen-asr.txt" "${PIP_INDEX_ARGS[@]}"; then
+  if ! "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" "${PIP_INDEX_ARGS[@]}"; then
     echo "依赖安装失败：检查上方 pip 错误、网络/代理和目标解释器。旧环境如有备份会恢复。" >&2
     exit 1
   fi
 fi
-"$PY" -m pip check
+"$PY" -m pip --isolated check
 "$BOOTSTRAP" "$CHECK" --python "$PY" --stage static
 if [[ "$GPU_STATE" == "ok" ]]; then
   # Fail early, BEFORE downloading multi-GB assets.
@@ -240,8 +242,11 @@ if [[ "$GPU_STATE" == "ok" ]]; then
 fi
 # Preserve exact resolved dependency versions for issue reports; not a universal
 # CUDA lock. No user configuration is changed before the gates above pass.
-"$PY" -m pip freeze > "$VENV/installed-requirements.txt"
+"$PY" -m pip --isolated freeze > "$VENV/installed-requirements.txt"
 COMMITTED=1
+# The environment is now committed. Never restore an old venv after a crash
+# during configuration/desktop activation (which can already reference the new one).
+rm -f "$STATE_FILE"
 if [[ "$ENABLE_NOW" != "0" ]]; then
   # Reuse JSON configuration/legacy-env cleanup rather than introducing a second
   # competing backend source. Custom model directories are explicitly retained.
@@ -251,7 +256,7 @@ if [[ "$ENABLE_NOW" != "0" ]]; then
     VOICE_IME_QWEN_SWITCH_DTYPE="$VOICE_IME_QWEN_ASR_DTYPE" \
     "$ROOT_DIR/scripts/switch-qwen-asr.sh" "$DEFAULT_MODEL" 9>&-; then
     # COMMITTED=1: the environment itself is verified and kept; only activation failed.
-    echo "错误：环境与模型均已验收，但启用后端失败（config.json 损坏/权限不足？）。" >&2
+    echo "错误：环境与模型均已验收，但配置写入或桌面激活失败（见上方具体错误）；不能视为桌面语音就绪。" >&2
     echo "环境已保留，修复后单独重试：./scripts/switch-qwen-asr.sh $DEFAULT_MODEL" >&2
     exit 1
   fi

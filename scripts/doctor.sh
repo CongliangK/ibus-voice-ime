@@ -28,6 +28,7 @@ esac
 FAILS=0
 WARNINGS=0
 FIXED=0
+FIX_FAILURES=0
 FAILED_ITEMS=()   # 待修复条目 id，fix 模式逐个治疗
 
 ok()   { printf '  [OK]   %s\n' "$1"; }
@@ -531,7 +532,7 @@ check_exec_bits() {
 # ------------------------------------------------------------------ 修复 --
 do_fix() {
   header "修复（doctor fix）"
-  local item restarted=0
+  local item restarted=0 qwen_attempted=0
   for item in "${FAILED_ITEMS[@]}"; do
     case "$item" in
       rime-ice-deploy|rime-ice-build)
@@ -567,24 +568,25 @@ do_fix() {
           fail "install.sh 重跑失败，请手动排查"
         fi
         ;;
-      qwen-python-headers)
-        echo "==> 重建 Qwen sidecar 环境（解释器不匹配会自动备份旧 venv，"
-        echo "    改用 uv 管理的 Python 3.12——自带头文件，无需 root；已存在的模型不重新下载）"
+      qwen-python-headers|qwen-setup)
+        # Header failure also queues qwen-setup; prepare only once per fix run.
+        [[ $qwen_attempted -eq 0 ]] || continue
+        qwen_attempted=1
+        echo "==> 调用 setup-qwen-asr.sh：仓库内自动准备 uv/带头文件的 Python 3.12，备份并迁移旧 venv"
+        echo "    保留渠道/模型/解释器覆盖配置；完整模型不重复下载。DOCTOR_PROXY 传给安装器。"
         if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
-          fixed "Qwen sidecar 环境已重建并通过静态/运行时验收（Python.h 完整）"
-          restarted=1
+          local actual_python
+          actual_python="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import _python; print(_python())' 2>/dev/null || true)"
+          if [[ "$actual_python" == "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
+            fixed "默认 Qwen 环境准备完成；实际运行时与模型状态以下方复查为准（--force 无 GPU 时未验收推理）"
+            restarted=1
+          else
+            warn "默认 venv 已准备，但实际解释器仍被配置覆盖：$actual_python；未改此覆盖，不能声称当前 sidecar 已修复"
+            echo "         检查 environment.d / VOICE_IME_QWEN_ASR_PYTHON / config.json 的 asr.qwen3.python；需要迁移激活时手动运行 ./scripts/switch-qwen-asr.sh"
+          fi
         else
-          fail "重建失败（uv/网络？）。备选：为当前解释器补装头文件后重跑体检——"
-          echo "         Fedora: sudo dnf install python3-devel；Debian/Ubuntu: sudo apt install python3-dev build-essential"
-        fi
-        ;;
-      qwen-setup)
-        echo "==> 安装本地 Qwen3-ASR 后端（下载模型 + venv，约 6GB，耗时较长；一键全量初始化可用 ./init.sh）"
-        if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
-          fixed "Qwen3-ASR 默认独立环境已验收（保留当前渠道/模型配置）"
-          restarted=1
-        else
-          fail "setup-qwen-asr.sh 失败（网络/磁盘/Python 版本？）"
+          fail "setup-qwen-asr.sh 失败（见具体 uv/Python/pip/编译器/CUDA 错误）；不会自动安装系统包"
+          FIX_FAILURES=$((FIX_FAILURES + 1))
         fi
         ;;
       stale-env)
@@ -603,8 +605,10 @@ do_fix() {
 
   if [[ $restarted -eq 1 ]]; then
     echo "==> 已变更词库/注册，重启输入法使引擎加载新状态"
-    "$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null 2>&1 || \
-      echo "  提示：ibus-restart 不可用，请重新登录或手动 ibus restart"
+    if ! "$ROOT_DIR/scripts/ibus-restart.sh"; then
+      fail "桌面激活失败：修复资产已保留，请重新登录或手动重启 IBus"
+      FIX_FAILURES=$((FIX_FAILURES + 1))
+    fi
   fi
 }
 
@@ -621,7 +625,8 @@ check_exec_bits
 if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
   do_fix
   printf '\n== 修复后复查 ==\n'
-  FAILS=0; WARNINGS=0; FAILED_ITEMS=()
+  FAILS=$FIX_FAILURES; WARNINGS=0; FAILED_ITEMS=()
+  check_env_dependencies
   check_unified_config
   check_ibus_registration
   check_rime_assets

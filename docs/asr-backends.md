@@ -19,10 +19,11 @@
 
 ### Qwen3-ASR sidecar（默认）
 
-- **安装**：`./scripts/setup-qwen-asr.sh`（同时下载 0.6B 与 1.7B，默认启用 1.7B，方便切换）。
-- **切换**：`./scripts/switch-qwen-asr.sh 0.6b | 1.7b`。
+- **安装**：`./scripts/setup-qwen-asr.sh`（自动自举仓库内 uv/带头文件的 CPython 3.12，同时准备 0.6B 与 1.7B，默认验收后启用 1.7B）。只准备不改配置/不重启 IBus：`VOICE_IME_ENABLE_QWEN_ASR=0 ./scripts/setup-qwen-asr.sh`。Fedora 旧 venv 会自动备份迁移；pip、CPython、uv 下载源独立，明确命令和代理/镜像说明见 [安装验收](<../README.md#本地语音的安装验收>)。
+- **切换**：`./scripts/switch-qwen-asr.sh 0.6b` 或 `./scripts/switch-qwen-asr.sh 1.7b`。明确选择 0.6B 时不会因显存充足自动升级；1.7B 可以降档。配置一次原子写入；重启/选引擎失败返回非零，配置已保存不等于桌面已激活。
 - **运行形态**：首次语音时引擎自动拉起 sidecar 进程（独立 venv `.venv-qwen-asr`，torch + transformers），仅监听 127.0.0.1:18081；支持 `/health`（含加载错误）、`/warm`（预热）；空闲看门狗把模型迁回内存并释放显存。双路并发首拉由进程锁保护，不会双拉。
-- **如实说明**：需要 NVIDIA GPU；首次启动加载模型需要 30 秒到数分钟；语音识别前有分级降噪链（默认 RNNoise 档，约 130ms 延迟）。
+- **恢复**：缺项目 venv 不回退系统 Python；启动等待/模型锁有限时，识别或预热超时只回收自有 sidecar，外部服务不误杀。总处理 watchdog 恢复 UI 并丢弃迟到结果，不代表能取消任意后端线程。
+- **如实说明**：需要 NVIDIA GPU；首次启动加载模型需要 30 秒到数分钟；语音识别前有分级降噪链（默认 RNNoise 档，约 130ms 延迟）。另一台 Fedora 安装 3.12 后卡住的具体 traceback 尚缺，不能由本机验收推断该机器已修复。
 
 ### MiMo-V2.5-ASR 本地 sidecar
 

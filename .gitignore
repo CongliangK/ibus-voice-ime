@@ -11,6 +11,9 @@ htmlcov/
 # Virtual environments
 .venv/
 .venv-qwen-asr/
+.python/
+.tools/
+.cache/
 .venv-qwen-asr.bak-*/
 .venv-qwen-asr.failed-*/
 .qwen-asr-setup.lock
