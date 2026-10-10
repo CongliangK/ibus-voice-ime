@@ -194,17 +194,39 @@ check_stale_engine_env() {
   # ibus-daemon 原样传给引擎，librime 加载失败 → 打字瘫痪（语音不受影响）。
   # run-engine.sh 已有自愈，这里检查"活引擎进程"的环境里是否仍有指向
   # 不存在路径的 VOICE_IME_* 变量（自愈失效/旧引擎未重启时报警）。
-  local pid dead=0
+  #
+  # 语义边界（防止假阳性 FAIL）：
+  #   - VOICE_IME_LLM_CONFIG 是可选连接文件（setup-llm-cloud.sh 体系）：
+  #     缺失 = LLM 润色功能关闭而非故障（llm_cloud_config.load_report 契约），
+  #     其存在性/合法性由 check_llm_cloud_config 段负责，此处跳过——否则
+  #     同一次检查里一个段对同一条件报 OK、另一个段报 FAIL，且 fix 模式
+  #     的"重启引擎"永远修不好（run-engine 重启后导出同样的默认路径）；
+  #   - 只检查以 / 开头的绝对路径值（URL 等非路径值不参与存在性判断）；
+  #   - 冒号分隔的多路径值逐段检查（空段跳过），不做整串 -e。
+  local pid line var val part dead=0
   for pid in $(pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus"); do
     [[ -r "/proc/$pid/environ" ]] || continue
     while IFS= read -r line; do
       case "$line" in
+        VOICE_IME_LLM_CONFIG=*)
+          # 可选连接文件，见上方语义边界说明。
+          ;;
         VOICE_IME_*=/*ibus-voice-ime*)
-          local var="${line%%=*}" val="${line#*=}"
-          if [[ -n "$val" && ! -e "$val" ]]; then
-            fail "引擎环境 $var 指向不存在的路径：$val"
-            dead=$((dead + 1))
-          fi
+          var="${line%%=*}" val="${line#*=}"
+          # 模式锚定依赖通配回溯（值内含第二个 '=' 时 `*` 可跨 '=' 匹配），
+          # 这里显式强制不变式：只有以 / 开头的值才参与存在性判断。
+          [[ "$val" == /* ]] || continue
+          [[ -n "$val" ]] || continue
+          local parts=()
+          IFS=':' read -r -a parts <<< "$val"
+          [[ ${#parts[@]} -gt 0 ]] || continue
+          for part in "${parts[@]}"; do
+            [[ -n "$part" ]] || continue
+            if [[ ! -e "$part" ]]; then
+              fail "引擎环境 $var 指向不存在的路径：$part"
+              dead=$((dead + 1))
+            fi
+          done
           ;;
       esac
     done < <(tr '\0' '\n' < "/proc/$pid/environ")
@@ -363,7 +385,15 @@ check_llm_cloud_config() {
   header "LLM 云端后处理（OpenAI 兼容）"
   local cfg="${VOICE_IME_LLM_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ibus-voice-ime/llm.json}"
   if [[ ! -f "$cfg" ]]; then
-    ok "未配置（默认关闭，走规则清理）。启用：./scripts/setup-llm-cloud.sh"
+    if [[ -n "${VOICE_IME_LLM_CONFIG:-}" ]]; then
+      # 区分"默认未配置"（OK）与"显式指定路径但文件缺失"（WARN）：
+      # 后者多为 environment.d 写入了自定义路径后仓库迁移/文件被删，
+      # 引擎侧 run-engine.sh 自愈会静默回落 XDG 默认值（LLM 关闭），
+      # 只有这里能提示用户。
+      warn "环境显式设置了 VOICE_IME_LLM_CONFIG，但文件不存在：$cfg（LLM 润色已关闭；重跑 ./scripts/setup-llm-cloud.sh 或清除该环境变量）"
+    else
+      ok "未配置（默认关闭，走规则清理）。启用：./scripts/setup-llm-cloud.sh"
+    fi
     return
   fi
   local perms

@@ -38,11 +38,13 @@ FORBIDDEN_DEFAULT_LITERALS = (
     "VOICE_IME_SILICONFLOW_MODEL:-",
 )
 
-# `export VOICE_IME_*` 白名单：瘦身后仅剩 LLM 抑制与 LLM_CONFIG 机制。
+# `export VOICE_IME_*` 白名单：瘦身后仅剩 LLM 抑制键。VOICE_IME_LLM_CONFIG
+# 已不再默认导出（llm.json 缺失 = 功能关闭的合法状态，导出可能不存在的默认
+# 路径会被 doctor 的陈旧路径检查误报 FAIL）；其值由 environment.d 显式设置或
+# 由 Python 端 llm_cloud_config.config_path() 的 XDG 兜底计算。
 _EXPORT_WHITELIST = {
     "VOICE_IME_LLM_POSTPROCESS",
     "VOICE_IME_LLM_INTERNAL",
-    "VOICE_IME_LLM_CONFIG",
 }
 
 
@@ -90,11 +92,25 @@ class RunEngineSlimTest(unittest.TestCase):
         self.assertIn("_forget_stale_inherit", self.script)
 
     def test_keeps_engine_exec_and_llm_config_whitelist(self) -> None:
-        # 白名单例外仍保留：LLM_CONFIG 机制 + llama.cpp 遗留路径的策略性压制。
+        # 白名单例外仍保留：llama.cpp 遗留路径的策略性压制。
         self.assertIn('exec "$PYTHON" "$ENGINE"', self.script)
-        self.assertIn("VOICE_IME_LLM_CONFIG=", self.script)
         self.assertIn("export VOICE_IME_LLM_POSTPROCESS=0", self.script)
         self.assertIn("export VOICE_IME_LLM_INTERNAL=0", self.script)
+
+    def test_no_llm_config_default_export(self) -> None:
+        # VOICE_IME_LLM_CONFIG 不得再被默认导出：llm.json 缺失是"功能关闭"
+        # 的合法状态，导出可能不存在的默认路径会让 doctor 误报 FAIL 且
+        # fix 模式（重启引擎）永远无法收敛。
+        self.assertNotIn("export VOICE_IME_LLM_CONFIG=", self.script)
+
+    def test_keeps_llm_config_stale_inherit_self_healing(self) -> None:
+        # 陈旧继承自愈必须覆盖 LLM_CONFIG（与 QWEN 模型路径同策略）：
+        # 指向不存在路径的继承值要被 unset，交给 Python 端 XDG 默认值接管。
+        self.assertRegex(
+            self.script,
+            r'\[\[ -n "\$\{VOICE_IME_LLM_CONFIG:-\}" && ! -e "\$VOICE_IME_LLM_CONFIG" \]\]',
+        )
+        self.assertIn("unset VOICE_IME_LLM_CONFIG", self.script)
 
 
 if __name__ == "__main__":

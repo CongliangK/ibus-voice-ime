@@ -89,6 +89,19 @@ fi
   unset VOICE_IME_QWEN_ASR_MODEL_PATH
 }
 
+# LLM_CONFIG 同理：llm.json 是可选连接文件（缺失 = LLM 润色关闭，非错误，
+# 见 llm_cloud_config.load_report 的契约）。陈旧的继承路径（仓库迁移残留）
+# 忽略之，让 Python 端 config_path() 的 XDG 默认值接管——否则一次迁移后
+# LLM 润色会被静默禁用且无任何日志。
+# 注意：本脚本不导出 VOICE_IME_LLM_CONFIG 默认值。消费者只有 engine 进程内
+# 的 llm_cloud_config.config_path()（自带 XDG 兜底）；doctor.sh 与
+# setup-llm-cloud.sh 均自行计算路径。此前无条件导出的默认路径会进入引擎
+# /proc/environ，被 doctor 的陈旧路径检查误报为 FAIL。
+[[ -n "${VOICE_IME_LLM_CONFIG:-}" && ! -e "$VOICE_IME_LLM_CONFIG" ]] && {
+  echo "[run-engine] 自愈：继承的 VOICE_IME_LLM_CONFIG 指向不存在的路径，已忽略" >&2
+  unset VOICE_IME_LLM_CONFIG
+}
+
 # ---------------------------------------------------------------------------
 # 统一 JSON 配置时代（docs/configuration.md）：本脚本不再导出任何
 # VOICE_IME_* 默认值——渠道/行为默认统一由 config/defaults.json 在进程内生效
@@ -98,17 +111,17 @@ fi
 #
 # 保留导出的例外（已逐一核对消费者）：
 #   - PYTHONPATH / LD_LIBRARY_PATH：Python 解释器与 librime/CTranslate2 加载需要；
-#   - VOICE_IME_LLM_CONFIG：llm.json 连接文件路径机制（setup-llm-cloud.sh 体系）；
 #   - VOICE_IME_LLM_POSTPROCESS / VOICE_IME_LLM_INTERNAL：本地 llama.cpp 遗留路径
 #     的显式压制（非 `${...:-默认}` 模式的默认导出，是策略性覆盖）；
 #   - PYTORCH_CUDA_ALLOC_CONF：非 VOICE_IME_ 键，Qwen sidecar 显存回收需要。
+# VOICE_IME_LLM_CONFIG 不再默认导出（见上方自愈段注释）：llm.json 缺失是
+# 合法的"功能关闭"状态，导出一个可能不存在的默认路径只会制造误报。
 # 引擎外的 shell 消费者（scripts/voice-toggle.sh / clipboard-paste.sh 的 IPC
 # socket 与日志路径、scripts/doctor.sh 等）都自行计算路径或读用户会话 env，
 # 不依赖本进程导出的 VOICE_IME_* 默认值。
 # ---------------------------------------------------------------------------
 export VOICE_IME_LLM_POSTPROCESS=0
 export VOICE_IME_LLM_INTERNAL=0
-export VOICE_IME_LLM_CONFIG="${VOICE_IME_LLM_CONFIG:-$HOME/.config/ibus-voice-ime/llm.json}"
 # Use an expandable-segment CUDA allocator so that after the idle watchdog
 # moves the model to CPU RAM, ``torch.cuda.empty_cache()`` can actually return
 # the reserved VRAM to the system.  Without this, post-inference cached blocks
