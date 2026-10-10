@@ -36,6 +36,10 @@ class _FakeManager:
         self._alias = alias
         self.acquire_calls = 0
         self.release_calls = 0
+        self.load_error = ""
+
+    def active_model(self):
+        return object() if self._alias is not None else None
 
     def acquire_for_inference(self) -> None:
         self.acquire_calls += 1
@@ -92,6 +96,20 @@ class WarmEndpointTest(unittest.TestCase):
         self.assertEqual(self._fake.acquire_calls, 1)
         self.assertEqual(self._fake.release_calls, 1)
 
+    def test_warm_fails_when_no_model_was_loaded(self) -> None:
+        self._fake._alias = None
+        self._fake.load_error = "gcc returned non-zero exit status 1"
+        status, body = self._serve_once()
+        self.assertEqual(status, 500)
+        self.assertEqual(body["error_code"], "triton_compile")
+        self.assertEqual(self._fake.release_calls, 1)
+
+    def test_warm_fails_even_when_stale_model_remains_after_load_error(self) -> None:
+        self._fake.load_error = "CUDA out of memory"
+        status, body = self._serve_once()
+        self.assertEqual(status, 500)
+        self.assertEqual(body["error_code"], "oom")
+
     def test_warm_reports_active_model_and_alias(self) -> None:
         status, body = self._serve_once()
         self.assertEqual(body["status"], "warm")
@@ -122,12 +140,12 @@ class WarmEndpointTest(unittest.TestCase):
 # Client side: qwen_asr_runtime.warm() best-effort behavior.
 # --------------------------------------------------------------------------- #
 class _FakeResp:
-    def __init__(self, status: int = 200, body: bytes = b'{"status":"warm"}') -> None:
+    def __init__(self, status: int = 200, body: bytes = b'{"status":"warm","loaded":true}') -> None:
         self.status = status
         self._body = body
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size < 0 else self._body[:size]
 
     def __enter__(self) -> "_FakeResp":
         return self
@@ -164,6 +182,12 @@ class WarmClientTest(unittest.TestCase):
     def test_warm_returns_true_on_200(self) -> None:
         with mock.patch("ibus_voice_ime.asr.qwen_asr_runtime.urllib.request.urlopen", return_value=_FakeResp(200)):
             self.assertTrue(qwen_asr_runtime.warm())
+
+    def test_warm_does_not_trust_200_without_loaded_model(self) -> None:
+        for body in (b'{"status":"warm"}', b'{"status":"warm","loaded":false}', b'[]', b'not json'):
+            with self.subTest(body=body):
+                with mock.patch("ibus_voice_ime.asr.qwen_asr_runtime.urllib.request.urlopen", return_value=_FakeResp(200, body)):
+                    self.assertFalse(qwen_asr_runtime.warm())
 
     def test_warm_returns_false_on_http_error(self) -> None:
         with mock.patch(

@@ -120,17 +120,14 @@ if [[ $WITH_VOICE -eq 1 ]]; then
   GPU_STATE="" GPU_REASON="" GPU_ACTION=""
   eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
   if [[ "$GPU_STATE" == "ok" ]]; then
-    if [[ -x "$QWEN_VENV/bin/pip" && ( -f "$QWEN_MODEL/model.safetensors" || -f "$QWEN_MODEL/model.safetensors.index.json" ) ]]; then
-      echo "已就绪，跳过（模型 $QWEN_MODEL）。"
-      SKIP_STEPS+=("Qwen3-ASR 本地后端")
+    # File existence is not readiness. The setup script reuses matching packages
+    # without upgrading, but always checks headers, CUDA/Triton and real inference.
+    echo "准备并验收 Qwen3-ASR（独立解释器 / 依赖 / 全部分片 / 短音频推理）……"
+    if "$ROOT_DIR/scripts/setup-qwen-asr.sh" "${PROXY_ARG[@]}"; then
+      DONE_STEPS+=("Qwen3-ASR 本地后端（推理验收通过）")
     else
-      echo "安装本地 Qwen3-ASR：创建 venv + 下载 0.6B/1.7B 模型（约 6GB，耗时较长）……"
-      if "$ROOT_DIR/scripts/setup-qwen-asr.sh" "${PROXY_ARG[@]}"; then
-        DONE_STEPS+=("Qwen3-ASR 本地后端")
-      else
-        echo "⚠ Qwen3-ASR 安装失败（网络/磁盘/Python 版本？）。可重试 ./init.sh 或改用云端后端。" >&2
-        ERRORS=$((ERRORS + 1))
-      fi
+      echo "⚠ Qwen3-ASR 未通过安装/验收：见上方具体失败阶段。键盘可注册，语音不能宣称就绪。" >&2
+      ERRORS=$((ERRORS + 1))
     fi
   elif [[ "$GPU_STATE" == "partial" ]]; then
     echo "检测到 NVIDIA 显卡，但本地语音所需的 CUDA 驱动不可用，跳过本地语音后端（不算失败）："
@@ -169,7 +166,7 @@ if [[ $ERRORS -gt 0 ]]; then
   exit 1
 fi
 if [[ $DO_INSTALL -eq 1 ]]; then
-  printf '下一步：Super+Space 切到「自定义语音输入法」；nihao+Space 出词；Ctrl+Alt+V 语音。\n'
+  printf '下一步：Super+Space 切到「自定义语音输入法」；nihao+Space 出词。Ctrl+Alt+V 语音需后端验收通过（无 GPU/跳过语音时不可据此认为就绪）。\n'
   printf '健康检查：./scripts/doctor.sh（只检查）/ ./scripts/doctor.sh fix（自动修复）\n'
 else
   printf '（--skip-install：未注册。需要时运行 ./install.sh。）\n'

@@ -191,9 +191,18 @@ if [[ "$CHECK_GPU" == "1" ]]; then
     eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
   fi
   if [[ "$GPU_STATE" == "ok" ]]; then
-    ok "NVIDIA GPU：${GPU_BRIEF:-（型号未知）}"
+    ok "NVIDIA GPU 可被驱动列出：${GPU_BRIEF:-（型号未知）}（不是 CUDA/Triton 推理验收）"
+    if [[ -x "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
+      if "$PY_BIN" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$ROOT_DIR/.venv-qwen-asr/bin/python" --stage static; then
+        ok "Qwen 独立环境静态编译条件通过"
+      else
+        warn "Qwen 独立环境静态检查失败：语音未就绪；运行 init.sh 或 setup-qwen-asr.sh 修复，键盘可独立使用"
+      fi
+    else
+      warn "Qwen 独立环境未创建；init.sh 会准备并验收，install.sh 仅注册"
+    fi
     if [[ -d "$ROOT_DIR/vendor/models/qwen3-asr" ]]; then
-      ok "Qwen3-ASR 模型已下载（vendor/models/qwen3-asr/）"
+      warn "Qwen 模型目录存在，但尚不能证明权重完整或推理可用（由 init/doctor 分级验收）"
     else
       warn "Qwen3-ASR 模型未下载：运行 ./scripts/setup-qwen-asr.sh（约需数 GB 磁盘 + 对应显存）"
     fi

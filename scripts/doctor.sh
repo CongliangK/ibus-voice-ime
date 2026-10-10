@@ -40,6 +40,11 @@ RIME_DATA="$ROOT_DIR/vendor/rime/share/rime-data"
 RIME_BUILD="$ROOT_DIR/vendor/rime/build"
 RIME_USER="${VOICE_IME_RIME_USER_DATA_DIR:-$HOME/.local/share/ibus-voice-ime/rime-user}"
 ENV_FILE="$HOME/.config/environment.d/ibus-voice-ime.conf"
+# Observe the same persisted VOICE_IME overrides as the launcher. Parse safely,
+# never source raw shell syntax, and never let unrelated keys change ROOT_DIR.
+if [[ -f "$ROOT_DIR/scripts/env-file-load.sh" ]]; then
+  eval "$(bash "$ROOT_DIR/scripts/env-file-load.sh" "$ENV_FILE" | grep -E '^export (VOICE_IME_[A-Z0-9_]+|PYTORCH_CUDA_ALLOC_CONF)=' || true)"
+fi
 COMPONENT_XML="$HOME/.local/share/ibus/component/voice-custom.xml"
 
 # rime-ice 资产三要素：方案文件（git 跟踪）、词库源（gitignore）、编译产物（gitignore）。
@@ -318,35 +323,40 @@ check_asr_backend() {
   backend="$(current_asr_backend)"
   case "$backend" in
     qwen3-asr)
-      local have_venv=1 have_model=1
-      if [[ -x "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
-        ok "Qwen sidecar venv 就绪"
+      local have_venv=1 have_model=1 qwen_python preflight_out
+      qwen_python="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import _python; print(_python())' 2>/dev/null || true)"
+      [[ -n "$qwen_python" ]] || qwen_python="$ROOT_DIR/.venv-qwen-asr/bin/python"
+      echo "  实际 sidecar 解释器：$qwen_python"
+      if [[ -x "$qwen_python" ]] || command -v "$qwen_python" >/dev/null; then
+        ok "Qwen sidecar 解释器存在（仍需运行时验收）"
       else
-        fail "Qwen sidecar venv 缺失（$ROOT_DIR/.venv-qwen-asr）"
+        fail "Qwen sidecar 解释器缺失：$qwen_python"
         have_venv=0
       fi
       local model_dir
-      # 模型路径优先读 config.json（asr.qwen3.model_path），environment.d 旧行兜底。
-      model_dir="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m ibus_voice_ime.config get asr.qwen3.model_path 2>/dev/null || true)"
-      if [[ -z "$model_dir" || ! -d "$model_dir" ]]; then
-        model_dir="$(grep -m1 '^VOICE_IME_QWEN_ASR_MODEL_PATH=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
-      fi
-      [[ -n "$model_dir" ]] || model_dir="$ROOT_DIR/vendor/models/qwen3-asr/Qwen3-ASR-1.7B"
+      # Inspect the effective model, never hide a broken explicit path by
+      # validating a different complete model in the default directory.
+      model_dir="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import model_id; print(model_id())' 2>/dev/null || true)"
       if [[ -d "$model_dir" ]]; then
         ok "Qwen3-ASR 模型就绪（$model_dir）"
       else
         fail "Qwen3-ASR 模型缺失（$model_dir）"
         have_model=0
       fi
-      if [[ -x "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
-        # venv 存在不等于能用：CPU-only torch 轮子 / venv 腐化都会让 sidecar 秒退，
-        # 只查可执行位会在这里给出误导性的全绿。
-        if "$ROOT_DIR/.venv-qwen-asr/bin/python" -c 'import torch, sys; sys.exit(0 if torch.cuda.is_available() else 1)' >/dev/null 2>&1; then
-          ok "sidecar venv 内 torch.cuda 可用"
+      if [[ $have_venv -eq 1 ]]; then
+        if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
+          printf '%s\n' "$preflight_out"
+          ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
+          warn "此体检未执行模型推理；完整验收：./scripts/setup-qwen-asr.sh --verify-only"
         else
-          fail "sidecar venv 的 torch 用不了 CUDA（CPU-only 轮子 / venv 损坏 / 驱动异常）。修复：rm -rf .venv-qwen-asr && ./scripts/setup-qwen-asr.sh"
+          printf '%s\n' "$preflight_out"
+          fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
           have_venv=0
         fi
+      fi
+      if [[ $have_model -eq 1 ]] && ! "$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --model-only --model "$model_dir"; then
+        fail "模型配置/权重分片不完整"
+        have_model=0
       fi
       GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
       if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
@@ -541,8 +551,9 @@ do_fix() {
         ;;
       qwen-setup)
         echo "==> 安装本地 Qwen3-ASR 后端（下载模型 + venv，约 6GB，耗时较长；一键全量初始化可用 ./init.sh）"
-        if "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
-          fixed "Qwen3-ASR 后端安装完成"
+        if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
+          fixed "Qwen3-ASR 默认独立环境已验收（保留当前渠道/模型配置）"
+          restarted=1
         else
           fail "setup-qwen-asr.sh 失败（网络/磁盘/Python 版本？）"
         fi

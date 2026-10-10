@@ -16,6 +16,7 @@ case "${SIZE,,}" in
     exit 2
     ;;
 esac
+MODEL_PATH="${VOICE_IME_QWEN_SWITCH_MODEL_PATH:-$MODEL_PATH}"
 if [[ ! -d "$MODEL_PATH" ]]; then
   echo "模型目录不存在：$MODEL_PATH，请先运行 scripts/setup-qwen-asr.sh" >&2
   exit 1
@@ -91,8 +92,8 @@ cfg set asr.qwen3.python "$ROOT_DIR/.venv-qwen-asr/bin/python"
 cfg set asr.qwen3.host 127.0.0.1
 cfg set asr.qwen3.port 18081
 cfg set asr.qwen3.language Chinese
-cfg set asr.qwen3.dtype bfloat16
-cfg set asr.qwen3.device_map cuda:0
+cfg set asr.qwen3.dtype "${VOICE_IME_QWEN_SWITCH_DTYPE:-bfloat16}"
+cfg set asr.qwen3.device_map "${VOICE_IME_QWEN_SWITCH_DEVICE_MAP:-cuda:0}"
 cfg set asr.qwen3.max_new_tokens 1024
 cfg set asr.qwen3.start_timeout 180
 cfg set asr.qwen3.timeout 180

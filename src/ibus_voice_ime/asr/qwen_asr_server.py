@@ -16,6 +16,7 @@ from typing import Any
 
 from ibus_voice_ime import config
 from ibus_voice_ime.asr import sidecar_http
+from ibus_voice_ime.asr.qwen_diagnostics import classify_error
 
 _MODEL = None
 _MODEL_ID = ""
@@ -165,6 +166,7 @@ class ModelManager:
         self._lock = threading.RLock()
         self._last_activity = time.monotonic()
         self._load_error: str = ""  # last acquire_for_inference failure, exposed via /health
+        self._load_failed_at = 0.0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -208,15 +210,24 @@ class ModelManager:
         """
         self._lock.acquire()
         try:
+            cooldown = max(0.0, config.env_float("VOICE_IME_QWEN_ASR_FAIL_COOLDOWN", 180.0))
+            if self._load_error and self._load_failed_at > 0 and time.monotonic() - self._load_failed_at < cooldown:
+                return  # keep lock/error: caller reports failure, never a fake warm success
             self._ensure_active_locked()
             self._last_activity = time.monotonic()
             self._load_error = ""
+            self._load_failed_at = 0.0
         except Exception as exc:  # never let model management crash a request
-            # 记录失败原因供 /health 与 /transcribe 500 暴露：模型未下载 / 无 CUDA /
-            # 依赖缺失等首装常见问题不能只留在日志里。
-            self._load_error = f"{type(exc).__name__}: {exc}"[:300]
+            import traceback
+
+            # Full traceback (and gcc stderr) belongs in the log. Keep a bounded
+            # but useful HTTP detail; do not cut off the end of compiler errors.
+            self._load_error = f"{type(exc).__name__}: {exc}"[-8192:]
+            category, _ = classify_error(self._load_error)
+            self._load_failed_at = time.monotonic() if category != "oom" else 0.0
+            traceback.print_exc()
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                  f"Qwen3-ASR acquire_for_inference failed, best-effort: {exc}", flush=True)
+                  f"Qwen3-ASR acquire_for_inference failed [{category}]: {exc}", flush=True)
 
     def release_after_inference(self) -> None:
         try:
@@ -525,8 +536,8 @@ def _qwen_audio(payload: dict[str, Any]) -> str:
         raise sidecar_http.RequestError(400, "missing audio")
     if sidecar_http.is_remote_url(audio):
         raise sidecar_http.RequestError(400, "remote audio URLs are disabled")
-    if not Path(audio).exists():
-        raise sidecar_http.RequestError(400, f"audio not found: {audio}")
+    if not Path(audio).is_file():
+        raise sidecar_http.RequestError(400, f"audio not found or not a regular file: {audio}")
     return audio
 
 def _qwen_language(payload: dict[str, Any]) -> Any:
@@ -536,6 +547,10 @@ def _qwen_language(payload: dict[str, Any]) -> Any:
     return language
 
 def _handle_transcribe(handler: BaseHTTPRequestHandler) -> None:
+    # Reject malformed/oversized/remote input BEFORE importing/loading the GPU
+    # model or taking its lock. Invalid requests must never trigger heavy work.
+    payload = sidecar_http.read_json_payload(handler.headers, handler.rfile)
+    audio = _qwen_audio(payload)
     if _MANAGER is not None:
         _MANAGER.acquire_for_inference()
     try:
@@ -543,7 +558,7 @@ def _handle_transcribe(handler: BaseHTTPRequestHandler) -> None:
         # ``_sync_module_model``) so it always points at the wrapper currently
         # on the GPU.  Read it fresh here after acquire.
         active = _MANAGER.active_model() if _MANAGER is not None else _MODEL
-        if active is None:
+        if active is None or (_MANAGER is not None and _MANAGER.load_error):
             # acquire_for_inference 把失败原因存进 load_error（仅日志可见）；
             # 这里必须带出来，否则用户只看到自引用的泛化句，真实原因
             # （OOM/CPU torch/驱动不匹配/模型文件损坏）全被吞掉。
@@ -552,8 +567,6 @@ def _handle_transcribe(handler: BaseHTTPRequestHandler) -> None:
                 "no Qwen3-ASR model is active on the GPU"
                 + (f": {detail}" if detail else "")
             )
-        payload = sidecar_http.read_json_payload(handler.headers, handler.rfile)
-        audio = _qwen_audio(payload)
         context = payload.get("context") if isinstance(payload.get("context"), str) else None
         started = time.monotonic()
         language = _qwen_language(payload)
@@ -585,13 +598,14 @@ def _handle_warm(handler: BaseHTTPRequestHandler) -> None:
     already active.
     """
     # Consume the (empty) request body so the connection can be reused.
-    try:
-        sidecar_http.read_json_payload(handler.headers, handler.rfile)
-    except Exception:
-        pass
+    sidecar_http.read_json_payload(handler.headers, handler.rfile)
     if _MANAGER is not None:
         _MANAGER.acquire_for_inference()
     try:
+        active = _MANAGER.active_model() if _MANAGER is not None else _MODEL
+        error = _MANAGER.load_error if _MANAGER is not None else ""
+        if active is None or error:
+            raise RuntimeError("no Qwen3-ASR model is active on the GPU" + (f": {error}" if error else ""))
         active_id = _MANAGER.active_id if _MANAGER is not None else _MODEL_ID
         active_alias = _MANAGER.active_alias if _MANAGER is not None else None
         print(
@@ -599,7 +613,7 @@ def _handle_warm(handler: BaseHTTPRequestHandler) -> None:
             f"alias={active_alias} model={active_id}",
             flush=True,
         )
-        _send_json(handler, 200, {"status": "warm", "model": active_id, "alias": active_alias})
+        _send_json(handler, 200, {"status": "warm", "model": active_id, "alias": active_alias, "loaded": True})
     finally:
         if _MANAGER is not None:
             _MANAGER.release_after_inference()
@@ -617,7 +631,12 @@ class Handler(BaseHTTPRequestHandler):
             active_id = _MANAGER.active_id if _MANAGER is not None else _MODEL_ID
             loaded = (_MANAGER.active_model() if _MANAGER is not None else _MODEL) is not None
             error = _MANAGER.load_error if _MANAGER is not None else ""
-            _send_json(self, 200, {"status": "ok", "model": active_id, "loaded": loaded, "error": error})
+            category, _ = classify_error(error) if error else ("", "")
+            _send_json(self, 200, {
+                "status": "error" if error else ("ready" if loaded else "idle"),
+                "model": active_id, "loaded": loaded, "ready": loaded and not error,
+                "error": error, "error_code": category,
+            })
             return
         _send_json(self, 404, {"error": "not found"})
 
@@ -626,11 +645,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/warm":
             try:
                 _handle_warm(self)
+            except sidecar_http.RequestError as exc:
+                _send_json(self, exc.status, {"error": exc.message})
             except Exception as exc:
                 import traceback
 
                 traceback.print_exc()
-                _send_json(self, 500, {"error": str(exc)})
+                _send_json(self, 500, {"error": str(exc), "error_code": classify_error(str(exc))[0]})
             return
         if path != "/transcribe":
             _send_json(self, 404, {"error": "not found"})
@@ -643,7 +664,7 @@ class Handler(BaseHTTPRequestHandler):
             import traceback
 
             traceback.print_exc()
-            _send_json(self, 500, {"error": str(exc)})
+            _send_json(self, 500, {"error": str(exc), "error_code": classify_error(str(exc))[0]})
 
 
 def _env_float(name: str, default: float) -> float:

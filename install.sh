@@ -183,7 +183,8 @@ fi
 
 echo
 cat <<EOF
-安装完成。
+输入法注册完成（注册成功不代表本地语音已通过推理验收）。
+首次安装请运行 ./init.sh；语音完整验收：./scripts/setup-qwen-asr.sh --verify-only。
 切换方式：GNOME 顶栏输入法菜单，或 Super+Space，选择“自定义语音输入法”。
 键盘输入示例：nihao + Space -> 你好
 语音输入热键：Ctrl+Alt+V，默认后端为本地 Qwen3-ASR（1.7B）。

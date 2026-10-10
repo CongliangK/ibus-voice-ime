@@ -181,6 +181,20 @@ class SiliconflowSwitchJsonTest(_SwitchSandbox):
 
 
 class QwenRotationJsonTest(_SwitchSandbox):
+    def test_installer_activation_retains_verified_model_device_and_dtype(self) -> None:
+        model = self.sb / 'custom models' / 'Qwen3-ASR-0.6B'
+        model.mkdir(parents=True, exist_ok=True)
+        result = self._run_script('switch-qwen-asr.sh', '0.6b', extra_env={
+            'VOICE_IME_QWEN_SWITCH_MODEL_PATH': str(model),
+            'VOICE_IME_QWEN_SWITCH_DEVICE_MAP': 'cuda:1',
+            'VOICE_IME_QWEN_SWITCH_DTYPE': 'float16',
+        })
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(self.config_json.read_text())['asr']['qwen3']
+        self.assertEqual(data['model_path'], str(model))
+        self.assertEqual(data['device_map'], 'cuda:1')
+        self.assertEqual(data['dtype'], 'float16')
+
     def test_10_siliconflow_then_qwen_rotates_backend(self) -> None:
         self._seed_env_file()
         first = self._run_script(

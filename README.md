@@ -54,7 +54,29 @@ cd ibus-voice-ime
 两个安装脚本的分工：
 
 - **`init.sh`（一次性初始化）**：拿到仓库后的第一步。下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
-- **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。
+- **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。注册成功不代表语音已通过推理验收。
+
+### 本地语音的安装验收
+
+Qwen 使用独立 Python：默认只自动选择 **Python 3.12**，不沿用系统 `python3`（IBus/PyGObject 仍使用系统环境）。若无 3.12 且已安装 `uv`，安装器通过 `uv python install 3.12` 准备包含开发头文件的独立解释器；不修改系统 Python，也不会自行安装 uv 或运行 sudo。没有 uv 时，请先安装 Python 3.12、对应的 venv/开发包和 C 编译器；安装器会明确失败，而非假报语音可用。其他版本需显式指定并通过全部检查，不能仅凭 3.14 版本号断定不兼容。
+
+```bash
+./init.sh
+# 已有环境的完整只读验收（不下载、不改渠道配置；临时检查缓存会自动清理）：
+./scripts/setup-qwen-asr.sh --verify-only
+# 显式使用另一个解释器（解释器不匹配时自动备份旧 venv 后重建）：
+VOICE_IME_QWEN_ASR_SETUP_PYTHON=/usr/bin/python3.12 ./scripts/setup-qwen-asr.sh
+# 安装/验收较慢时，每个检查子进程的超时可调（最大 1800 秒）：
+VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
+```
+
+安装阶段依次检查：目标解释器和 `Python.h` 的实际编译 → pip 依赖一致性 → CUDA 张量运算和 Triton 驱动辅助模块编译/加载 → 模型配置及全部权重分片 → 短音频推理。短音频为静音，只验证执行链路，不验证识别准确率。GPU 显存不足时可使用现有 0.6B 自动降档，输出显示实际验收模型。
+
+- 应用依赖基线在 [requirements-qwen-asr.txt](requirements-qwen-asr.txt)；不是跨平台 CUDA 锁文件。torch/Triton 仍需匹配驱动，由运行验收兜底。已有解释器和基线匹配时不盲目升级包；实际版本记录在 venv 的 `installed-requirements.txt` 中。
+- 重建失败时恢复原 venv，失败环境和旧环境备份保留供排查，不删除模型或用户配置。使用文件锁阻止并发安装；拒绝修改指向其他项目的 venv 符号链接。安装中的 venv 重命名会写入 journal（`.qwen-asr-setup.state`）：SIGKILL/断电中断后，下次安装自动恢复原环境并把半成品移入 `.failed-crash-*` 留档。
+- `--force` 只允许无 GPU 时准备调试环境：不做 GPU 推理验收、不启用后端、不宣称语音就绪。
+- doctor 检查实际 sidecar 解释器、编译条件、CUDA 运算、Triton 和模型分片；不会默认加载整个模型。完整推理验收使用上面的 `--verify-only`。
+- `/health` 的 `idle/ready/error` 区分懒加载/空闲卸载、模型就绪、加载失败；HTTP 200 只代表服务存活。`/warm` 只有模型真正加载成功才返回成功。稳定加载故障会冷却重试；显存不足不缓存，释放显存后可立即再试。
 
 健康检查（体检，不修改不下载）：
 

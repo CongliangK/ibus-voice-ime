@@ -1,0 +1,6 @@
+# Application-level baseline; torch selects its matching Triton dependency.
+# Not a cross-platform CUDA lock: driver/wheel compatibility is checked by the
+# bounded runtime gate. Do not blindly upgrade the inference API on every run.
+qwen-asr==0.0.6
+transformers==4.57.6
+modelscope>=1.22,<2

@@ -18,6 +18,7 @@ from typing import Any
 from ibus_voice_ime import config
 from ibus_voice_ime.log_trim import trim_to_last_lines
 from ibus_voice_ime.memory import voice_terms
+from ibus_voice_ime.asr.qwen_diagnostics import classify_error, error_detail
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DEFAULT_HOST = "127.0.0.1"
@@ -157,13 +158,28 @@ def _health() -> dict[str, Any] | None:
         with urllib.request.urlopen(base_url() + "/health", timeout=0.5) as resp:  # noqa: S310 - local endpoint
             if not (200 <= resp.status < 500):
                 return None
-            return json.loads(resp.read().decode("utf-8"))
+            info = json.loads(resp.read(65537).decode("utf-8"))
+            if not isinstance(info, dict) or not isinstance(info.get("model"), str):
+                return None
+            if info.get("status") not in {"ok", "idle", "ready", "error"}:
+                return None
+            return info
     except Exception:
         return None
 
 
 def is_ready() -> bool:
+    """Whether the expected HTTP service is alive (not model readiness).
+
+    Lazy loading/offloading is intentional: never kill an idle, healthy sidecar
+    just because it is not holding GPU memory. Use is_model_ready for inference.
+    """
     return _health() is not None
+
+
+def is_model_ready() -> bool:
+    info = _health()
+    return bool(info and info.get("loaded") is True and not info.get("error"))
 
 
 def _is_downgrade_of(running: str, desired: str) -> bool:
@@ -205,55 +221,17 @@ def _log_tail(log_file: Path, lines: int = 15) -> str:
 
 
 def _humanize_transcribe_error(code: int, detail: str) -> str:
-    """把 sidecar 的英文 500 转成带补救指引的中文信息（按根因分流）。"""
-    if code != 500:
+    """Classify before truncating: gcc's actual failure is often at the end."""
+    if code not in {500, 503}:
         return f"Qwen3-ASR HTTP {code}: {detail}"
-    low = detail.lower()
-    markers = (
-        "no qwen3-asr model is active",
-        "cuda",
-        "no module named",
-        "torch",
-        "oserror",
-        "bfloat16",
-        "safetensor",
-        "deserializ",
-        "out of memory",
-        "显存",
-    )
-    if not any(m in low for m in markers):
-        return f"Qwen3-ASR HTTP {code}: {detail}"
-    if "out of memory" in low or "显存" in detail:
-        guidance = (
-            "显存不足：关闭占用显存的程序（游戏/ComfyUI 等）后重试，"
-            "或 ./scripts/switch-qwen-asr.sh 0.6b 换小模型，"
-            "或切云端后端（./scripts/switch-mimo-cloud-asr.sh cn）。"
-        )
-    elif "not compiled with cuda" in low:
-        guidance = (
-            "sidecar venv 里装的是 CPU 版 PyTorch：rm -rf .venv-qwen-asr 后重跑 "
-            "./scripts/setup-qwen-asr.sh（需 CUDA 轮子，参照 pytorch.org 安装指引）。"
-        )
-    elif "bfloat16" in low:
-        guidance = (
-            "显卡不支持 bfloat16（GTX 10xx/16xx、RTX 20xx 等）：在 "
-            "~/.config/environment.d/ibus-voice-ime.conf 设 VOICE_IME_QWEN_ASR_DTYPE=float16 后重启输入法。"
-        )
-    elif "safetensor" in low or "deserializ" in low:
-        guidance = (
-            "模型文件可能不完整（下载中断）：删除 vendor/models/qwen3-asr 下对应目录后"
-            "重跑 ./scripts/setup-qwen-asr.sh。"
-        )
-    else:
-        guidance = (
-            "常见原因与处理：\n"
-            "  1. 模型未下载 → 运行 ./scripts/setup-qwen-asr.sh\n"
-            "  2. 无 NVIDIA GPU / CUDA 不可用 → 切云端后端：./scripts/switch-mimo-cloud-asr.sh cn\n"
-            "  3. sidecar 依赖缺失 → 重跑 ./scripts/setup-qwen-asr.sh"
-        )
+    category, guidance = classify_error(detail)
+    message = error_detail(detail)
+    if len(message) > 700:
+        message = message[:250] + "\n…\n" + message[-450:]
+    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
     return (
-        f"Qwen3-ASR 识别失败：模型未能在 GPU 上加载（{detail[:200]}）。\n{guidance}\n"
-        "完整日志：~/.local/share/ibus-voice-ime/qwen-asr-server.log"
+        f"Qwen3-ASR 识别失败 [{category}]（HTTP {code}）：{message}\n{guidance}\n"
+        f"完整日志：{log_dir / 'qwen-asr-server.log'}"
     )
 
 
@@ -395,9 +373,12 @@ def transcribe(wav_path: str) -> str:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local endpoint
-            body = resp.read().decode("utf-8")
+            raw = resp.read(1048577)
+            if len(raw) > 1048576:
+                raise RuntimeError("Qwen3-ASR 响应超过 1 MiB，拒绝解析异常响应。")
+            body = raw.decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        detail = exc.read(65536).decode("utf-8", errors="replace")
         raise RuntimeError(_humanize_transcribe_error(exc.code, detail)) from exc
     except (urllib.error.URLError, socket.timeout) as exc:
         # 慢推理触发的读超时（socket.timeout 被 urllib 包成 URLError 或直接抛出）
@@ -412,9 +393,16 @@ def transcribe(wav_path: str) -> str:
             f"Qwen3-ASR sidecar 连接失败（{exc}）：服务可能已崩溃或未监听。"
             "详见 ~/.local/share/ibus-voice-ime/qwen-asr-server.log"
         ) from exc
-    result: dict[str, Any] = json.loads(body)
+    try:
+        result = json.loads(body)
+    except ValueError as exc:
+        raise RuntimeError("Qwen3-ASR 返回无效 JSON；检查端口是否被其他服务占用及 sidecar 日志。") from exc
+    if not isinstance(result, dict):
+        raise RuntimeError("Qwen3-ASR 返回格式无效（应为 JSON 对象）。")
     if result.get("error"):
-        raise RuntimeError(str(result["error"]))
+        raise RuntimeError(_humanize_transcribe_error(500, body))
+    if not isinstance(result.get("text"), str):
+        raise RuntimeError("Qwen3-ASR 响应缺少有效 text 字段，不能当作空识别结果。")
     # 日志保留：sidecar 常驻进程的日志只在 spawn 时裁剪，重负载长会话期间
     # 由识别路径顺手兜底（廉价 stat，超阈值才重写）。
     log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
@@ -449,7 +437,8 @@ def warm() -> bool:
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - local endpoint
-            return 200 <= resp.status < 300
+            info = json.loads(resp.read(65536).decode("utf-8"))
+            return 200 <= resp.status < 300 and isinstance(info, dict) and info.get("status") == "warm" and info.get("loaded") is True
     except Exception as exc:
         _log(f"ASR 预热失败（best-effort，忽略）：{exc}")
         return False
@@ -475,4 +464,4 @@ def shutdown() -> None:
 atexit.register(shutdown)
 
 
-__all__ = ["base_url", "ensure_server", "is_ready", "model_id", "selected", "shutdown", "transcribe", "warm"]
+__all__ = ["base_url", "ensure_server", "is_ready", "is_model_ready", "model_id", "selected", "shutdown", "transcribe", "warm"]

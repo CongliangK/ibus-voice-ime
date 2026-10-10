@@ -11,6 +11,10 @@ htmlcov/
 # Virtual environments
 .venv/
 .venv-qwen-asr/
+.venv-qwen-asr.bak-*/
+.venv-qwen-asr.failed-*/
+.qwen-asr-setup.lock
+.qwen-asr-setup.state
 .venv-mimo-asr/
 .mamba-python312/
 .micromamba-root/
