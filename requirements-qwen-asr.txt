@@ -6,9 +6,10 @@
 # bmm_outer_product) through Triton, forcing a runtime gcc + Python.h compile
 # on first inference. Without this pin, pip drifts to the newest torch on
 # every reinstall and breaks environments lacking Python dev headers
-# (verified incident 2026-10-10). Lift the bound only deliberately, then
-# re-run the full preflight acceptance (scripts/setup-qwen-asr.sh).
+# (verified incident 2026-10-10). Lower bound 2.6 follows the Qwen3-ASR
+# upstream recommendation and keeps older machines/Pythons installable.
+# Lift the upper bound only deliberately, then re-run the full preflight acceptance (scripts/setup-qwen-asr.sh).
 qwen-asr==0.0.6
 transformers==4.57.6
 modelscope>=1.22,<2
-torch>=2.12,<2.13
+torch>=2.6,<2.13
