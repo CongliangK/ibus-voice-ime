@@ -51,6 +51,17 @@ command -v flock >/dev/null || { echo "缺少 flock（util-linux），无法安�
 exec 9>"$ROOT_DIR/.qwen-asr-setup.lock"
 flock -n 9 || { echo "另一个 Qwen 安装/修复正在运行，请等待完成。" >&2; exit 1; }
 
+# pip index: torch CUDA wheels are multi-GB; the default TUNA mirror is a full
+# PyPI replica and avoids crawling overseas PyPI. Override or disable per run:
+#   VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple ./scripts/setup-qwen-asr.sh
+#   VOICE_IME_PIP_INDEX_URL=default ./scripts/setup-qwen-asr.sh   # 官方 PyPI
+PIP_INDEX_URL="${VOICE_IME_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+PIP_INDEX_ARGS=()
+if [[ "$PIP_INDEX_URL" != "default" ]]; then
+  PIP_INDEX_ARGS=(--index-url "$PIP_INDEX_URL")
+  echo "pip 镜像：$PIP_INDEX_URL（VOICE_IME_PIP_INDEX_URL=default 可切回官方源）"
+fi
+
 # Crash recovery journal: SIGKILL/power loss during an install can leave the
 # user's original venv parked in a .bak- dir with a half-built replacement in
 # place. The EXIT trap cannot help there, so the rename is journaled and the
@@ -195,10 +206,10 @@ PY="$VENV/bin/python"
 echo "Qwen3-ASR venv Python：$("$PY" -V 2>&1)"
 if [[ $REUSE -eq 0 ]]; then
   # pip 自升级失败不致命：旧 pip 仍可能完成依赖安装，真正的安装错误由下一行报告
-  if ! "$PY" -m pip install --upgrade pip; then
+  if ! "$PY" -m pip install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then
     echo "⚠ pip 自升级失败（网络？），继续使用现有 pip 安装依赖……" >&2
   fi
-  if ! "$PY" -m pip install -r "$ROOT_DIR/requirements-qwen-asr.txt"; then
+  if ! "$PY" -m pip install -r "$ROOT_DIR/requirements-qwen-asr.txt" "${PIP_INDEX_ARGS[@]}"; then
     echo "依赖安装失败：检查上方 pip 错误、网络/代理和目标解释器。旧环境如有备份会恢复。" >&2
     exit 1
   fi

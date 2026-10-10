@@ -144,6 +144,22 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertTrue(any(e.startswith('pip:install -r') for e in self.events()))
         self.assertIn('继续使用现有 pip', result.stderr)
 
+    def test_pip_mirror_default_tuna_overridable_and_disableable(self):
+        # 默认走清华镜像加速 torch 轮子下载；pip 命令必须携带 --index-url。
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('pypi.tuna.tsinghua.edu.cn', result.stdout)
+        self.assertTrue(all('--index-url' in e for e in self.events() if e.startswith('pip:install')))
+        # 显式 override 换源（events 文件在多次 run_setup 间累积，需先清空）
+        self.log.unlink(missing_ok=True)
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL='https://mirrors.aliyun.com/pypi/simple')
+        self.assertIn('mirrors.aliyun.com', result.stdout)
+        # 'default' 禁用镜像：命令行不携带 --index-url
+        self.log.unlink(missing_ok=True)
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL='default')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(all('--index-url' not in e for e in self.events() if e.startswith('pip:install')))
+
     def test_switch_failure_keeps_verified_env_with_guidance(self):
         # 激活（写 config.json）失败时：已验收的环境必须保留，且给出单独重试指引，
         # 而不是回滚好环境或静默退出。
