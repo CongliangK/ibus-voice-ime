@@ -3,6 +3,7 @@
 # 用法：
 #   ./setup.sh                          # 交互配置；每题回车接受默认值
 #   ./setup.sh --defaults               # 向导使用当前配置/默认值，不提问
+#   ./setup.sh --non-interactive        # 全默认零提问（= --defaults --yes 且连 tty key 也不问），CI/管道适用
 #   ./setup.sh --reconfigure            # 已装机器改配置，不初始化/下载资产
 #   ./setup.sh --keyboard-only          # 只装键盘输入，不下载语音模型
 #   ./setup.sh --cloud siliconflow      # 云端 SiliconFlow（需 API Key）
@@ -26,7 +27,7 @@ VOICE_PLAN=local-qwen
 QWEN_SIZES="${VOICE_IME_QWEN_ASR_SIZES-0.6B 1.7B}"
 QWEN_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keyboard-only|--no-voice)
@@ -43,6 +44,9 @@ while [[ $# -gt 0 ]]; do
       WIZARD_ARGS+=(--voice-plan "$VOICE_PLAN") ;;
     --reconfigure) RECONFIGURE=1 ;;
     --defaults) DEFAULTS=1 ;;
+    # 经典非交互安装：等价 --defaults --yes 且彻底零提问（连 tty 下的
+    # API Key 交互读取也跳过，缺 key 直接报错指引）；CI/远程管道场景用。
+    --non-interactive|-n) DEFAULTS=1; ASSUME_YES=1; NONINTERACTIVE=1 ;;
     --verify-only) VERIFY_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
@@ -296,7 +300,9 @@ case "$CLOUD" in
   siliconflow)
     step "切换云端语音（SiliconFlow）"
     SILICONFLOW_KEY="${VOICE_IME_SILICONFLOW_API_KEY:-}"
-    if [[ -z "$SILICONFLOW_KEY" && -t 0 ]]; then
+    # --yes 保留 tty 下的 key 交互（旧行为）；只有 --non-interactive
+    # 才彻底零提问：缺 key 不挂 read，直接报错并给出环境变量指引。
+    if [[ -z "$SILICONFLOW_KEY" && -t 0 && "${NONINTERACTIVE:-0}" -ne 1 ]]; then
       read -rsp '请输入硅基流动 API Key（仅传给切换子进程，不保存）：' SILICONFLOW_KEY || true
       printf '\n'
     fi

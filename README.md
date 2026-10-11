@@ -37,6 +37,18 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 
 ## 快速开始
 
+已安装 `git` 与 `curl` 时，可用一键引导器（普通用户运行，无需 sudo）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-install.sh | bash
+# 参数原样透传给 setup.sh；全默认零提问（CI/无人值守）用 --non-interactive：
+curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-install.sh | bash -s -- --non-interactive
+```
+
+[remote-install.sh](<remote-install.sh>) 的环境变量：`IBUS_VOICE_IME_DIR` 指定克隆目录（默认 `$HOME/.local/share/ibus-voice-ime-repo`，刻意避开运行时数据根 `~/.local/share/ibus-voice-ime`，显式指过去也会被拒绝），`IBUS_VOICE_IME_REPO` 指定可信仓库/镜像（默认 `https://github.com/CongliangK/ibus-voice-ime.git`），`IBUS_VOICE_IME_REF` 指定分支（默认 `main`）；应 `export` 给管道右侧的 `bash`，值不得为空或含空白。网络受限时可设置 `https_proxy`，引导器不会用 `setup.sh --proxy` 代理首次克隆。重复运行会更新干净克隆并重跑安装，有未提交变更则拒绝覆盖；已有非 Git 数据目录也不会覆盖，可另设 `IBUS_VOICE_IME_DIR`。有可用终端时向导仍交互（`--defaults` 仍需终端确认，可加 `--yes`；彻底零提问用 `--non-interactive`）；真正无人值守时由安装入口自动采用默认值。
+
+引导器不替代手动克隆安装；需要审阅脚本或自行管理仓库时，仍可使用原方式：
+
 ```bash
 git clone https://github.com/CongliangK/ibus-voice-ime.git
 cd ibus-voice-ime
@@ -62,6 +74,7 @@ cd ibus-voice-ime
 | 选项 | 说明 |
 |---|---|
 | `--defaults` | 向导全部采用当前配置/默认值，不逐题提问；终端仍会确认执行，可加 `--yes` |
+| `--non-interactive` / `-n` | 全默认零提问安装（= `--defaults --yes` 且跳过终端下的 API Key 交互）：CI/管道/无人值守适用 |
 | `--reconfigure` | 已装机器改配置：只合并并备份用户配置，热键/语音方案或模型变化时轻量重注册；不初始化、不下载资产 |
 | `--yes` / `-y` | 无人值守，自动默认且免确认；非终端也自动默认，保留旧入口两档本地模型下载行为 |
 | `--keyboard-only` / `--no-voice` | 仅键盘安装，不下载语音模型 |

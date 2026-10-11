@@ -126,6 +126,19 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
         self.assert_success(result)
         self.assertEqual(self.events()[-1]['sizes'], '1.7B')
 
+    def test_noninteractive_flag_equals_defaults_plus_yes(self):
+        # --non-interactive / -n = 向导全默认（单档 1.7B）+ 跳过确认，
+        # 全程零提问；与 --defaults --yes 显式组合完全等价。
+        for flag in ('--non-interactive', '-n'):
+            with self.subTest(flag=flag):
+                self.log.write_text('')  # 夹具复用，清空上一子用例的事件流
+                result = self.run_setup(flag, '--skip-verify', '--skip-doctor')
+                self.assert_success(result)
+                self.assertEqual(self.names(), ['wizard', 'apply', 'init.sh'])
+                self.assertIn('--defaults', self.events()[0]['args'])
+                self.assertEqual(self.events()[-1]['sizes'], '1.7B')
+                self.assertNotIn('继续执行', result.stdout)
+
     def test_real_wizard_and_apply_interface_defaults(self):
         # 真实向导协议冒烟：只替换资产/桌面子脚本，不运行任何真实安装。
         shutil.copy2(ROOT / 'scripts/config-wizard.sh', self.root / 'scripts/config-wizard.sh')
@@ -230,6 +243,24 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
             self.assertFalse(self.events()[0]['has_key'])
             self.assertTrue(self.events()[1]['has_key'])
             self.assertNotIn('tty-secret', prompt + stdout + stderr + self.log.read_text())
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_noninteractive_siliconflow_tty_never_blocks_on_key_prompt(self):
+        # --non-interactive 在有 tty 且缺 key 时也不得挂起在 read：
+        # 直接报错并给出环境变量指引（红队 2026-10-11 发现）。
+        master, slave = pty.openpty()
+        try:
+            self.env.pop('VOICE_IME_SILICONFLOW_API_KEY', None)
+            process = subprocess.Popen(['bash', str(self.root / 'setup.sh'), '--non-interactive',
+                                        '--cloud', 'siliconflow', '--skip-doctor'], env=self.env,
+                                       stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            stdout, _ = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 1, stdout)
+            self.assertNotIn('请输入硅基流动', stdout)
+            self.assertIn('VOICE_IME_SILICONFLOW_API_KEY', stdout)
+            self.assertEqual(self.names(), ['init.sh'])  # 未走到 switch
         finally:
             os.close(master)
             os.close(slave)
