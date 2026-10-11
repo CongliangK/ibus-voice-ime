@@ -40,20 +40,23 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 ```bash
 git clone https://github.com/CongliangK/ibus-voice-ime.git
 cd ibus-voice-ime
-./init.sh                          # 一次性初始化：词库 + 语音模型 + 降噪，默认全量
-# 可选参数（均幂等，已就绪自动跳过）：
-#   --no-voice            不安装语音输入（不下载 ASR 模型与 venv）
-#   --no-denoise          不要 RNNoise 降噪模型（录音降级 notch 档）
-#   --no-rime-ice         跳过雾凇拼音大词库（键盘回退内置 luna）
-#   --no-zhwiki --no-moegirl / --proxy http://127.0.0.1:7890 / --skip-install
+./setup.sh                          # 一键：预检 + 词库 + 语音模型 + 降噪 + 注册 + 验收 + 体检
+# 常用选项（子步骤全部幂等，可断点续装）：
+#   --keyboard-only         只装键盘输入（Rime 拼音），不下载语音模型
+#   --cloud siliconflow     语音走云端 SiliconFlow（需 VOICE_IME_SILICONFLOW_API_KEY）
+#   --cloud mimo            语音走云端 MiMo（国内直连）
+#   --verify-only           不安装，只做语音验收 + 体检
+#   --dry-run               只打印执行计划
+# 资产选项透传 init.sh：--no-rime-ice / --no-zhwiki / --no-moegirl / --no-denoise / --proxy URL
 # 无 NVIDIA GPU 时语音步骤自动跳过，并打印云端后端替代命令。
 
 # Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音；Ctrl+Alt+B 原文语音（免整理）
 ```
 
-两个安装脚本的分工：
+安装脚本的分工：
 
-- **`init.sh`（一次性初始化）**：拿到仓库后的第一步。下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
+- **`setup.sh`（一键入口）**：新机安装只需这一个命令——编排 init.sh + 语音验收 + doctor 体检，支持 `--dry-run` 预览与 `--keyboard-only` / `--cloud` 等选项。
+- **`init.sh`（一次性初始化）**：下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
 - **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。注册成功不代表语音已通过推理验收。
 
 ### 本地语音的安装验收
