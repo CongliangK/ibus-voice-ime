@@ -269,10 +269,10 @@ PYTHONPATH=src python3 -m ibus_voice_ime.config set asr.prompts.whisper_punctuat
 | `llm.prompts.mode_instructions.prompt` | `"补齐标点并整理成清晰的提示词/任务简报结构（目标/背景/任务/约束/验收）；不得…"`（长文本，全文见 defaults.json） | `VOICE_IME_PROMPT_MODE_PROMPT` | 提示词模式附加指令 |
 | `llm.prompts.mode_instructions.command` | `"尽量原样保留命令、路径、参数和英文符号；只在安全时补标点。"` | `VOICE_IME_PROMPT_MODE_COMMAND` | 命令模式附加指令 |
 | `recording.trigger_mode` | `"toggle"` | `VOICE_IME_TRIGGER_MODE` | toggle：按一次开始再按一次停止；fixed：固定时长 |
-| `recording.hotkeys` | `null`（动态默认/回退调用点） | `VOICE_IME_HOTKEYS` | 语音热键（仅支持 Ctrl+Alt+字母） |
+| `recording.hotkeys` | `null`（动态默认/回退调用点） | `VOICE_IME_HOTKEYS` | 语音热键（Ctrl/Alt/Shift/Super 任意组合+字母，如 Ctrl+Alt+V、Super+V；裸字母=Ctrl+Alt+字母） |
 | `recording.hotkey` | `""`（空） | `VOICE_IME_HOTKEY` | 录音/热键/VAD |
 | `recording.raw_hotkeys` | `"Ctrl+Alt+B"` | `VOICE_IME_RAW_HOTKEYS` | 原文语音热键（跳过 LLM 后处理） |
-| `recording.clipboard_hotkeys` | `null`（动态默认/回退调用点） | `VOICE_IME_CLIPBOARD_HOTKEYS` | 输入法内粘贴热键 |
+| `recording.clipboard_hotkeys` | `null`（动态默认/回退调用点） | `VOICE_IME_CLIPBOARD_HOTKEYS` | 输入法内粘贴热键（同热键组合语法；GNOME 全局绑定跟随此配置） |
 | `recording.clipboard_hotkey` | `""`（空） | `VOICE_IME_CLIPBOARD_HOTKEY` | 录音/热键/VAD |
 | `recording.clipboard_max_chars` | `20000` | `VOICE_IME_CLIPBOARD_MAX_CHARS` | 录音/热键/VAD |
 | `recording.clipboard_prepare_delay_seconds` | `0.3` | `VOICE_IME_CLIPBOARD_PREPARE_DELAY_SECONDS` | 录音/热键/VAD |

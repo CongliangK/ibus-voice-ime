@@ -256,7 +256,9 @@ export VOICE_IME_CLIPBOARD_MAX_CHARS=20000            # 最大提交字符数
 
 ## 语音输入
 
-热键：`Ctrl+Alt+V`。另有 `Ctrl+Alt+B`「原文语音输入」：同一条录音/识别链路，但识别结果**绝不经过 LLM 后处理**（无论文本多长），只做确定性规整（去口头禅、繁简转换等）后上屏，适合念原文、口令、不想被改写的场合。
+热键：默认 `Ctrl+Alt+V`。另有 `Ctrl+Alt+B`「原文语音输入」：同一条录音/识别链路，但识别结果**绝不经过 LLM 后处理**（无论文本多长），只做确定性规整（去口头禅、繁简转换等）后上屏，适合念原文、口令、不想被改写的场合。
+
+两组热键都可在配置中自定义（`recording.hotkeys` / `recording.raw_hotkeys`，或环境变量 `VOICE_IME_HOTKEYS` / `VOICE_IME_RAW_HOTKEYS`）：修饰键支持 Ctrl / Alt / Shift / Super 任意组合加单字母，例如 `Super+V`、`Ctrl+Shift+B`；裸字母（如 `v`）等价于 `Ctrl+Alt+v`。同修饰键同字母的热键会互相去重（主热键与粘贴热键优先），GNOME 全局兜底快捷键也会跟随配置自动注册。
 
 在部分终端程序中，应用/工具包可能不会把 `Ctrl+Alt+V` 转发给 IBus；安装脚本会额外注册一个 GNOME 用户级全局快捷键，把同一个 `Ctrl+Alt+V` 转发给输入法进程（`Ctrl+Alt+B` 同样注册了 GNOME 兜底绑定）。
 

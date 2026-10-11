@@ -113,20 +113,17 @@ class VoiceOverlay:
             return False
         state = int(event.state)
         keyval = int(event.keyval)
-        # 录音中按主热键（Ctrl+Alt+V）或原文热键（Ctrl+Alt+B）都能停止录音。
-        if voice_hotkey.matches_ctrl_alt_letter(
-            Gdk,
-            keyval,
-            state,
+        # 录音中按主热键或原文热键（修饰键组合由配置驱动）都能停止录音。
+        masks = voice_hotkey.modifier_masks(
             int(Gdk.ModifierType.CONTROL_MASK),
             int(Gdk.ModifierType.MOD1_MASK),
-        ) or voice_hotkey.matches_ctrl_alt_letter(
-            Gdk,
-            keyval,
-            state,
-            int(Gdk.ModifierType.CONTROL_MASK),
-            int(Gdk.ModifierType.MOD1_MASK),
-            letters=voice_hotkey.raw_hotkey_letters(),
+            shift_mask=int(Gdk.ModifierType.SHIFT_MASK),
+            super_mask=voice_hotkey.resolve_super_mask(Gdk.ModifierType),
+        )
+        if voice_hotkey.matches_hotkey(
+            Gdk, keyval, state, masks
+        ) or voice_hotkey.matches_hotkey(
+            Gdk, keyval, state, masks, combos=voice_hotkey.raw_hotkey_combos()
         ):
             if self._on_stop:
                 self._on_stop()

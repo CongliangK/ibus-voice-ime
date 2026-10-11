@@ -439,27 +439,20 @@ class VoiceCustomEngine(IBus.Engine):
         self._cancel_pending_shift_toggle(keyval)
 
         # Voice hotkey.  Works even when there is a preedit buffer.
-        # 主热键（默认 Ctrl+Alt+V）优先匹配；raw 热键（默认 Ctrl+Alt+B）在
-        # 主热键不匹配时才尝试，两者互不重叠且命中后都提前 return。
-        if voice_hotkey.matches_ctrl_alt_letter(
-            IBus,
-            keyval,
-            state,
+        # 主/raw 热键由 classify_hotkey 统一仲裁（最特异组合优先，避免主热键
+        # 子集劫持 raw 组合）；修饰键组合完全由 recording.hotkeys 配置驱动。
+        # Super 同时接受 SUPER_MASK 与 MOD4_MASK 两种表示。
+        hotkey_masks = voice_hotkey.modifier_masks(
             int(IBus.ModifierType.CONTROL_MASK),
             int(IBus.ModifierType.MOD1_MASK),
-        ):
+            shift_mask=int(IBus.ModifierType.SHIFT_MASK),
+            super_mask=voice_hotkey.resolve_super_mask(IBus.ModifierType),
+        )
+        hotkey_kind = voice_hotkey.classify_hotkey(IBus, keyval, state, hotkey_masks)
+        if hotkey_kind == "main":
             self._handle_voice_hotkey()
             return True
-
-        # 「原文语音输入」热键：识别结果跳过 LLM 后处理，只走确定性规整。
-        if voice_hotkey.matches_ctrl_alt_letter(
-            IBus,
-            keyval,
-            state,
-            int(IBus.ModifierType.CONTROL_MASK),
-            int(IBus.ModifierType.MOD1_MASK),
-            letters=voice_hotkey.raw_hotkey_letters(),
-        ):
+        if hotkey_kind == "raw":
             self._handle_voice_hotkey(raw=True)
             return True
 

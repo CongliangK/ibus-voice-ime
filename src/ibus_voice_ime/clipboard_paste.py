@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
+
+from typing import Any
 
 from ibus_voice_ime import config
 import shutil
@@ -19,25 +20,27 @@ import subprocess
 _DEFAULT_HOTKEYS = ("p",)
 
 
-def hotkey_letters() -> tuple[str, ...]:
-    """Return configured Ctrl+Alt+letter clipboard-paste hotkey letters.
+def hotkey_combos() -> tuple[Any, ...]:
+    """Return configured clipboard-paste hotkey combos (modifier-aware).
 
     粘贴触发现在只有 GNOME 全局快捷键一条路（scripts/clipboard-paste.sh），
     引擎不再拦截按键；这个解析仅存的消费者是 voice_hotkey 的 raw 热键去重
-    （避免 Ctrl+Alt+B 配置撞上 Ctrl+Alt+P）。接受 ``Ctrl+Alt+P`` 或 ``p`` 形式
-    的 ``VOICE_IME_CLIPBOARD_HOTKEYS``（``VOICE_IME_CLIPBOARD_HOTKEY`` 为单键
-    兼容别名）。
+    （避免 ``Ctrl+Alt+B`` 配置撞上 ``Ctrl+Alt+P``）。解析复用
+    ``voice_hotkey.parse_hotkey_combos``，因此同样支持 ``Super+P`` 等完整
+    修饰键组合；``VOICE_IME_CLIPBOARD_HOTKEY`` 为单键兼容别名。
+
+    import 放在函数内：voice_hotkey 会延迟反向 import 本模块，顶层 import
+    会形成真环。
     """
+    from ibus_voice_ime.asr import voice_hotkey  # local import: avoid import cycle
+
     raw = config.env_str("VOICE_IME_CLIPBOARD_HOTKEYS", None) or config.env_str("VOICE_IME_CLIPBOARD_HOTKEY", "") or ""
-    letters: list[str] = []
-    for item in re.split(r"[,;\s]+", raw):
-        token = item.strip()
-        if not token:
-            continue
-        key = token.rsplit("+", 1)[-1].strip().lower()
-        if len(key) == 1 and "a" <= key <= "z" and key not in letters:
-            letters.append(key)
-    return tuple(letters or _DEFAULT_HOTKEYS)
+    return voice_hotkey.parse_hotkey_combos(raw) or voice_hotkey.default_combos(_DEFAULT_HOTKEYS)
+
+
+def hotkey_letters() -> tuple[str, ...]:
+    """Compat helper: letters of the configured clipboard-paste hotkeys."""
+    return tuple(combo.letter for combo in hotkey_combos())
 
 
 def content_fingerprint(content: str) -> str:

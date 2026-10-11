@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 同时清理主语音热键（Ctrl+Alt+V）与原文语音热键（Ctrl+Alt+B）两个绑定。
+# 同时清理主语音热键与原文语音热键的全部绑定（多组合键位时每个组合一个
+# 槽位，名字形如「自定义语音输入法语音输入（<Super>v）」）。
 NAME="自定义语音输入法语音输入"
 RAW_NAME="自定义语音输入法语音输入（原文免整理）"
 
@@ -45,7 +46,9 @@ for path in paths:
         current_name = ast.literal_eval(run("get", f"{CUSTOM_SCHEMA}:{path}", "name"))
     except Exception:
         current_name = ""
-    if current_name in names:
+    if current_name in names or any(
+        current_name.startswith(n + "（") for n in names
+    ):
         removed = True
     else:
         kept.append(path)
