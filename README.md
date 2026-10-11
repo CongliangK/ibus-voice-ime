@@ -114,7 +114,7 @@ python3 -m venv .venv --system-site-packages
 本项目使用内置 Rime 运行时：`vendor/rime/`。如需重新生成内置运行时：
 
 ```bash
-cd ~/ibus-voice-ime
+cd <仓库克隆目录>
 ./scripts/vendor-rime-runtime.sh
 ./scripts/test-rime-runtime.sh
 ```
@@ -132,7 +132,7 @@ cd ~/ibus-voice-ime
 安装/更新 IBus 组件：
 
 ```bash
-cd ~/ibus-voice-ime
+cd <仓库克隆目录>
 ./install.sh
 ```
 
@@ -166,9 +166,10 @@ export VOICE_IME_KEYBOARD_BACKEND=rime      # 默认；设为 demo 可回到 cor
 export VOICE_IME_SHIFT_TOGGLE_ASCII=1        # 默认；按一下 Shift 切换中/英
 export VOICE_IME_START_ASCII=0               # 默认；设为 1 启动后先进入英文模式
 export VOICE_IME_RIME_SCHEMA=rime_ice        # 默认；未部署雾凇时自动回退 luna_pinyin_simp
-export VOICE_IME_RIME_LIBRARY=~/ibus-voice-ime/vendor/rime/lib/librime.so.1
-export VOICE_IME_RIME_SHARED_DATA_DIR=~/ibus-voice-ime/vendor/rime/share/rime-data
-export VOICE_IME_RIME_STAGING_DIR=~/ibus-voice-ime/vendor/rime/build
+# 以下 Rime 路径为示例，<repo> 指仓库克隆目录；不设置时引擎自动使用仓库内置路径（任意位置克隆均可）
+export VOICE_IME_RIME_LIBRARY=<repo>/vendor/rime/lib/librime.so.1
+export VOICE_IME_RIME_SHARED_DATA_DIR=<repo>/vendor/rime/share/rime-data
+export VOICE_IME_RIME_STAGING_DIR=<repo>/vendor/rime/build
 export VOICE_IME_RIME_USER_DATA_DIR=~/.local/share/ibus-voice-ime/rime-user
 export VOICE_IME_CLIPBOARD_HOTKEYS=Ctrl+Alt+P # 输入法内粘贴热键；默认另有外部键盘粘贴兜底
 export VOICE_IME_CANDIDATE_UI=popup         # 默认；始终使用传统 IBus/GNOME 竖向候选框；如需行内候选可显式设为 inline
@@ -233,7 +234,7 @@ export VOICE_IME_ENGLISH_USER_DICT=~/.local/share/ibus-voice-ime/english.json
 
 热键：`Ctrl+Alt+P`。
 
-粘贴只有一条链路：默认安装把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./scripts/clipboard-paste.sh`。脚本读取桌面剪贴板（**xclip 经 XWayland 优先**，wl-paste/GTK/xsel 逐级回退）、显示"📋 正在粘贴……"通知、把文本写入暂存文件后立刻通过输入法 IPC（`paste-file`）通知 `engine.py` 并退出；`engine.py` 等待约 300ms（与语音提交同节奏）后走语音识别结果同款 `commit_text()` 提交路径，光标附近显示「📋 正在粘贴……」辅助提示条（与「正在录音」同一 IBus 通道）。依赖：`sudo dnf install xclip`（X11 回退工具无需手动安装）。
+粘贴只有一条链路：默认安装把 `Ctrl+Alt+P` 注册为 GNOME 全局快捷键，执行 `./scripts/clipboard-paste.sh`。脚本读取桌面剪贴板（**xclip 经 XWayland 优先**，wl-paste/GTK/xsel 逐级回退）、显示"📋 正在粘贴……"通知、把文本写入暂存文件后立刻通过输入法 IPC（`paste-file`）通知 `engine.py` 并退出；`engine.py` 等待约 300ms（与语音提交同节奏）后走语音识别结果同款 `commit_text()` 提交路径，光标附近显示「📋 正在粘贴……」辅助提示条（与「正在录音」同一 IBus 通道）。依赖：Fedora `sudo dnf install xclip`；Debian/Ubuntu `sudo apt install xclip`（X11 回退工具无需手动安装）。
 
 > **为什么 xclip 优先**：Fedora 44 GNOME (Wayland) 下，粘贴瞬间新建的原生 Wayland 剪贴板客户端（wl-paste）会触发 compositor 级输入上下文焦点抖动（FocusOut 风暴 + 引擎实例重建），随后的 `commit_text` 投递全部静默丢失——这是该功能自某次系统升级后失效的根因；语音链路不碰剪贴板，故从未受影响。XWayland 的剪贴板转发由常驻 X 服务承担，读取不新建 Wayland 客户端（实测零抖动）。
 
@@ -342,7 +343,7 @@ PYTHONPATH=src python3 -m ibus_voice_ime.config set recording.max_seconds 120   
 GPU 验证：
 
 ```bash
-cd ~/ibus-voice-ime
+cd <仓库克隆目录>
 ./scripts/check-gpu-stt.sh
 # 如需用大模型验证 GPU 链路：VOICE_IME_WHISPER_MODEL=large-v3 ./scripts/check-gpu-stt.sh
 ```
@@ -524,9 +525,13 @@ tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sid
 ## 卸载
 
 ```bash
-cd ~/ibus-voice-ime
-./uninstall.sh
+cd <仓库克隆目录>
+./uninstall-all.sh                # 默认：删除全部安装足迹，保留个人词库与配置
+./uninstall-all.sh --purge        # 彻底清除：连同用户数据、API key 一并删除
+./uninstall.sh                    # 轻量卸载：仅移除 IBus 组件注册与环境变量
 ```
+
+`uninstall-all.sh` 会清理：IBus 组件注册、GNOME 输入源/引擎列表（四个 gsettings 键）、自定义快捷键（含 dconf 子树）、environment.d 与 systemd 用户管理器/DBus 激活环境、蓝牙恢复守护服务、登录 autostart、用户数据/配置/运行时目录，并重启 IBus；结束后做残留验证扫描，任何残留以非零退出码报警。跨项目共享缓存（`~/.triton/cache`、`~/.cache/pip`、`~/.cache/modelscope`、`~/.modelscope`）与仓库本体（`vendor/`、`.venv*`）不在删除范围。
 
 ## 许可证
 
