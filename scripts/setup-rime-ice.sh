@@ -215,7 +215,17 @@ echo "==> 编译 Rime 字典（首次约 1-3 分钟，腾讯大词库较慢）"
 export LD_LIBRARY_PATH="$LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # 尊重用户显式指定的系统 librime（glibc 过老加载不了内置 Fedora 库的机器，
 # check-environment.sh 会建议设置 VOICE_IME_RIME_LIBRARY=系统库路径）；
-# 仅在未设置时才用内置库。
+# 仅在未设置时才用内置库。失效的变量（旧安装/旧克隆残留在会话环境里，
+# 指向已不存在的路径）自愈回落到本仓库内置库，而不是让全新安装报错。
+if [[ -n "${VOICE_IME_RIME_LIBRARY:-}" && ! -f "${VOICE_IME_RIME_LIBRARY}" ]]; then
+  echo "⚠ 会话环境 VOICE_IME_RIME_LIBRARY 指向不存在的路径，已忽略：$VOICE_IME_RIME_LIBRARY" >&2
+  echo "  （旧安装残留？可新开终端或 unset 后重试；本次使用本仓库内置 librime。）" >&2
+  unset VOICE_IME_RIME_LIBRARY
+fi
+if [[ -n "${VOICE_IME_RIME_SHARED_DATA_DIR:-}" && ! -d "${VOICE_IME_RIME_SHARED_DATA_DIR}" ]]; then
+  echo "⚠ 会话环境 VOICE_IME_RIME_SHARED_DATA_DIR 指向不存在的目录，已忽略：$VOICE_IME_RIME_SHARED_DATA_DIR" >&2
+  unset VOICE_IME_RIME_SHARED_DATA_DIR
+fi
 export VOICE_IME_RIME_LIBRARY="${VOICE_IME_RIME_LIBRARY:-$LIB_DIR/librime.so.1}"
 export VOICE_IME_RIME_SHARED_DATA_DIR="$DATA_DIR"
 export VOICE_IME_RIME_USER_DATA_DIR="${VOICE_IME_RIME_USER_DATA_DIR:-$HOME/.local/share/ibus-voice-ime/rime-user}"

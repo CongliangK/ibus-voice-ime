@@ -82,9 +82,21 @@ def _env(name: str, default: str) -> str:
 
 
 def _resolve_paths(root_dir: Path) -> tuple[Path, Path, Path]:
-    lib = Path(_env("VOICE_IME_RIME_LIBRARY", str(root_dir / "vendor/rime/lib/librime.so.1")))
-    shared = Path(_env("VOICE_IME_RIME_SHARED_DATA_DIR",
-                        str(root_dir / "vendor/rime/share/rime-data")))
+    lib_default = str(root_dir / "vendor/rime/lib/librime.so.1")
+    shared_default = str(root_dir / "vendor/rime/share/rime-data")
+    lib_env = _env("VOICE_IME_RIME_LIBRARY", "")
+    shared_env = _env("VOICE_IME_RIME_SHARED_DATA_DIR", "")
+    # 失效的环境覆盖自愈：旧安装/旧克隆残留在会话环境里的路径可能指向
+    # 已删除的目录，让全新安装莫名报错；不存在时回落本仓库默认并警告。
+    if lib_env and not Path(lib_env).is_file():
+        print(f"⚠ 会话环境 VOICE_IME_RIME_LIBRARY 失效，回落默认：{lib_env}", file=sys.stderr)
+        lib_env = ""
+    if shared_env and not Path(shared_env).is_dir():
+        print(f"⚠ 会话环境 VOICE_IME_RIME_SHARED_DATA_DIR 失效，回落默认：{shared_env}",
+              file=sys.stderr)
+        shared_env = ""
+    lib = Path(lib_env or lib_default)
+    shared = Path(shared_env or shared_default)
     user = Path(_env("VOICE_IME_RIME_USER_DATA_DIR",
                       str(Path.home() / ".local/share/ibus-voice-ime/rime-user")))
     return lib, shared, user
