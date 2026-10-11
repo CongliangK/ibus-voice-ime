@@ -101,7 +101,21 @@ if [[ "$VERIFY_ONLY" -eq 1 ]]; then
 fi
 
 step "环境预检 + 资产初始化 + 输入法注册（init.sh）"
-"$ROOT_DIR/init.sh" ${INIT_ARGS+"${INIT_ARGS[@]}"}
+INIT_RC=0
+"$ROOT_DIR/init.sh" ${INIT_ARGS+"${INIT_ARGS[@]}"} || INIT_RC=$?
+
+if [[ "$INIT_RC" -ne 0 ]]; then
+  # 安装失败不直接中止：仍跑体检给出诊断线索，最终以非零退出。
+  echo "⚠ init.sh 存在失败步骤（exit=$INIT_RC）；跳过语音验收，先跑体检诊断。" >&2
+  if [[ "$SKIP_DOCTOR" -eq 1 ]]; then
+    echo "（已按选项跳过体检。）"
+  else
+    step "整体体检（诊断）"
+    "$ROOT_DIR/scripts/doctor.sh" || true
+  fi
+  echo "安装未完全成功：请按上方 ⚠ 提示修复后重跑 ./setup.sh（子步骤幂等，会续装）。"
+  exit "$INIT_RC"
+fi
 
 case "$CLOUD" in
   siliconflow)
