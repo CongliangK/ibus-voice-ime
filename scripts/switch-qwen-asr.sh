@@ -141,7 +141,7 @@ VOICE_IME_LLM_API_KEY="${VOICE_IME_SWITCH_LLM_API_KEY:-local}" \
 VOICE_IME_LLM_MODEL="${VOICE_IME_SWITCH_LLM_MODEL:-qwen3.5-0.8b}" \
 VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$HOME/.local/share/ibus-voice-ime/llm.jsonl}" \
 "$ROOT_DIR/scripts/ibus-restart.sh" || activation_failed "IBus 重启命令失败"
-sleep 1
-command -v ibus >/dev/null 2>&1 || activation_failed "未找到 ibus 命令"
-ibus engine voice-custom || activation_failed "无法选择 voice-custom 引擎"
+# 激活语义见 scripts/activate-voice-engine.sh：GNOME 下输入源注册即可用，
+# ibus engine 全局切换重试后仍失败不算硬失败。
+"$ROOT_DIR/scripts/activate-voice-engine.sh" || activation_failed "无法选择 voice-custom 引擎"
 echo "已切换到 Qwen3-ASR $MODEL：$MODEL_PATH（IBus 命令成功；真实热键/语音仍需实测）"

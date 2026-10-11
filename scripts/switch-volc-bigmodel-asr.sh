@@ -143,8 +143,8 @@ VOICE_IME_LLM_API_KEY="${VOICE_IME_SWITCH_LLM_API_KEY:-local}" \
 VOICE_IME_LLM_MODEL="${VOICE_IME_SWITCH_LLM_MODEL:-qwen3.5-0.8b}" \
 VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$HOME/.local/share/ibus-voice-ime/llm.jsonl}" \
 "$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null || true
-sleep 1
-ibus engine voice-custom >/dev/null 2>&1 || true
+# 激活语义见 scripts/activate-voice-engine.sh（GNOME 输入源注册即可用，重试后降级判定）
+"$(dirname "$0")/activate-voice-engine.sh" || true
 
 if [[ "$USE_BWS_KEY" == "1" ]]; then
   echo "已切换到火山引擎 bigmodel ASR：$MODEL_NAME @ $BASE_URL ($RESOURCE_ID)（API Key 由 bws/$BWS_SECRET_NAME 运行时注入，不写入任何文件）"
