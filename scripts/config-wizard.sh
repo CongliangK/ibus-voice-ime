@@ -107,7 +107,26 @@ ask_choice() {
   printf '已选：%s\n' "${labels[$selected]}" >&2
 }
 ask_hotkey() {
-  local label="$1" current="$2" reply normalized
+  local label="$1" current="$2" reply normalized mode
+  if [[ "$DEFAULTS" -eq 0 && -t 0 && -t 2 ]]; then
+    # 按键录入是实验性：终端/桌面可能先截获组合（实测 Ctrl+B 可录、
+    # Ctrl+Alt+字母常被 GNOME/IBus 抢走），因此手动输入为默认推荐。
+    mode="$(tui_select --title "$label [当前/默认：$current]" --default 2 -- \
+      '手动输入（推荐）' '直接按键录入（实验性）' '保持当前/默认')"
+    case "$mode" in
+      1)
+        ANSWER="$(tui_select --capture --title "$label" --expect-format '修饰键+单字母，例如 Ctrl+Alt+V')"
+        printf '已选：%s\n' "$ANSWER" >&2
+        return ;;
+      2)
+        if normalized="$("$PYTHON" "$ROOT_DIR/scripts/apply-wizard-config.py" --validate-hotkey "$current" 2>/dev/null)"; then
+          ANSWER="$normalized"
+          printf '已选：%s\n' "$ANSWER" >&2
+          return
+        fi
+        echo '当前热键不合法，请手动输入修正。' >&2 ;;
+    esac
+  fi
   while true; do
     printf '%s [当前/默认：%s]：' "$label" "$current" >&2
     if [[ "$DEFAULTS" -eq 1 ]]; then

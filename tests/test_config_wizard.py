@@ -37,6 +37,75 @@ class ConfigWizardTest(unittest.TestCase):
         return subprocess.run([sys.executable, str(ROOT / "scripts/apply-wizard-config.py"), str(self.result)],
                               text=True, capture_output=True, env=self.env, timeout=10)
 
+    def tty_wizard(self, steps, *args):
+        master, slave = pty.openpty()
+        process = None
+        try:
+            saved = termios.tcgetattr(slave)
+            if hasattr(termios, "tcsetwinsize"):
+                termios.tcsetwinsize(slave, (24, 120))
+            process = subprocess.Popen(["bash", str(ROOT / "scripts/config-wizard.sh"), *args],
+                                       stdin=slave, stdout=subprocess.PIPE, stderr=slave, env=self.env)
+            decoration = b""
+            for prompt, keys in steps:
+                pending = b""
+                deadline = time.monotonic() + 5
+                while prompt.encode() not in pending:
+                    remaining = deadline - time.monotonic()
+                    self.assertGreater(remaining, 0, decoration.decode(errors="replace"))
+                    ready, _, _ = select.select([master], [], [], remaining)
+                    self.assertTrue(ready, "未出现预期提示：" + prompt)
+                    chunk = os.read(master, 4096)
+                    self.assertTrue(chunk, "向导在输入完成前退出")
+                    pending += chunk
+                    decoration += chunk
+                os.write(master, keys)
+            stdout, _ = process.communicate(timeout=5)
+            while select.select([master], [], [], 0)[0]:
+                decoration += os.read(master, 4096)
+            self.assertEqual(termios.tcgetattr(slave), saved, "向导终端属性未恢复")
+            return process.returncode, stdout.decode(), decoration.decode()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(master)
+            os.close(slave)
+
+    def test_tty_wizard_captures_all_three_hotkeys_and_confirms(self):
+        steps = []
+        for keys in (b"\x1b\x16", b"\x01", b"V"):
+            steps.extend([("3) 保持当前/默认", b"2"),
+                          ("Ctrl+Shift 也可能丢失 Shift，请手动输入。", keys),
+                          ("3) 手动输入", b"\r")])
+        rc, stdout, stderr = self.tty_wizard(steps, "--reconfigure", "--voice-plan", "keyboard-only")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout, str(self.result) + "\n")
+        self.assertEqual(json.loads(self.result.read_text())["hotkeys"],
+                         dict(voice="Ctrl+Alt+V", raw="Ctrl+A", paste="Shift+V"))
+        self.assertEqual(stderr.count("已选："), 3)
+        self.assertFalse(self.config.exists())
+
+    def test_tty_wizard_manual_and_keep_current_paths(self):
+        steps = [("3) 保持当前/默认", b"1"), ("[当前/默认：Ctrl+Alt+V]：", b"Ctrl+Garbage\n"),
+                 ("输入不合法", b"Super+V\n"),
+                 ("3) 保持当前/默认", b"3"), ("3) 保持当前/默认", b"\r")]
+        rc, stdout, stderr = self.tty_wizard(steps, "--reconfigure", "--voice-plan", "keyboard-only")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout, str(self.result) + "\n")
+        self.assertEqual(json.loads(self.result.read_text())["hotkeys"],
+                         dict(voice="Super+V", raw="Ctrl+Alt+B", paste="Ctrl+Alt+P"))
+        self.assertEqual(stderr.count("已选："), 3)
+
+    def test_tty_wizard_capture_cancel_does_not_write_result(self):
+        steps = [("3) 保持当前/默认", b"2"),
+                 ("Ctrl+Shift 也可能丢失 Shift，请手动输入。", b"\x1b")]
+        rc, stdout, stderr = self.tty_wizard(steps, "--reconfigure", "--voice-plan", "keyboard-only")
+        self.assertEqual(rc, 130, stderr)
+        self.assertEqual(stdout, "")
+        self.assertFalse(self.result.exists())
+        self.assertFalse(self.config.exists())
+
     def test_defaults_and_piped_enters_produce_same_answers(self):
         defaults = self.wizard("--defaults")
         self.assertEqual(defaults.returncode, 0, defaults.stderr)
@@ -466,16 +535,30 @@ class TuiSelectTest(unittest.TestCase):
             self.assertIn("用法", ran.stderr)
             self.assertIn("回车", ran.stderr)
 
-    def tty_selection(self, keys, *args, send_signal=False):
+    def tty_selection(self, keys, *args, send_signal=False, pipe_output=False, check_disposition=False):
         master, slave = pty.openpty()
         process = None
         try:
             saved = termios.tcgetattr(slave)
             if hasattr(termios, "tcsetwinsize"):
                 termios.tcsetwinsize(slave, (24, 30))
-            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/tui-select.py"),
-                                        *args, "--", "第一项很长" * 10, "第二项"],
-                                       stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            options = [] if "--capture" in args else ["--", "第一项很长" * 10, "第二项"]
+            command = [sys.executable, str(ROOT / "scripts/tui-select.py"), *args, *options]
+            if check_disposition:
+                wrapper = """import runpy, signal, sys
+namespace = runpy.run_path(sys.argv.pop(1))
+def previous(signum, frame):
+    pass
+signals = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+for sig in signals:
+    signal.signal(sig, previous)
+rc = namespace['main']()
+assert all(signal.getsignal(sig) is previous for sig in signals), '调用方信号处理未恢复'
+sys.exit(rc)
+"""
+                command = [sys.executable, "-c", wrapper, *command[1:]]
+            process = subprocess.Popen(command, stdin=slave,
+                                       stdout=subprocess.PIPE if pipe_output else slave, stderr=subprocess.PIPE)
             # 等 raw 模式就绪再输入，避免在规范模式中被回显/缓冲。
             decoration = b""
             deadline = time.monotonic() + 5
@@ -488,13 +571,13 @@ class TuiSelectTest(unittest.TestCase):
                 self.assertTrue(chunk, "选择器在菜单就绪前退出")
                 decoration += chunk
             if send_signal:
-                process.send_signal(signal.SIGINT)
+                process.send_signal(signal.SIGINT if send_signal is True else send_signal)
             else:
                 os.write(master, keys)
-            _, tail = process.communicate(timeout=5)
+            captured, tail = process.communicate(timeout=5)
             decoration += tail
             self.assertEqual(termios.tcgetattr(slave), saved, "终端属性未恢复")
-            output = b""
+            output = captured if pipe_output else b""
             while select.select([master], [], [], 0)[0]:
                 output += os.read(master, 4096)
             self.assertIn(b"\x1b[?25h", decoration)
@@ -505,6 +588,86 @@ class TuiSelectTest(unittest.TestCase):
                 process.communicate()
             os.close(master)
             os.close(slave)
+
+    def test_capture_non_tty_requires_manual_input(self):
+        ran = self.selector("--capture", "--title", "语音热键", text="v\n")
+        self.assertEqual(ran.returncode, 2, ran.stderr)
+        self.assertEqual(ran.stdout, "")
+        self.assertIn("需要终端", ran.stderr)
+        self.assertIn("手动输入", ran.stderr)
+
+    def test_real_tty_capture_byte_mapping_matches_normalizer(self):
+        for keys, spec in ((b"\x1b\x16", "Ctrl+Alt+V"), (b"\x01", "Ctrl+A"),
+                           (b"V", "Shift+V"), (b"v", "v"), (b"\x1bx", "Alt+X"),
+                           (b"\x1bV", "Alt+Shift+V"), (b"\x03", "Ctrl+C")):
+            with self.subTest(keys=keys):
+                normalized = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts/apply-wizard-config.py"),
+                     "--validate-hotkey", spec], text=True, capture_output=True, timeout=5)
+                self.assertEqual(normalized.returncode, 0, normalized.stderr)
+                rc, stdout, stderr = self.tty_selection(keys + b"\r", "--capture", "--title", "语音热键")
+                self.assertEqual(rc, 0, stderr)
+                self.assertEqual(stdout.strip(), normalized.stdout.strip())
+                self.assertIn("使用 " + normalized.stdout.strip(), stderr)
+                self.assertIn("（实验性）按住修饰键后再按一个字母完成录入", stderr)
+                self.assertIn("Super 键、纯修饰键组合（如 Ctrl+Super）终端捕获不到", stderr)
+
+    def test_real_tty_capture_stdout_pipe_and_caller_signal_dispositions(self):
+        for keys, sig, expected in ((b"\x1b\x16\r", False, 0), (b"\x1b", False, 130),
+                                    (b"", signal.SIGTERM, 130), (b"", signal.SIGHUP, 130),
+                                    (b"", signal.SIGINT, 130)):
+            with self.subTest(keys=keys, sig=sig):
+                rc, stdout, stderr = self.tty_selection(
+                    keys, "--capture", send_signal=sig, pipe_output=True, check_disposition=True)
+                self.assertEqual(rc, expected, stderr)
+                self.assertEqual(stdout, "Ctrl+Alt+V\n" if expected == 0 else "")
+
+    def test_real_tty_capture_ignores_navigation_function_and_invalid_keys(self):
+        # 序列末尾的 A 等字母不可被当成主键；也覆盖 Linux 控制台 F1 与
+        # SS3 F1（\x1bOP）。\x1bOB 现在按消歧规则解析为 Alt+Shift+O 合法
+        # 组合，不再属于"被忽略的功能键"，故从无效序列中移除。
+        invalid = b"\x1b[A\x1bOP\x1b[15~\x1b[[A\t\r\n 1"
+        rc, stdout, stderr = self.tty_selection(invalid + b"\x01\r", "--capture")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Ctrl+A")
+        # \t、\r、\n、空格、1 五个无效主键各提示一次；转义序列整体静默忽略。
+        self.assertEqual(stderr.count("主键只支持字母"), 5)
+
+    def test_real_tty_capture_alt_shift_o_with_pushback(self):
+        # ESC O（无后续字节）是完整的 Alt+Shift+O 组合，不是 SS3 前缀；
+        # 紧随其后的确认键经推回缓冲不会被吞（红队 P2-2 修复）。
+        rc, stdout, stderr = self.tty_selection(b"\x1bO\r", "--capture")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Alt+Shift+O")
+        # SS3 功能键（F1=\x1bOP）整体忽略，不产生捕获。
+        rc, stdout, stderr = self.tty_selection(b"\x1bOP\x01\r", "--capture")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Ctrl+A")
+
+    def test_real_tty_capture_rerecord_and_manual_validation(self):
+        rc, stdout, stderr = self.tty_selection(b"v2\x01\r", "--capture")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Ctrl+A")
+        rc, stdout, stderr = self.tty_selection(b"v3Ctrl+Garbage\r<Control><Shift>v\r", "--capture")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Ctrl+Shift+V")
+        self.assertIn("输入不合法", stderr)
+        rc, stdout, stderr = self.tty_selection(b"v3Super+V\r", "--capture", "--expect-format", "格式示例")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "Super+V")
+        self.assertIn("格式提示：格式示例", stderr)
+
+    def test_real_tty_capture_cancel_and_signals_restore_terminal(self):
+        for keys in (b"\x1b", b"v\x1b", b"v3\x1b"):
+            with self.subTest(keys=keys):
+                rc, stdout, stderr = self.tty_selection(keys, "--capture")
+                self.assertEqual(rc, 130, stderr)
+                self.assertEqual(stdout, "")
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(sig=sig):
+                rc, stdout, stderr = self.tty_selection(b"", "--capture", send_signal=sig)
+                self.assertEqual(rc, 130, stderr)
+                self.assertEqual(stdout, "")
 
     def test_real_tty_down_enter_and_terminal_restore(self):
         rc, stdout, stderr = self.tty_selection(b"\x1b[B\r")
