@@ -270,6 +270,28 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertFalse((self.venv / 'original-marker').exists())
         self.assertTrue(list(self.root.glob('.venv-qwen-asr.bak-*/original-marker')))
 
+    @staticmethod
+    def _reuse_versions(torch='2.6.0'):
+        # 模拟版本从 requirements 动态推导，防止手抄清单与 pin 漂移
+        # （2026-10-11：手抄 modelscope=1.22.0 已不满足 >=1.40 而误报失败）。
+        from packaging.requirements import Requirement
+        versions = {}
+        for raw in (ROOT / 'requirements-qwen-asr.txt').read_text().splitlines():
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            req = Requirement(line)
+            chosen = '1.0'
+            for spec in req.specifier:
+                if spec.operator == '==':
+                    chosen = spec.version
+                    break
+                if spec.operator in ('>=', '~='):
+                    chosen = spec.version
+            versions[req.name] = chosen
+        versions['torch'] = torch
+        return versions
+
     def test_torch_baseline_checks_project_range_not_just_pip_check(self):
         from unittest import mock
         import importlib.metadata
@@ -278,10 +300,13 @@ if a == ['-V']: print('Python 3.{minor}.0')
         code = script.split('import importlib.metadata as m\n', 1)[1].split('\nPY', 1)[0]
         code = 'import importlib.metadata as m\n' + code
         for torch, expected in (('2.5.1', 1), ('2.6.0', 0), ('2.12.0', 0), ('2.13.0', 1), ('invalid', 1)):
-            versions = {'qwen-asr': '0.0.6', 'transformers': '4.57.6', 'modelscope': '1.22.0', 'torch': torch}
+            versions = self._reuse_versions(torch)
             with self.subTest(torch=torch), mock.patch.object(importlib.metadata, 'version', side_effect=versions.__getitem__):
-                with self.assertRaises(SystemExit) as error:
-                    exec(code, {})
+                # 嵌入代码从 sys.argv[1] 读 requirements 路径；unittest discover 会
+                # 把 'discover' 注入 sys.argv[1]，必须显式指回仓库 requirements 文件。
+                with mock.patch('sys.argv', ['reuse-check', str(ROOT / 'requirements-qwen-asr.txt')]):
+                    with self.assertRaises(SystemExit) as error:
+                        exec(code, {})
                 self.assertEqual(error.exception.code, expected)
 
     def test_no_gpu_is_failure_not_fake_success(self):
@@ -327,6 +352,22 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertEqual(self.events(), ['smoke'])
         self.assertFalse(self.venv.exists())
         self.assertNotIn('activate', self.events())
+
+    def test_verify_only_not_blocked_by_invalid_sizes(self):
+        # 只读验收读取实际持久化的 sidecar 配置，SIZES 是下载集合变量，
+        # 不应阻断 --verify-only（红队 2026-10-11 发现）。
+        model = self.root / 'custom models/Qwen3-ASR-0.6B'
+        model.mkdir(parents=True)
+        (model / 'config.json').write_text('{}')
+        (model / 'model.safetensors').write_bytes(b'fixture')
+        interpreter = self.root / 'custom python/bin/python'
+        self.make_python(interpreter, 12)
+        env_file = self.home / '.config/environment.d/ibus-voice-ime.conf'
+        env_file.parent.mkdir(parents=True)
+        env_file.write_text(f'VOICE_IME_QWEN_ASR_PYTHON={interpreter}\nVOICE_IME_QWEN_ASR_MODEL_PATH={model}\n')
+        result = self.run_setup('--verify-only', VOICE_IME_QWEN_ASR_SIZES='bogus')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.events(), ['smoke'])
 
     def test_lock_rejects_concurrent_install(self):
         with (self.root / '.qwen-asr-setup.lock').open('w') as lock:

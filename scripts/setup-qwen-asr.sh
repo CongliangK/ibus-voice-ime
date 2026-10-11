@@ -25,13 +25,8 @@ done
 if [[ -n "$PROXY" ]]; then
   export http_proxy="$PROXY" https_proxy="$PROXY" HTTP_PROXY="$PROXY" HTTPS_PROXY="$PROXY"
 fi
-DEFAULT_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
-case "${DEFAULT_MODEL,,}" in
-  0.6|0.6b|qwen3-asr-0.6b) DEFAULT_MODEL=0.6b ;;
-  1.7|1.7b|qwen3-asr-1.7b) DEFAULT_MODEL=1.7b ;;
-  *) echo "无效的 VOICE_IME_QWEN_ASR_MODEL：$DEFAULT_MODEL（支持 0.6b / 1.7b）" >&2; exit 2 ;;
-esac
-DEFAULT_MODEL_DIR="$MODELS_DIR/Qwen3-ASR-$( [[ "$DEFAULT_MODEL" == "1.7b" ]] && echo 1.7B || echo 0.6B )"
+# 只读验收（--verify-only）在任何下载集合/默认模型变量解析之前完成：
+# 验收读取的是实际持久化的 sidecar 配置，不应被下载集合变量阻断（红队发现）。
 TIMEOUT="${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}"
 if [[ $VERIFY_ONLY -eq 1 ]]; then
   # Match the launcher's persisted overrides, without sourcing shell syntax or
@@ -44,6 +39,25 @@ if [[ $VERIFY_ONLY -eq 1 ]]; then
   [[ ${#CHECK_TARGETS[@]} -eq 2 ]] || { echo "无法解析实际 sidecar 配置" >&2; exit 1; }
   exec "$BOOTSTRAP" "$CHECK" --python "${CHECK_TARGETS[0]}" --stage smoke --model "${CHECK_TARGETS[1]}" --timeout "$TIMEOUT"
 fi
+
+# 未指定集合时保持旧行为：两档均下载。显式空集合与未知分档须在任何安装前拒绝。
+QWEN_SIZES=()
+SIZES_VALUE="${VOICE_IME_QWEN_ASR_SIZES-0.6B 1.7B}"
+read -r -a QWEN_SIZES <<< "${SIZES_VALUE//$'\n'/ }" || true
+[[ ${#QWEN_SIZES[@]} -gt 0 ]] || { echo "无效的 VOICE_IME_QWEN_ASR_SIZES：集合不能为空（支持 0.6B / 1.7B）" >&2; exit 2; }
+for size in "${QWEN_SIZES[@]}"; do
+  case "$size" in
+    0.6B|1.7B) ;;
+    *) echo "无效的 VOICE_IME_QWEN_ASR_SIZES：$size（支持空格分隔的 0.6B / 1.7B）" >&2; exit 2 ;;
+  esac
+done
+DEFAULT_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
+case "${DEFAULT_MODEL,,}" in
+  0.6|0.6b|qwen3-asr-0.6b) DEFAULT_MODEL=0.6b ;;
+  1.7|1.7b|qwen3-asr-1.7b) DEFAULT_MODEL=1.7b ;;
+  *) echo "无效的 VOICE_IME_QWEN_ASR_MODEL：$DEFAULT_MODEL（支持 0.6b / 1.7b）" >&2; exit 2 ;;
+esac
+DEFAULT_MODEL_DIR="$MODELS_DIR/Qwen3-ASR-$( [[ "$DEFAULT_MODEL" == "1.7b" ]] && echo 1.7B || echo 0.6B )"
 
 # Single writer: init/doctor/manual installation must not mutate the same venv
 # concurrently. Kernel lock is released even on interruption; no stale PID file.
@@ -196,6 +210,11 @@ with open(sys.argv[1]) as f:
             ok = False
             print(f'  [REUSE 失败] 未安装：{req.name}')
             break
+        except Exception as exc:
+            # 元数据损坏（如非正常版本字符串）按不满足处理，不让核验自身崩溃。
+            ok = False
+            print(f'  [REUSE 失败] {req.name} 版本无法解析：{exc}')
+            break
         if not req.specifier.contains(version, prereleases=True):
             ok = False
             print(f'  [REUSE 失败] {req.name} {version} 不满足 {req.specifier}')
@@ -253,7 +272,7 @@ fi
 MS_CLI="$VENV/bin/modelscope"
 [[ -x "$MS_CLI" ]] || { echo "venv 未安装 modelscope CLI。" >&2; exit 1; }
 mkdir -p "$MODELS_DIR"
-for size in 0.6B 1.7B; do
+for size in "${QWEN_SIZES[@]}"; do
   model_dir="$MODELS_DIR/Qwen3-ASR-$size"
   if "$BOOTSTRAP" "$CHECK" --model-only --model "$model_dir" >/dev/null 2>&1; then
     echo "模型配置及全部分片已存在：$model_dir"

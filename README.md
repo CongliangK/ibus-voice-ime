@@ -40,7 +40,7 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 ```bash
 git clone https://github.com/CongliangK/ibus-voice-ime.git
 cd ibus-voice-ime
-./setup.sh                          # 一键：预检 + 词库 + 语音模型 + 降噪 + 注册 + 验收 + 体检
+./setup.sh                          # 交互向导 + 预检 + 资产 + 注册 + 验收 + 体检
 # 常用选项（子步骤全部幂等，可断点续装）：
 #   --keyboard-only         只装键盘输入（Rime 拼音），不下载语音模型
 #   --cloud siliconflow     语音走云端 SiliconFlow（需 VOICE_IME_SILICONFLOW_API_KEY）
@@ -52,6 +52,36 @@ cd ibus-voice-ime
 
 # Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音；Ctrl+Alt+B 原文语音（免整理）
 ```
+
+安装时会交互询问语音方案、本地模型分档、语音/原文/粘贴热键、LLM 后处理和词库/降噪资产；**每题都有当前值或默认值，可以直接回车**。API Key 不进入向导结果或用户配置；选择 SiliconFlow 后，可在安装完成时隐藏输入密钥，仅传给切换子进程。
+
+[setup.sh](<setup.sh>) 用法：
+
+| 选项 | 说明 |
+|---|---|
+| `--defaults` | 向导全部采用当前配置/默认值，不逐题提问；终端仍会确认执行，可加 `--yes` |
+| `--reconfigure` | 已装机器改配置：只合并并备份用户配置，热键/语音方案或模型变化时轻量重注册；不初始化、不下载资产 |
+| `--yes` / `-y` | 无人值守，自动默认且免确认；非终端也自动默认，保留旧入口两档本地模型下载行为 |
+| `--keyboard-only` / `--no-voice` | 仅键盘安装，不下载语音模型 |
+| `--cloud siliconflow` / `--cloud mimo` | 显式选择云端，沿用既有切换脚本和密钥指引 |
+| `--no-rime-ice` / `--no-zhwiki` / `--no-moegirl` / `--no-denoise` | 显式跳过对应资产 |
+| `--proxy URL` | 向资产初始化和验收传递代理 |
+| `--verify-only` | 不安装，只做语音验收和体检 |
+| `--skip-verify` / `--skip-doctor` | 跳过安装后的验收或体检 |
+| `--dry-run` | 打印实际选择（方案/模型分档/热键变化）与计划，不应用配置、不安装、不下载 |
+
+正常安装中，显式方案/资产选项优先，出现任一此类选项时跳过整个向导，保持原有脚本化调用方式；`--reconfigure` 中则传给向导跳过相应题目。显式 `--defaults` 按向导的默认下载集合执行（新机默认仅 1.7B），与自动默认保留旧下载集合的兼容路径不同。
+
+**已装机器改配置：**
+
+```bash
+./setup.sh --reconfigure
+# 无人值守采用当前值；预览不写用户配置：
+./setup.sh --reconfigure --defaults --yes
+./setup.sh --reconfigure --dry-run
+```
+
+配置按白名单稀疏合并到用户配置（`VOICE_IME_CONFIG` 可覆盖），已有文件自动备份为 `config.json.bak.<时间戳>`。重配置不会准备新后端资产或保存密钥；切换尚未准备的后端后，仍需按向导指引补齐运行条件。`keyboard-only` 表示跳过语音资产安装，并不删除已有模型或禁用已有语音配置。
 
 安装脚本的分工：
 
@@ -79,6 +109,8 @@ VOICE_IME_QWEN_ASR_SETUP_PYTHON=/usr/bin/python3.12 ./scripts/setup-qwen-asr.sh
 # 每个推理验收子进程最长 1800 秒：
 VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 ```
+
+直接调用 [setup-qwen-asr.sh](<scripts/setup-qwen-asr.sh>) 时，未设置 `VOICE_IME_QWEN_ASR_SIZES` 仍下载两档；可用 `VOICE_IME_QWEN_ASR_SIZES='0.6B' VOICE_IME_QWEN_ASR_MODEL=0.6b` 仅准备并使用小档，或用 `'0.6B 1.7B'` 准备两档。集合外已有模型不删除、不校验；默认模型应位于所选集合或已有就绪模型中。空集合/非法分档会在安装前报错。
 
 不加 `VOICE_IME_ENABLE_QWEN_ASR=0` 时，安装器验收成功会默认激活 1.7B 并重启 IBus。**准备环境、写入配置、桌面激活、真实热键语音是四种不同状态**：switch 的重启/引擎选择失败会非零退出，保留已写配置与已验收环境，不能声称桌面就绪。旧 JSON 或 environment.d 中显式指定的外部解释器不会被修复模式覆盖；完整迁移激活需检查这些覆盖并运行 switch，再执行只读验收。另一台 Fedora 在安装系统 3.12 后卡住的新 traceback 尚未提供，不能断言此次补丁已修复那台机器。
 
