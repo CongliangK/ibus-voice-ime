@@ -16,7 +16,7 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="$ROOT_DIR/.venv/bin/python"
-[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+[[ -x "$PYTHON" ]] || PYTHON="$("$ROOT_DIR/scripts/python-select.sh" || command -v python3)"
 MODE="check"
 case "${1:-}" in
   "") MODE="check" ;;

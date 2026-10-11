@@ -17,7 +17,16 @@ fi
 chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py" "$ROOT_DIR/run-engine.sh" "$ROOT_DIR/scripts/voice-toggle.sh" "$ROOT_DIR/scripts/clipboard-paste.sh" "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" "$ROOT_DIR/scripts/uninstall-gnome-clipboard-paste-hotkey.sh" 2>/dev/null || chmod +x "$ROOT_DIR/src/ibus_voice_ime/engine.py"
 PYTHON="$ROOT_DIR/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
-  PYTHON="$(command -v python3)"
+  # 自动挑选可用解释器（conda 遮蔽 PATH 时仍能找到带 PyGObject 的系统 Python）。
+  BASE_PY="$("$ROOT_DIR/scripts/python-select.sh" || true)"
+  # venv 缺失时自动创建：--system-site-packages 让 dnf 的 PyGObject 继续可见。
+  # 创建失败（只读目录/权限）不阻断安装，回退用系统解释器（下方 gi 检查兜底）。
+  if [[ -n "${BASE_PY:-}" ]] && "$BASE_PY" -m venv "$ROOT_DIR/.venv" --system-site-packages >/dev/null 2>&1; then
+    echo "已创建项目 venv：$ROOT_DIR/.venv（基于 $BASE_PY）"
+    PYTHON="$ROOT_DIR/.venv/bin/python"
+  else
+    PYTHON="${BASE_PY:-}"
+  fi
 fi
 
 # engine.py --xml 依赖 PyGObject（gi）；缺失时给可读提示而不是裸 traceback。

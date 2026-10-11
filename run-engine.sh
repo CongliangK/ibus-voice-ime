@@ -130,7 +130,8 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 PYTHON="$ROOT_DIR/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
-  PYTHON="$(command -v python3)"
+  # 自动挑选可用解释器（conda 遮蔽 PATH 时仍能找到带 PyGObject 的系统 Python）。
+  PYTHON="$("$ROOT_DIR/scripts/python-select.sh" || command -v python3)"
 fi
 
 # If CUDA runtime libraries are installed through NVIDIA pip wheels, make them

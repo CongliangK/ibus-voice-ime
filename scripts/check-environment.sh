@@ -65,7 +65,8 @@ fi
 # Python 选择逻辑与 run-engine.sh / install.sh 保持一致：项目 venv 优先。
 PY_BIN="$ROOT_DIR/.venv/bin/python"
 if [[ ! -x "$PY_BIN" ]]; then
-  PY_BIN="$(command -v python3 || true)"
+  # 自动挑选可用解释器（conda/miniconda 遮蔽 PATH 时仍能找到带 gi 的系统 Python）。
+  PY_BIN="$("$ROOT_DIR/scripts/python-select.sh" || true)"
 fi
 
 PY_OK=0
