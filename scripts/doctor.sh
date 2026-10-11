@@ -27,12 +27,26 @@ esac
 
 FAILS=0
 WARNINGS=0
+WARN_TITLES=() WARN_IMPACTS=() WARN_GUIDANCE=()
 FIXED=0
 FIX_FAILURES=0
 FAILED_ITEMS=()   # 待修复条目 id，fix 模式逐个治疗
 
 ok()   { printf '  [OK]   %s\n' "$1"; }
-warn() { printf '  [WARN] %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
+register_warn() {
+  WARN_TITLES+=("${1//$'\n'/ }"); WARN_IMPACTS+=("${2//$'\n'/ }"); WARN_GUIDANCE+=("${3//$'\n'/ }")
+  WARNINGS=${#WARN_TITLES[@]}
+}
+warn() {
+  # 通用同标题去重：环境预检导入条目与本地检查标题全等（剥离来源前缀）
+  # 时只保留一条，避免同一问题双报；不用子串匹配，不会误吞不同标题。
+  local title="$1" existing
+  for existing in "${WARN_TITLES[@]}"; do
+    [[ "${existing#\[*\] }" == "$title" ]] && return 0
+  done
+  register_warn "$1" "$2" "$3"
+  printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[WARNINGS-1]}" "${WARN_IMPACTS[WARNINGS-1]}" "${WARN_GUIDANCE[WARNINGS-1]}"
+}
 fail() { printf '  [FAIL] %s\n' "$1"; FAILS=$((FAILS + 1)); }
 fixed(){ printf '  [FIXED] %s\n' "$1"; FIXED=$((FIXED + 1)); }
 header() { printf '\n== %s ==\n' "$1"; }
@@ -43,9 +57,26 @@ RIME_USER="${VOICE_IME_RIME_USER_DATA_DIR:-$HOME/.local/share/ibus-voice-ime/rim
 ENV_FILE="$HOME/.config/environment.d/ibus-voice-ime.conf"
 # Observe the same persisted VOICE_IME overrides as the launcher. Parse safely,
 # never source raw shell syntax, and never let unrelated keys change ROOT_DIR.
+# RIME 四键镜像 run-engine 的继承救援语义：会话里已存在且路径有效的值
+# 压过 environment.d——launcher 也不会用 env 文件的旧值覆盖有效救援值，
+# doctor 若不遵循就会对引擎根本不会使用的路径误报 FAIL（红队实测）。
+_doc_rescue() {
+  local value="${!1:-}"
+  [[ -n "$value" && -e "$value" ]] && printf '%s' "$value"
+}
+_DOC_RESCUED=()
+for _doc_var in VOICE_IME_RIME_LIBRARY VOICE_IME_RIME_SHARED_DATA_DIR \
+                VOICE_IME_RIME_STAGING_DIR VOICE_IME_RIME_USER_DATA_DIR; do
+  _doc_val="$(_doc_rescue "$_doc_var")"
+  if [[ -n "$_doc_val" ]]; then _DOC_RESCUED+=("$_doc_var=$_doc_val"); fi
+done
 if [[ -f "$ROOT_DIR/scripts/env-file-load.sh" ]]; then
   eval "$(bash "$ROOT_DIR/scripts/env-file-load.sh" "$ENV_FILE" | grep -E '^export (VOICE_IME_[A-Z0-9_]+|PYTORCH_CUDA_ALLOC_CONF)=' || true)"
 fi
+for _doc_pair in "${_DOC_RESCUED[@]}"; do
+  export "${_doc_pair%%=*}=${_doc_pair#*=}"
+done
+unset _doc_var _doc_val _doc_pair
 COMPONENT_XML="$HOME/.local/share/ibus/component/voice-custom.xml"
 
 # rime-ice 资产三要素：方案文件（git 跟踪）、词库源（gitignore）、编译产物（gitignore）。
@@ -72,18 +103,28 @@ current_asr_backend() {
 # ---------------------------------------------------------------- 环境依赖 --
 check_env_dependencies() {
   header "环境依赖（check-environment.sh）"
-  local out rc
+  local out line detail title impact guidance in_summary=0
   out="$(mktemp)"
   if [[ -x "$ROOT_DIR/scripts/check-environment.sh" ]]; then
     "$ROOT_DIR/scripts/check-environment.sh" >"$out" 2>&1 || true
     cat "$out"
+    # 只登记预检最终汇总中的 WARN（原检查段也会输出，不能双计数）。
+    # 明细约定：标题 —— 影响；指引；保留来源方便用户定位。
+    while IFS= read -r line; do
+      if [[ "$line" == '== 汇总 ==' ]]; then in_summary=1; continue; fi
+      [[ $in_summary -eq 1 && "$line" == '  [WARN] '* ]] || continue
+      detail="${line#'  [WARN] '}"
+      title="${detail%% —— *}"; detail="${detail#* —— }"
+      impact="${detail%%；*}"; guidance="${detail#*；}"
+      register_warn "[环境预检] $title" "$impact" "$guidance"
+    done < "$out"
     # 汇总行形如 “FAIL: 0  WARN: 2”
     if grep -qE 'FAIL: [1-9]' "$out"; then
       fail "环境依赖存在 FAIL 项（见上方输出，需人工处理）"
       FAILED_ITEMS+=(env-deps)
     fi
   else
-    warn "check-environment.sh 不存在或不可执行"
+    warn "环境预检脚本缺失或不可执行" "没有完成环境依赖检查" "恢复 scripts/check-environment.sh 后运行 chmod +x scripts/check-environment.sh 并重新体检"
   fi
   rm -f "$out"
 }
@@ -149,12 +190,12 @@ if winner and expected and winner != expected:
 PY
 )"
   if [[ -n "$mismatch" ]]; then
-    warn "enabled 标志使 voice.py 实际命中 ${mismatch%%|*}，与 asr.backend=${mismatch##*|} 不一致（迁移残留？运行任一 scripts/switch-*-asr.sh 写全互斥五叶修复）"
+    warn "语音渠道 enabled 标志与配置不一致" "voice.py 实际命中 ${mismatch%%|*} 而非 ${mismatch##*|}" "运行所选渠道的 scripts/switch-*-asr.sh 写全互斥标志；参见 README 语音后端切换命令"
   else
     ok "渠道 enabled 标志与 asr.backend 一致"
   fi
   if [[ -r "$ENV_FILE" ]] && grep -qE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD|VOICE_IME_VOLC_|VOICE_IME_SILICONFLOW)' "$ENV_FILE"; then
-    warn "environment.d 仍含渠道配置行（会压过 config.json；重跑 ./install.sh 可迁移到 config.json）"
+    warn "environment.d 仍含渠道配置行" "旧环境行会压过 config.json 中的语音选择" "运行 ./install.sh 迁移旧配置后复查"
   fi
 }
 
@@ -167,7 +208,12 @@ check_ibus_registration() {
     return
   fi
   if grep -q "<exec>$ROOT_DIR/run-engine.sh" "$COMPONENT_XML"; then
-    ok "组件 exec 指向本仓库"
+    if [[ -f "$ROOT_DIR/run-engine.sh" ]]; then
+      ok "组件 exec 指向本仓库"
+    else
+      fail "组件 exec 指向不存在的路径：$ROOT_DIR/run-engine.sh"
+      FAILED_ITEMS+=(component-xml)
+    fi
   else
     fail "组件 exec 未指向本仓库（指向了旧副本？）"
     FAILED_ITEMS+=(component-xml)
@@ -187,12 +233,44 @@ check_ibus_registration() {
     if pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus" >/dev/null 2>&1; then
       ok "引擎进程运行自本仓库"
     else
-      warn "引擎在运行，但不是本仓库的实例（重启后生效：./scripts/ibus-restart.sh）"
+      warn "引擎运行自其他仓库副本" "当前会话可能未使用本次安装的代码" "运行 ./scripts/ibus-restart.sh 后复查"
     fi
     check_stale_engine_env
   else
-    warn "引擎进程未运行（可能未启用输入法；重启 IBus 后复查）"
+    if check_inactive_engine_paths; then
+      warn "引擎进程未运行" "懒加载设计：切换输入法后首次按键才拉起，尚不能据此判定故障" "按 Super+Space 切到「自定义语音输入法」并输入 nihao+Space 试一次；成功可忽略，否则运行 ./scripts/ibus-restart.sh 后复查"
+    fi
   fi
+}
+
+check_inactive_engine_paths() {
+  # 无进程时没有 /proc 环境可查；读取与 launcher 相同的有效配置。
+  # user/staging/log 目录允许首次运行创建，LLM 配置可选，不能误报 FAIL。
+  local missing key path dead=0
+  missing="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" - <<'PY_PATHS' 2>/dev/null
+import os
+from pathlib import Path
+from ibus_voice_ime import config
+if config.env_str("VOICE_IME_KEYBOARD_BACKEND", "rime") == "rime":
+    # get() 会丢弃陈旧路径并自愈；体检须读取原始显式值，不能把坏配置隐藏掉。
+    rime = config.load_user_config().get("rime", {})
+    if not isinstance(rime, dict):
+        rime = {}
+    for leaf, env in (("library", "VOICE_IME_RIME_LIBRARY"),
+                      ("shared_data_dir", "VOICE_IME_RIME_SHARED_DATA_DIR")):
+        value = os.environ.get(env, rime.get(leaf))
+        if isinstance(value, str) and value.strip():
+            path = Path(value).expanduser()
+            if not path.exists():
+                print(f"rime.{leaf}\t{path}")
+PY_PATHS
+)"
+  while IFS=$'\t' read -r key path; do
+    [[ -n "$key" ]] || continue
+    fail "引擎未运行且 config 的 $key 指向不存在的路径：$path（修正配置后运行 ./install.sh）"
+    dead=$((dead + 1))
+  done <<< "$missing"
+  [[ $dead -eq 0 ]]
 }
 
 check_stale_engine_env() {
@@ -254,7 +332,7 @@ check_rime_assets() {
     return
   fi
   if [[ ! -f "$ROOT_DIR/vendor/rime/lib/rime-plugins/librime-lua.so" ]]; then
-    warn "librime-lua 插件缺失（rime-ice 的 lua 扩展不可用；setup-rime-ice.sh 可自动补齐）"
+    warn "librime-lua 插件缺失" "rime-ice 的 Lua 扩展不可用" "运行 ./scripts/setup-rime-ice.sh 自动补齐；不用 Lua 扩展可忽略"
   fi
 
   if rime_ice_sources_present; then
@@ -264,14 +342,14 @@ check_rime_assets() {
     fail "  引擎将回退 luna_pinyin_simp 或出零候选。修复：./init.sh 或 ./scripts/setup-rime-ice.sh"
     FAILED_ITEMS+=(rime-ice-deploy)
   else
-    warn "rime-ice 方案文件不存在（引擎将使用内置 luna 方案，可正常打字但词库较小）"
+    warn "rime-ice 方案文件不存在" "键盘使用内置 luna，可正常打字但词库较小" "运行 ./scripts/setup-rime-ice.sh；接受 luna 可忽略"
   fi
 
   if rime_ice_sources_present; then
     if rime_ice_build_present; then
       ok "rime-ice 编译产物（table.bin）就绪"
     else
-      warn "词库源在但编译产物缺失（首次按键前会触发编译，约 1-3 分钟）"
+      warn "词库源在但编译产物缺失" "首次按键会触发词库编译，约等待 1-3 分钟" "可切换输入法后按键等待；或先运行 ./scripts/setup-rime-ice.sh 编译，接受首次等待可忽略"
       FAILED_ITEMS+=(rime-ice-build)
     fi
   fi
@@ -354,7 +432,6 @@ check_asr_backend() {
           if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
             printf '%s\n' "$preflight_out"
             ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
-            warn "此体检未执行模型推理；完整验收：./scripts/setup-qwen-asr.sh --verify-only"
           else
             printf '%s\n' "$preflight_out"
             fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
@@ -377,6 +454,9 @@ check_asr_backend() {
         fail "模型配置/权重分片不完整"
         have_model=0
       fi
+      if [[ $have_venv -eq 1 && $have_model -eq 1 ]]; then
+        warn "Qwen 模型目录存在但不能证明推理可用" "分层验收设计：体检检查运行时与分片，不跑模型推理" "本机最近验收过可用 ./scripts/setup-qwen-asr.sh --verify-only 复验；否则运行 ./scripts/setup-qwen-asr.sh 完整安装/验收"
+      fi
       GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
       if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
         eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
@@ -384,10 +464,10 @@ check_asr_backend() {
       case "$GPU_STATE" in
         ok) ok "NVIDIA GPU 可用（${GPU_BRIEF:-型号未知}）" ;;
         partial)
-          warn "检测到 NVIDIA 显卡但 CUDA 驱动不可用：${GPU_REASON:-未知}"
+          warn "NVIDIA 显卡 CUDA 驱动不可用" "本地 GPU 语音后端不可用：${GPU_REASON:-未知}" "${GPU_ACTION:-修复 NVIDIA 驱动后运行 nvidia-smi}；只用键盘/云端可忽略"
           [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
           ;;
-        *) warn "无 NVIDIA GPU：本地 Qwen 后端无法运行（切换云端：scripts/switch-mimo-cloud-asr.sh / switch-volc-bigmodel-asr.sh）" ;;
+        *) warn "无 NVIDIA GPU" "本地 Qwen 后端无法运行" "自备 API Key 后运行 ./scripts/switch-mimo-cloud-asr.sh cn；只用键盘可忽略" ;;
       esac
       if [[ $have_venv -eq 0 || $have_model -eq 0 ]]; then
         FAILED_ITEMS+=(qwen-setup)
@@ -402,7 +482,7 @@ check_asr_backend() {
   esac
 
   if [[ ! -f "$ROOT_DIR/vendor/models/rnnoise/bd.rnnn" ]]; then
-    warn "RNNoise 模型缺失（降噪自动降级 notch 档；补齐：./scripts/fetch-rnnoise-model.sh）"
+    warn "RNNoise 模型缺失" "录音降噪自动降级 notch 档，语音仍可用" "运行 ./scripts/fetch-rnnoise-model.sh；接受降级可忽略"
     FAILED_ITEMS+=(rnnoise-model)
   else
     ok "RNNoise 降噪模型就绪"
@@ -419,7 +499,7 @@ check_llm_cloud_config() {
       # 后者多为 environment.d 写入了自定义路径后仓库迁移/文件被删，
       # 引擎侧 run-engine.sh 自愈会静默回落 XDG 默认值（LLM 关闭），
       # 只有这里能提示用户。
-      warn "环境显式设置了 VOICE_IME_LLM_CONFIG，但文件不存在：$cfg（LLM 润色已关闭；重跑 ./scripts/setup-llm-cloud.sh 或清除该环境变量）"
+      warn "显式 LLM 配置文件不存在：$cfg" "LLM 润色已关闭，规则清理仍可用" "运行 ./scripts/setup-llm-cloud.sh 或清除 VOICE_IME_LLM_CONFIG；不用润色可忽略"
     else
       ok "未配置（默认关闭，走规则清理）。启用：./scripts/setup-llm-cloud.sh"
     fi
@@ -428,7 +508,7 @@ check_llm_cloud_config() {
   local perms
   perms="$(stat -c %a "$cfg" 2>/dev/null || echo '?')"
   if [[ "$perms" != "600" ]]; then
-    warn "配置文件权限为 $perms（建议 chmod 600，内含 API Key）：$cfg"
+    warn "LLM 配置文件权限为 $perms：$cfg" "内含 API Key，其他本机用户可能读取" "运行 chmod 600 \"$cfg\" 限制权限"
   fi
   # 只做本地 JSON 解析/字段校验，不联网、不调用模型
   local out
@@ -448,21 +528,21 @@ else:
       OK*)  ok "${out#OK }" ;;
       OFF*) ok "已配置但 enabled=false（LLM 润色关闭）" ;;
       INVALID*)
-        warn "配置文件存在但未通过校验（LLM 已自动停用，语音输入不受影响）："
+        warn "LLM 配置文件未通过校验" "LLM 已自动停用，语音输入不受影响" "按上方字段错误修复 $cfg 或运行 ./scripts/setup-llm-cloud.sh；不用润色可忽略"
         printf '%s\n' "${out#INVALID$'\n'}" | sed 's/^/         /'
-        warn "修复：编辑 $cfg 或重跑 ./scripts/setup-llm-cloud.sh"
+        printf '         修复：编辑 %s 或重跑 ./scripts/setup-llm-cloud.sh\n' "$cfg"
         ;;
-      *) warn "配置校验输出异常：$out" ;;
+      *) warn "LLM 配置校验输出异常" "不能证明润色配置可用：$out" "运行 ./scripts/setup-llm-cloud.sh 重建；不用润色可忽略" ;;
     esac
   else
-    warn "无法运行配置校验（python3/PYTHONPATH 异常）：$out"
+    warn "无法运行 LLM 配置校验" "不能证明润色配置可用：$out" "运行 python3 --version 并检查 PYTHONPATH；不用润色可忽略"
   fi
 }
 
 # ------------------------------------------------------------ 桌面集成 --
 check_desktop_integration() {
   header "桌面集成（GNOME）"
-  command -v gsettings >/dev/null 2>&1 || { warn "无 gsettings（非 GNOME？跳过本节）"; return; }
+  command -v gsettings >/dev/null 2>&1 || { warn "无 gsettings" "无法检查 GNOME 输入源与热键集成" "在 GNOME 桌面安装 gsettings 后复查；非 GNOME 手工集成时可忽略"; return; }
   local sources
   sources="$(gsettings get org.gnome.desktop.input-sources sources 2>/dev/null || echo '[]')"
   if [[ "$sources" == *"voice-custom"* ]]; then
@@ -485,7 +565,7 @@ check_desktop_integration() {
           if [[ "$cmd_file" == "$ROOT_DIR/"* ]]; then
             ours=$((ours + 1))
           else
-            warn "快捷键指向其他副本：$cmd"
+            warn "快捷键指向其他副本" "热键执行的不是本仓库脚本：$cmd" "运行 ./install.sh 重新注册热键"
             FAILED_ITEMS+=(hotkeys)
           fi
         else
@@ -499,7 +579,7 @@ check_desktop_integration() {
   [[ $ours -ge 2 ]] && ok "语音/粘贴热键已注册并指向本仓库（共 $ours 个）"
   [[ $dangling -gt 0 ]] && fail "共 $dangling 个快捷键断链"
   if [[ $ours -eq 0 && $dangling -eq 0 ]]; then
-    warn "未检测到指向本仓库的语音/粘贴热键（未运行 ./install.sh？）"
+    warn "未检测到本仓库语音/粘贴热键" "全局快捷键兜底可能不可用" "运行 ./install.sh 注册热键；仅用引擎内热键可忽略"
     FAILED_ITEMS+=(hotkeys)
   fi
 }
@@ -523,7 +603,7 @@ check_exec_bits() {
     local tracked644
     tracked644="$(git -C "$ROOT_DIR" ls-files -s | awk '$1 == "100644" && $4 ~ /\.sh$/ {print $4}')"
     if [[ -n "$tracked644" ]]; then
-      warn "git 索引中以下 .sh 以 100644 跟踪（clone 后无执行位，建议提交 mode 修复）："
+      warn "git 索引中的 shell 脚本缺少可执行位" "新 clone 可能无法直接执行下列脚本" "维护者应运行 git update-index --chmod=+x <脚本路径> 后提交；当前本机已可执行时可忽略"
       printf '         %s\n' $tracked644
     fi
   fi
@@ -581,7 +661,7 @@ do_fix() {
             fixed "默认 Qwen 环境准备完成；实际运行时与模型状态以下方复查为准（--force 无 GPU 时未验收推理）"
             restarted=1
           else
-            warn "默认 venv 已准备，但实际解释器仍被配置覆盖：$actual_python；未改此覆盖，不能声称当前 sidecar 已修复"
+            warn "Qwen 实际解释器仍被配置覆盖" "默认 venv 已准备，但当前 sidecar 仍使用 $actual_python；未改此覆盖，不能声称当前 sidecar 已修复" "检查 asr.qwen3.python / VOICE_IME_QWEN_ASR_PYTHON；需要迁移时运行 ./scripts/switch-qwen-asr.sh"
             echo "         检查 environment.d / VOICE_IME_QWEN_ASR_PYTHON / config.json 的 asr.qwen3.python；需要迁移激活时手动运行 ./scripts/switch-qwen-asr.sh"
           fi
         else
@@ -626,6 +706,7 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
   do_fix
   printf '\n== 修复后复查 ==\n'
   FAILS=$FIX_FAILURES; WARNINGS=0; FAILED_ITEMS=()
+  WARN_TITLES=(); WARN_IMPACTS=(); WARN_GUIDANCE=()
   check_env_dependencies
   check_unified_config
   check_ibus_registration
@@ -637,12 +718,17 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
 fi
 
 printf '\n== 汇总 ==\n'
+for ((i=0; i<${#WARN_TITLES[@]}; i++)); do
+  printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[i]}" "${WARN_IMPACTS[i]}" "${WARN_GUIDANCE[i]}"
+done
 printf 'FAIL: %s  WARN: %s' "$FAILS" "$WARNINGS"
 [[ "$MODE" == "fix" ]] && printf '  FIXED: %s' "$FIXED"
 printf '\n'
 if [[ $FAILS -gt 0 ]]; then
   echo "仍有问题未解决；按上方各 FAIL 行的提示处理，或提 issue 附本输出。"
+  echo "EXIT: 1"
   exit 1
 fi
 echo "检查通过（WARN 为可选/降级提示）。日志：~/.local/share/ibus-voice-ime/*.log"
+echo "EXIT: 0"
 exit 0

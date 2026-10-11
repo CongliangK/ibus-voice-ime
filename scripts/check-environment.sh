@@ -25,9 +25,14 @@ done
 
 FAILURES=0
 WARNINGS=0
+WARN_TITLES=() WARN_IMPACTS=() WARN_GUIDANCE=()
 
 ok()   { printf '  [OK]   %s\n' "$1"; }
-warn() { printf '  [WARN] %s\n' "$1"; WARNINGS=$((WARNINGS + 1)); }
+warn() {
+  WARN_TITLES+=("${1//$'\n'/ }"); WARN_IMPACTS+=("${2//$'\n'/ }"); WARN_GUIDANCE+=("${3//$'\n'/ }")
+  WARNINGS=${#WARN_TITLES[@]}
+  printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[WARNINGS-1]}" "${WARN_IMPACTS[WARNINGS-1]}" "${WARN_GUIDANCE[WARNINGS-1]}"
+}
 fail() { printf '  [FAIL] %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
 header() { printf '\n== %s ==\n' "$1"; }
 
@@ -38,7 +43,7 @@ DISTRO="${PRETTY_NAME:-未知}"
 echo "  系统：$DISTRO（$(uname -m)）"
 case "${ID:-}" in
   fedora) ok "Fedora：开发者日常验证的发行版" ;;
-  *) warn "非 Fedora 发行版未经验证。本项目仅在 Fedora 44 + GNOME 上测试过（详见 README「已测试环境」）" ;;
+  *) warn "非 Fedora 发行版未经验证" "安装与运行兼容性未在此发行版验收" "若本机已验证可忽略；否则按 README「已测试环境」核对依赖后试用" ;;
 esac
 
 if [[ -n "${XDG_CURRENT_DESKTOP:-}" || -n "${DESKTOP_SESSION:-}" ]]; then
@@ -47,10 +52,10 @@ if [[ -n "${XDG_CURRENT_DESKTOP:-}" || -n "${DESKTOP_SESSION:-}" ]]; then
   if [[ "${DESKTOP,,}" == *gnome* ]]; then
     ok "GNOME：安装脚本的热键/输入源集成按 GNOME 设计"
   else
-    warn "非 GNOME 桌面未经验证：install.sh 的 gsettings 输入源注册与全局热键脚本不适用，需要手工配置 IBus 组件与热键"
+    warn "非 GNOME 桌面未经验证" "GNOME 输入源/全局热键集成可能不适用" "按 README「非 GNOME 桌面」手工配置 IBus 与桌面热键；已配置可忽略"
   fi
 else
-  warn "未检测到桌面会话（纯命令行环境无法使用本输入法）"
+  warn "未检测到桌面会话" "纯命令行环境不能使用桌面输入法" "请在已登录的桌面终端重跑 ./scripts/check-environment.sh；仅准备资产时可忽略"
 fi
 
 # ---------------------------------------------------------------- 必需组件
@@ -94,10 +99,10 @@ fi
 # 归因会变成误导性的“网络问题”，这里提前点名。
 command -v curl >/dev/null 2>&1 \
   && ok "curl 已安装：词库/降噪模型下载" \
-  || warn "curl 未安装：init.sh 下载 rime-ice 词库与 RNNoise 模型会失败。Fedora: sudo dnf install curl；Debian/Ubuntu: sudo apt install curl"
+  || warn "curl 未安装" "词库和 RNNoise 模型下载会失败，已就绪资产不受影响" "Fedora: sudo dnf install curl；Debian/Ubuntu: sudo apt install curl；不下载可忽略"
 command -v git >/dev/null 2>&1 \
   && ok "git 已安装：rime-ice 词库克隆" \
-  || warn "git 未安装：init.sh 部署 rime-ice 词库会失败。Fedora: sudo dnf install git；Debian/Ubuntu: sudo apt install git"
+  || warn "git 未安装" "rime-ice 词库克隆会失败" "Fedora: sudo dnf install git；Debian/Ubuntu: sudo apt install git；不用雾凇可忽略"
 
 # 内置 librime 能否在本机加载（glibc 版本 / CPU 架构不匹配会在这里暴露）。
 if [[ -f "$RUNTIME/lib/librime.so.1" ]]; then
@@ -122,7 +127,7 @@ PY
     echo "           VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data"
   fi
 else
-  warn "vendor/rime/lib/librime.so.1 不存在（可能未完整 clone）；可用 scripts/vendor-rime-runtime.sh 重新生成"
+  warn "内置 librime 运行时缺失" "键盘需要可加载的系统 librime 作为回退" "运行 ./scripts/vendor-rime-runtime.sh；已配置系统 librime 时可忽略"
 fi
 
 if [[ "$PY_OK" == "1" ]]; then
@@ -148,19 +153,19 @@ header "可选组件（缺失则相应功能降级）"
 
 command -v pw-record >/dev/null 2>&1 \
   && ok "pw-record（PipeWire）已安装：录音兜底链路" \
-  || warn "pw-record 未安装：arecord 失败时无兜底录音链路"
+  || warn "pw-record 未安装" "arecord 失败时没有 PipeWire 兜底录音" "Fedora: sudo dnf install pipewire-utils；Debian/Ubuntu: sudo apt install pipewire-bin；arecord 正常可忽略"
 command -v ffmpeg >/dev/null 2>&1 \
   && ok "ffmpeg 已安装（兜底录音转换/RNNoise 降噪）" \
-  || warn "ffmpeg 未安装：兜底录音转换与 rnnoise 降噪档不可用（自动降级 notch）"
+  || warn "ffmpeg 未安装" "兜底录音转换不可用，RNNoise 降噪降级 notch" "Fedora（需相应软件源）: sudo dnf install ffmpeg；Debian/Ubuntu: sudo apt install ffmpeg；接受降级可忽略"
 command -v sox >/dev/null 2>&1 \
   && ok "sox 已安装：音频预处理（高通/陷波/归一化）" \
-  || warn "sox 未安装：录音预处理全部跳过（识别仍可用）"
+  || warn "sox 未安装" "录音预处理全部跳过，识别仍可用" "Fedora: sudo dnf install sox；Debian/Ubuntu: sudo apt install sox；接受原始录音可忽略"
 command -v gsettings >/dev/null 2>&1 \
   && ok "gsettings 已安装：GNOME 输入源/热键集成" \
-  || warn "gsettings 未安装：install.sh 的 GNOME 集成步骤会跳过"
+  || warn "gsettings 未安装" "GNOME 输入源/热键集成将跳过" "Fedora: sudo dnf install glib2；Debian/Ubuntu: sudo apt install libglib2.0-bin；手工集成时可忽略"
 [[ -f /usr/share/opencc/t2s.json ]] \
   && ok "OpenCC 繁简转换数据可用" \
-  || warn "/usr/share/opencc/t2s.json 不存在：繁→简兜底转换不可用（Fedora: sudo dnf install opencc；Debian/Ubuntu: sudo apt install opencc）"
+  || warn "OpenCC 繁简转换数据缺失" "语音繁→简兜底转换不可用" "Fedora: sudo dnf install opencc；Debian/Ubuntu: sudo apt install opencc；不需要转换可忽略"
 
 # ---------------------------------------------------------------- 录音设备
 header "录音设备"
@@ -169,7 +174,7 @@ if arecord -l >/dev/null 2>&1; then
   if [[ "${CARD_COUNT:-0}" -gt 0 ]]; then
     ok "检测到 ${CARD_COUNT} 块 ALSA 采集卡"
   else
-    warn "未检测到 ALSA 硬件采集卡（USB/蓝牙设备可能未连接）"
+    warn "未检测到 ALSA 硬件采集卡" "当前麦克风输入未经验证，USB/蓝牙设备可能未连接" "连接麦克风后运行 arecord -l；只用键盘可忽略"
   fi
 fi
 DEVICE="${VOICE_IME_ARECORD_DEVICE:-}"
@@ -178,7 +183,7 @@ if [[ "$DEVICE" == hw:* || "$DEVICE" == plughw:* ]]; then
   if arecord -l 2>/dev/null | grep -Eq "card [0-9]+: ${TOKEN}(\[|$)"; then
     ok "直采设备 $DEVICE 存在"
   else
-    warn "直采设备 $DEVICE 在本机不存在：引擎会自动回退系统默认录音源；如需直采请用 'arecord -l' 里的卡名改写 VOICE_IME_ARECORD_DEVICE"
+    warn "直采设备 $DEVICE 在本机不存在" "录音自动回退系统默认源" "运行 arecord -l 并按卡名修改 VOICE_IME_ARECORD_DEVICE；默认源可用时可忽略"
   fi
 else
   echo "  录音源：${DEVICE:-default}（系统默认源）"
@@ -197,21 +202,21 @@ if [[ "$CHECK_GPU" == "1" ]]; then
       if "$PY_BIN" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$ROOT_DIR/.venv-qwen-asr/bin/python" --stage static; then
         ok "Qwen 独立环境静态编译条件通过"
       else
-        warn "Qwen 独立环境静态检查失败：语音未就绪；运行 init.sh 或 setup-qwen-asr.sh 修复，键盘可独立使用"
+        warn "Qwen 独立环境静态检查失败" "本地语音未就绪，键盘可独立使用" "运行 ./scripts/setup-qwen-asr.sh 修复并完整验收"
       fi
     else
-      warn "Qwen 独立环境未创建；init.sh 会准备并验收，install.sh 仅注册"
+      warn "Qwen 独立环境未创建" "本地语音未就绪，install.sh 仅注册不会准备资产" "运行 ./scripts/setup-qwen-asr.sh 准备并完整验收；不用本地语音可忽略"
     fi
     if [[ -d "$ROOT_DIR/vendor/models/qwen3-asr" ]]; then
-      warn "Qwen 模型目录存在，但尚不能证明权重完整或推理可用（由 init/doctor 分级验收）"
+      warn "Qwen 模型目录存在但不能证明推理可用" "这是分层验收设计：预检/体检不跑模型推理，目录存在不等于语音就绪" "本机最近验收过可用 ./scripts/setup-qwen-asr.sh --verify-only 复验；否则运行 ./scripts/setup-qwen-asr.sh 完整安装/验收"
     else
-      warn "Qwen3-ASR 模型未下载：运行 ./scripts/setup-qwen-asr.sh（约需数 GB 磁盘 + 对应显存）"
+      warn "Qwen3-ASR 模型未下载" "本地语音不可用，需数 GB 磁盘与对应显存" "运行 ./scripts/setup-qwen-asr.sh；不用本地语音可忽略"
     fi
   elif [[ "$GPU_STATE" == "partial" ]]; then
-    warn "检测到 NVIDIA 显卡，但 CUDA 驱动不可用：${GPU_REASON:-未知}"
+    warn "NVIDIA 显卡 CUDA 驱动不可用" "本地 GPU 语音后端不可用：${GPU_REASON:-未知}" "${GPU_ACTION:-修复 NVIDIA 驱动后运行 nvidia-smi}；只用键盘/云端可忽略"
     [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
   else
-    warn "未检测到 NVIDIA GPU：本地 Qwen3-ASR / faster-whisper GPU 后端不可用"
+    warn "未检测到 NVIDIA GPU" "本地 Qwen3-ASR / faster-whisper GPU 后端不可用" "自备 API Key 后运行 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端；只用键盘可忽略"
     echo "         无 GPU 的替代方案（改用云端识别，零显存）："
     echo "         VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh   # 硅基流动（大陆直连；SenseVoiceSmall 官方标注免费，Qwen3-ASR 按秒计费）"
     echo "         ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo 云端（需 API Key）"
@@ -221,10 +226,16 @@ fi
 
 # ---------------------------------------------------------------- 汇总
 printf '\n== 汇总 ==\n'
+for ((i=0; i<${#WARN_TITLES[@]}; i++)); do
+  printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[i]}" "${WARN_IMPACTS[i]}" "${WARN_GUIDANCE[i]}"
+done
+# 保留原计数行格式：doctor 与外层安装入口依赖此约定。
 echo "  FAIL: $FAILURES  WARN: $WARNINGS"
 if [[ "$FAILURES" -gt 0 ]]; then
   echo "  存在必需组件缺失，请先解决 FAIL 项。"
+  echo "  EXIT: 1"
   exit 1
 fi
-echo "  环境检查通过（WARN 项为可选/降级提示，不影响核心功能）。"
+echo "  环境检查通过（WARN 项为可选/降级提示，不改变退出码；实际影响见明细）。"
+echo "  EXIT: 0"
 exit 0

@@ -29,6 +29,7 @@ Linux 上的 IBus 输入法引擎：键盘输入复用 Rime（librime + 雾凇�
 | glibc ≥ 2.38 | 内置 librime 需要 | 仓库内置的 librime 二进制在 Fedora 39+/Ubuntu 24.04+ 可直接用；更老的系统上引擎会自动回退系统 librime（安装 librime 包即可），见「故障排查」 |
 
 新机器上先跑环境自检（FAIL 项需解决，WARN 项为可选/降级提示）：
+预检与 [doctor](<scripts/doctor.sh>) 的最终汇总逐条列出 WARN 的标题、实际影响和处理命令/可忽略条件；doctor 总 WARN 包含标注「[环境预检]」的预检项，只有 FAIL 会使体检非零退出。
 
 ```bash
 ./scripts/check-environment.sh            # 全量
@@ -81,6 +82,7 @@ cd ibus-voice-ime
 | `--cloud siliconflow` / `--cloud mimo` | 显式选择云端，沿用既有切换脚本和密钥指引 |
 | `--no-rime-ice` / `--no-zhwiki` / `--no-moegirl` / `--no-denoise` | 显式跳过对应资产 |
 | `--proxy URL` | 向资产初始化和验收传递代理 |
+| `--strict-assets` | 透传给 [init.sh](<init.sh>)：请求资产出现降级也返回 exit 1，供 CI 严格验收 |
 | `--verify-only` | 不安装，只做语音验收和体检 |
 | `--skip-verify` / `--skip-doctor` | 跳过安装后的验收或体检 |
 | `--dry-run` | 打印实际选择（方案/模型分档/热键变化）与计划，不应用配置、不安装、不下载 |
@@ -103,6 +105,8 @@ cd ibus-voice-ime
 - **`setup.sh`（一键入口）**：新机安装只需这一个命令——编排 init.sh + 语音验收 + doctor 体检，支持 `--dry-run` 预览与 `--keyboard-only` / `--cloud` 等选项。
 - **`init.sh`（一次性初始化）**：下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
 - **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。注册成功不代表语音已通过推理验收。
+
+初始化采用 `ready / degraded / blocked` 三态：rime-ice 失败时键盘回退 luna，RNNoise 失败时降噪回退 notch，两者以「⚠ 降级项」列明影响与精确续装命令，默认仍 exit 0；所选本地语音安装/验收失败或 IBus 注册失败为 blocked（exit 1）。[init.sh](<init.sh>) 与 [setup.sh](<setup.sh>) 均支持 `--strict-assets`，请求资产降级也 exit 1；无 GPU/驱动 partial 的语音跳过仍不算失败。失败出口会复述子步骤续装命令（保留本次代理/词库选项），子步骤幂等，不必重跑向导或重复下载已就绪资产。
 
 ### 本地语音的安装验收
 

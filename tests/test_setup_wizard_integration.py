@@ -418,7 +418,7 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
         result = self.run_setup('--yes', '--cloud', 'mimo', STUB_INIT_RC='7')
         self.assertEqual(result.returncode, 7)
         self.assertEqual(self.names(), ['init.sh', 'doctor.sh'])
-        self.assertIn('安装未完全成功', result.stdout)
+        self.assertIn('安装失败：init.sh 未返回步骤汇总', result.stdout)
 
 
 class QwenSizeSelectionTest(unittest.TestCase):

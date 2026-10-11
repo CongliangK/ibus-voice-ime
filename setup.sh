@@ -11,7 +11,7 @@
 #   ./setup.sh --verify-only            # 不安装，只做语音验收 + 体检
 #   ./setup.sh --dry-run                # 只打印实际选择与执行计划，不应用配置
 # 资产选项：--no-rime-ice --no-zhwiki --no-moegirl --no-denoise
-# 其他：--no-voice、--proxy URL、--skip-verify、--skip-doctor、--yes / -y、-h / --help
+# 其他：--strict-assets（CI：请求资产降级也失败）、--no-voice、--proxy URL、--skip-verify、--skip-doctor、--yes / -y、-h / --help
 # 显式方案/资产选项优先，正常安装时跳过整个向导，维持既有脚本行为。
 # 非终端或 --yes 自动使用 --defaults；所有安装子步骤幂等，可断点续装。
 set -euo pipefail
@@ -21,6 +21,7 @@ CLOUD=""
 VERIFY_ONLY=0 DRY_RUN=0 ASSUME_YES=0 SKIP_VERIFY=0 SKIP_DOCTOR=0
 RECONFIGURE=0 DEFAULTS=0 EXPLICIT_SELECTION=0 AUTO_DEFAULTS=0
 PROXY_ARGS=() INIT_ARGS=() WIZARD_ARGS=()
+INIT_LOG=""
 WIZARD_RESULT="" WIZARD_OWNED_RESULT="" HOTKEYS_CHANGED="未改动（跳过向导）" VOICE_CHANGED=0
 LLM_SUMMARY="未改动（跳过向导）"
 VOICE_PLAN=local-qwen
@@ -50,6 +51,7 @@ while [[ $# -gt 0 ]]; do
     --verify-only) VERIFY_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     -y|--yes) ASSUME_YES=1 ;;
+    --strict-assets) INIT_ARGS+=(--strict-assets) ;;
     --skip-verify) SKIP_VERIFY=1 ;;
     --skip-doctor) SKIP_DOCTOR=1 ;;
     --proxy)
@@ -65,14 +67,17 @@ done
 PYTHON="${VOICE_IME_WIZARD_PYTHON:-python3}"
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 cleanup_wizard_result() {
-  [[ -n "$WIZARD_OWNED_RESULT" ]] || return 0
-  "$PYTHON" - "$WIZARD_OWNED_RESULT" <<'PY_CLEAN'
+  "$PYTHON" - "$WIZARD_OWNED_RESULT" "$INIT_LOG" <<'PY_CLEAN'
 import sys, tempfile
 from pathlib import Path
-p = Path(sys.argv[1])
 # 删除前核对绝对目录与前缀；用户显式指定的结果从不交给此 trap。
-if p.parent.resolve() == Path(tempfile.gettempdir()).resolve() and p.name.startswith('ibus-voice-ime-wizard-') and p.suffix == '.json' and not p.is_symlink():
-    p.unlink(missing_ok=True)
+for value, prefix, suffix in ((sys.argv[1], 'ibus-voice-ime-wizard-', '.json'),
+                              (sys.argv[2], 'ibus-voice-ime-init-', '.log')):
+    if not value:
+        continue
+    p = Path(value)
+    if p.parent.resolve() == Path(tempfile.gettempdir()).resolve() and p.name.startswith(prefix) and p.suffix == suffix and not p.is_symlink():
+        p.unlink(missing_ok=True)
 PY_CLEAN
 }
 trap cleanup_wizard_result EXIT
@@ -284,7 +289,15 @@ if [[ "$VERIFY_ONLY" -eq 1 ]]; then
 fi
 step "环境预检 + 资产初始化 + 输入法注册（init.sh）"
 INIT_RC=0
-"$ROOT_DIR/init.sh" "${INIT_ARGS[@]}" || INIT_RC=$?
+INIT_LOG="$("$PYTHON" -c 'import os,tempfile; fd,p=tempfile.mkstemp(prefix="ibus-voice-ime-init-",suffix=".log"); os.close(fd); print(p)')"
+# tee 保持实时输出；固定前缀记录仅作为数据复述，绝不执行日志里的命令。
+if "$ROOT_DIR/init.sh" "${INIT_ARGS[@]}" 2>&1 | tee "$INIT_LOG"; then
+  INIT_RC=0
+else
+  INIT_PIPE_STATUS=("${PIPESTATUS[@]}")
+  INIT_RC="${INIT_PIPE_STATUS[0]}"
+  [[ "$INIT_RC" -ne 0 ]] || INIT_RC="${INIT_PIPE_STATUS[1]}"
+fi
 if [[ "$INIT_RC" -ne 0 ]]; then
   echo "⚠ init.sh 存在失败步骤（exit=$INIT_RC）；跳过语音验收，先跑体检诊断。" >&2
   if [[ "$SKIP_DOCTOR" -eq 1 ]]; then
@@ -293,7 +306,20 @@ if [[ "$INIT_RC" -ne 0 ]]; then
     step "整体体检（诊断）"
     "$ROOT_DIR/scripts/doctor.sh" || true
   fi
-  echo "安装未完全成功：请按上方 ⚠ 提示修复后重跑 ./setup.sh（子步骤幂等，会续装）。"
+  INIT_PROBLEMS=0
+  while IFS=$'\t' read -r marker status title impact command; do
+    [[ "$marker" == VOICE_IME_INIT_RESULT ]] || continue
+    case "$status" in
+      blocked) printf '安装失败：%s —— %s\n  续装命令：%s\n' "$title" "$impact" "$command" ;;
+      degraded) printf '⚠ 降级项（严格资产模式时视为失败）：%s —— %s\n  续装命令：%s\n' "$title" "$impact" "$command" ;;
+      *) continue ;;
+    esac
+    INIT_PROBLEMS=$((INIT_PROBLEMS + 1))
+  done < "$INIT_LOG"
+  if [[ "$INIT_PROBLEMS" -eq 0 ]]; then
+    printf '安装失败：init.sh 未返回步骤汇总（exit=%s）；请结合上方错误与体检定位中断阶段。\n' "$INIT_RC"
+  fi
+  echo '子步骤幂等，续装不重跑向导/不重复下载已就绪资产。'
   exit "$INIT_RC"
 fi
 case "$CLOUD" in

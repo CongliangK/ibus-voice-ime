@@ -171,8 +171,9 @@ fi
 # 4. 把 zhwiki/moegirl 挂进 rime_ice 词典（仅当文件下载成功时）
 # ============================================================
 RIME_ICE_DICT="$DATA_DIR/rime_ice.dict.yaml"
+# 顶层初始化：方案文件缺失时仍可在尾部按 0 判定扩展缺失（set -u 安全）。
+ADD_ZHWIKI=0; ADD_MOEGIRL=0
 if [[ -f "$RIME_ICE_DICT" ]]; then
-  ADD_ZHWIKI=0; ADD_MOEGIRL=0
   [[ "$WITH_ZHWIKI" -eq 1 && -f "$DATA_DIR/zhwiki.dict.yaml" ]] && ADD_ZHWIKI=1
   [[ "$WITH_MOEGIRL" -eq 1 && -f "$DATA_DIR/moegirl.dict.yaml" ]] && ADD_MOEGIRL=1
   if [[ "$ADD_ZHWIKI" -eq 1 || "$ADD_MOEGIRL" -eq 1 ]]; then
@@ -200,12 +201,7 @@ with open(path, "w", encoding="utf-8") as f:
 print("    已追加：", ", ".join(a.strip() for a in adds))
 PY
   fi
-  if [[ "$WITH_ZHWIKI" -eq 1 && "$ADD_ZHWIKI" -eq 0 ]]; then
-    echo "警告：zhwiki 未下载成功，跳过挂载" >&2
-  fi
-  if [[ "$WITH_MOEGIRL" -eq 1 && "$ADD_MOEGIRL" -eq 0 ]]; then
-    echo "警告：moegirl 未下载成功，跳过挂载" >&2
-  fi
+  # 扩展词典缺失的提示统一放到脚本尾部（随专用退出码 3 一起报告）。
 fi
 
 # ============================================================
@@ -250,8 +246,24 @@ fi
 # ============================================================
 # 6. 完成提示
 # ============================================================
+# 核心词库部署成功但请求的扩展词典缺失时返回专用退出码 3：调用方
+# （init.sh / --strict-assets）据此记 degraded，而不是把 rc0 误判全就绪
+# （红队 2026-10-11 发现 strict 模式盲区）。
+PARTIAL_RC=0
+if [[ "$WITH_ZHWIKI" -eq 1 && "$ADD_ZHWIKI" -eq 0 ]]; then
+  echo "警告：zhwiki 未下载成功，本次未挂载（重跑本脚本可续装）" >&2
+  PARTIAL_RC=3
+fi
+if [[ "$WITH_MOEGIRL" -eq 1 && "$ADD_MOEGIRL" -eq 0 ]]; then
+  echo "警告：moegirl 未下载成功，本次未挂载（重跑本脚本可续装）" >&2
+  PARTIAL_RC=3
+fi
 echo
-echo "完成。雾凇拼音 + zhwiki + moegirl 已部署。"
+if [[ $PARTIAL_RC -eq 0 ]]; then
+  echo "完成。雾凇拼音 + zhwiki + moegirl 已部署。"
+else
+  echo "完成（部分扩展词典缺失，核心词库可用）。"
+fi
 echo "  方案/词库源：$DATA_DIR"
 echo "  编译产物：  $VOICE_IME_RIME_USER_DATA_DIR/build"
 echo
@@ -259,3 +271,4 @@ echo "默认方案已切换为 rime_ice。若 IBus 正在运行，重启以加�
 echo "  ibus restart"
 echo
 echo "可运行验证：./scripts/test-rime-runtime.sh"
+exit "$PARTIAL_RC"
