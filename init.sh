@@ -117,7 +117,7 @@ if [[ $WITH_VOICE -eq 1 && $DO_INSTALL -eq 1 ]]; then
   # IBus 会话；全新机器上此刻尚未注册，激活必失败（时序缺陷，2026-10 实测）。
   # 因此先注册一次（幂等），语音步骤的激活检查才有意义；结尾仍会再注册一次刷新。
   step "install.sh（预注册，供语音步骤桌面激活）"
-  "$ROOT_DIR/install.sh" || echo "⚠ 预注册失败：语音步骤的桌面激活可能失败，将计入错误。" >&2
+  VOICE_IME_INSTALL_FROM_INIT=1 "$ROOT_DIR/install.sh" || echo "⚠ 预注册失败：语音步骤的桌面激活可能失败，将计入错误。" >&2
 fi
 if [[ $WITH_VOICE -eq 1 ]]; then
   step "语音输入（本地 Qwen3-ASR 后端）"
@@ -156,7 +156,7 @@ fi
 # ------------------------------------------------------- 4) 注册激活 --
 if [[ $DO_INSTALL -eq 1 ]]; then
   step "install.sh：注册 IBus 组件 / 环境 / 热键并重启输入法"
-  "$ROOT_DIR/install.sh"
+  VOICE_IME_INSTALL_FROM_INIT=1 "$ROOT_DIR/install.sh"
 fi
 
 # ------------------------------------------------------------- 汇总 --

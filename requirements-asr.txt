@@ -1,12 +1,14 @@
 # Optional voice backend. Install inside a venv with --system-site-packages
 # so the engine can still import gi.repository.IBus from system packages.
-faster-whisper
+# 推荐范围：faster-whisper 1.x 是维护中的 API 线；放宽上限前需重验
+# CTranslate2/CUDA wheel 配对（参考 requirements-qwen-asr.txt 的版本策略）。
+faster-whisper>=1.0,<2
 # Required when HTTP(S)_PROXY/ALL_PROXY points to a SOCKS proxy; used by
 # huggingface_hub/httpx when faster-whisper downloads models.
-httpx[socks]
+httpx[socks]>=0.27,<1
 
 # NVIDIA CUDA runtime libraries for faster-whisper/CTranslate2 GPU STT.
 # These make libcublas.so.12 / libcudnn.so.9 available inside the project venv.
-nvidia-cublas-cu12
+nvidia-cublas-cu12>=12,<13
 nvidia-cudnn-cu12==9.*
-nvidia-cuda-nvrtc-cu12
+nvidia-cuda-nvrtc-cu12>=12,<13

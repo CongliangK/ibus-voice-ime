@@ -191,9 +191,14 @@ if command -v ibus >/dev/null 2>&1 || command -v ibus-daemon >/dev/null 2>&1; th
 fi
 
 echo
+if [[ -n "${VOICE_IME_INSTALL_FROM_INIT:-}" ]]; then
+  HINT_LINE="（由 init.sh 流程触发，语音安装与验收由后续步骤自动完成。）"
+else
+  HINT_LINE="首次安装请运行 ./init.sh；语音完整验收：./scripts/setup-qwen-asr.sh --verify-only。"
+fi
 cat <<EOF
 输入法注册完成（注册成功不代表本地语音已通过推理验收）。
-首次安装请运行 ./init.sh；语音完整验收：./scripts/setup-qwen-asr.sh --verify-only。
+$HINT_LINE
 切换方式：GNOME 顶栏输入法菜单，或 Super+Space，选择“自定义语音输入法”。
 键盘输入示例：nihao + Space -> 你好
 语音输入热键：Ctrl+Alt+V，默认后端为本地 Qwen3-ASR（1.7B）。
@@ -201,7 +206,8 @@ cat <<EOF
 输入法粘贴热键：Ctrl+Alt+P，读取剪贴板并显示“正在粘贴”提示后，通过语音结果同款 commit_text 路径提交文本。
 EOF
 
-if [[ ! -d "$ROOT_DIR/vendor/models/qwen3-asr" ]]; then
+# init.sh 流程内模型尚未下载属预期（下一步语音步骤会装），只在独立运行时提示。
+if [[ ! -d "$ROOT_DIR/vendor/models/qwen3-asr" && -z "${VOICE_IME_INSTALL_FROM_INIT:-}" ]]; then
   cat <<'EOF'
 ⚠ 尚未下载本地 ASR 模型（vendor/models/qwen3-asr/ 不存在）。语音输入前请二选一：
   1. 本地识别（需 NVIDIA GPU）：./scripts/setup-qwen-asr.sh

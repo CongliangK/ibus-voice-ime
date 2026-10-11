@@ -9,7 +9,20 @@
 # (verified incident 2026-10-10). Lower bound 2.6 follows the Qwen3-ASR
 # upstream recommendation and keeps older machines/Pythons installable.
 # Lift the upper bound only deliberately, then re-run the full preflight acceptance (scripts/setup-qwen-asr.sh).
+#
+# 版本策略（2026-10-11 全新安装实测确立）：
+# - 精确 pin：解析器回溯痛苦（gradio 每台新机多花数分钟试十几个版本）或
+#   推理 API 敏感的包，pin 到完整验收（CUDA/Triton + 模型推理）通过时的版本。
+# - 推荐范围：兼容面宽的包给 bounded range，避免漂移到未验证的大版本。
+# 通过那次运行的完整传递闭包快照见
+#   .venv-qwen-asr/installed-requirements.txt（setup-qwen-asr.sh 自动记录）。
 qwen-asr==0.0.6
 transformers==4.57.6
-modelscope>=1.22,<2
+modelscope>=1.40,<2
 torch>=2.6,<2.13
+gradio==6.17.3
+accelerate>=1.12,<2
+librosa>=1.0,<2
+nagisa==0.2.11
+soynlp==0.0.493
+soundfile>=0.13,<0.15
