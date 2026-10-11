@@ -63,8 +63,51 @@ VOICE_HOTKEY="${VALUES[2]}" RAW_HOTKEY="${VALUES[3]}" PASTE_HOTKEY="${VALUES[4]}
 POSTPROCESS="${VALUES[5]}"
 RIME=y ZHWIKI=y MOEGIRL=y DENOISE=y
 ANSWER=""
-ask() {
-  local label="$1" current="$2" kind="$3" reply normalized
+# setup 与向导均捕获 stdout。菜单绘制用 stderr 对应的终端，索引仍写回
+# 捕获通道；独立 tui-select.py 的公开 stdout/TTY 契约保持不变。
+tui_select() {
+  if [[ ! -f "$ROOT_DIR/scripts/tui-select.py" ]]; then
+    echo "错误：缺少 scripts/tui-select.py（仓库不完整？），交互选择不可用；可用 --defaults 或修复仓库后重试。" >&2
+    exit 1
+  fi
+  "$PYTHON" -c 'import runpy, sys
+path = sys.argv.pop(1)
+namespace = runpy.run_path(path)
+output = sys.stdout
+sys.stdout = sys.stderr
+sys.exit(namespace["main"](output))' "$ROOT_DIR/scripts/tui-select.py" "$@"
+}
+ask_choice() {
+  local title="$1" current="$2" default=0 index=0 selected
+  shift 2
+  local options=("$@") labels=() label
+  for selected in "${options[@]}"; do
+    if [[ "$selected" == "$current" ]]; then default="$index"; fi
+    case "$selected" in
+      local-qwen) label='本地 Qwen（local-qwen）' ;;
+      siliconflow) label='硅基流动云端（siliconflow）' ;;
+      mimo-cloud) label='小米 MiMo 云端（mimo-cloud）' ;;
+      volc) label='火山豆包云端（volc）' ;;
+      keyboard-only) label='仅键盘输入（keyboard-only）' ;;
+      both) label='双档（1.7B + 0.6B）' ;;
+      y) label='启用（y）' ;;
+      n) label='关闭（n）' ;;
+      *) label="$selected" ;;
+    esac
+    labels+=("$label")
+    index=$((index + 1))
+  done
+  if [[ "$DEFAULTS" -eq 1 ]]; then
+    printf '%s [当前/默认：%s]：采用默认\n' "$title" "$current" >&2
+    selected="$default"
+  else
+    selected="$(tui_select --title "$title" --default "$default" -- "${labels[@]}")"
+  fi
+  ANSWER="${options[$selected]}"
+  printf '已选：%s\n' "${labels[$selected]}" >&2
+}
+ask_hotkey() {
+  local label="$1" current="$2" reply normalized
   while true; do
     printf '%s [当前/默认：%s]：' "$label" "$current" >&2
     if [[ "$DEFAULTS" -eq 1 ]]; then
@@ -77,55 +120,84 @@ ask() {
       fi
       [[ -n "$reply" ]] || reply="$current"
     fi
-    case "$kind" in
-      plan) case "$reply" in local-qwen|siliconflow|mimo-cloud|volc|keyboard-only) ANSWER="$reply"; return ;; esac ;;
-      download) case "${reply,,}" in 1.7b|0.6b|both) ANSWER="${reply,,}"; return ;; esac ;;
-      model) case "${reply,,}" in 1.7b|0.6b) ANSWER="${reply,,}"; return ;; esac ;;
-      bool) case "${reply,,}" in y|n) ANSWER="${reply,,}"; return ;; esac ;;
-      hotkey)
-        if normalized="$("$PYTHON" "$ROOT_DIR/scripts/apply-wizard-config.py" --validate-hotkey "$reply" 2>/dev/null)"; then
-          ANSWER="$normalized"; return
-        fi ;;
-    esac
-    echo '输入不合法，请按题目给出的选项重试；热键仅支持修饰键加单字母或裸字母。' >&2
+    if normalized="$("$PYTHON" "$ROOT_DIR/scripts/apply-wizard-config.py" --validate-hotkey "$reply" 2>/dev/null)"; then
+      ANSWER="$normalized"
+      printf '已选：%s\n' "$ANSWER" >&2
+      return
+    fi
+    echo '输入不合法，请重试；热键仅支持修饰键加单字母或裸字母。' >&2
     [[ "$DEFAULTS" -ne 1 ]] || { echo '错误：现有配置不合法，请交互修正。' >&2; exit 1; }
   done
 }
 printf '== 配置向导（回车接受当前/默认值）==\n' >&2
+if [[ "$DEFAULTS" -eq 0 ]]; then
+  printf '↑↓ 移动 / 数字直选 / 回车确认 / Esc 取消\n' >&2
+fi
 if [[ -n "$VOICE_OVERRIDE" ]]; then
   VOICE_PLAN="$VOICE_OVERRIDE"
   printf '语音方案：%s（显式参数，跳过提问）\n' "$VOICE_PLAN" >&2
 else
-  ask '语音方案 local-qwen / siliconflow / mimo-cloud / volc / keyboard-only' "$VOICE_PLAN" plan
+  ask_choice '语音方案' "$VOICE_PLAN" local-qwen siliconflow mimo-cloud volc keyboard-only
   VOICE_PLAN="$ANSWER"
 fi
 if [[ "$VOICE_PLAN" == local-qwen ]]; then
   if [[ "$RECONFIGURE" -eq 0 ]]; then
-    ask '本地 Qwen 下载 1.7b / 0.6b / both' "$QWEN_DOWNLOAD" download
+    ask_choice '本地 Qwen 下载（1.7B / 0.6B / 双档）' "$QWEN_DOWNLOAD" 1.7b 0.6b both
     QWEN_DOWNLOAD="$ANSWER"
     [[ "$QWEN_DOWNLOAD" == both ]] || QWEN_MODEL="$QWEN_DOWNLOAD"
   fi
   while true; do
-    ask '默认 Qwen 模型 1.7b / 0.6b' "$QWEN_MODEL" model
+    ask_choice '默认 Qwen 模型' "$QWEN_MODEL" 1.7b 0.6b
     QWEN_MODEL="$ANSWER"
     if [[ "$RECONFIGURE" -eq 1 || "$QWEN_DOWNLOAD" == both || "$QWEN_MODEL" == "$QWEN_DOWNLOAD" ]]; then break; fi
     echo '默认模型必须在本次下载集合中，请重新选择。' >&2
     [[ "$DEFAULTS" -ne 1 ]] || exit 1
   done
 fi
-ask '语音热键（例如 Ctrl+Alt+V）' "$VOICE_HOTKEY" hotkey; VOICE_HOTKEY="$ANSWER"
-ask '原文热键（例如 Ctrl+Alt+B）' "$RAW_HOTKEY" hotkey; RAW_HOTKEY="$ANSWER"
-ask '粘贴热键（例如 Ctrl+Alt+P）' "$PASTE_HOTKEY" hotkey; PASTE_HOTKEY="$ANSWER"
+ask_hotkey '语音热键（例如 Ctrl+Alt+V）' "$VOICE_HOTKEY"; VOICE_HOTKEY="$ANSWER"
+ask_hotkey '原文热键（例如 Ctrl+Alt+B）' "$RAW_HOTKEY"; RAW_HOTKEY="$ANSWER"
+ask_hotkey '粘贴热键（例如 Ctrl+Alt+P）' "$PASTE_HOTKEY"; PASTE_HOTKEY="$ANSWER"
 if [[ "$POSTPROCESS" == null ]]; then
   echo '未配置云端 LLM（llm.json 不存在），可稍后运行 scripts/setup-llm-cloud.sh' >&2
 else
-  ask '启用 LLM 后处理？y/n' "$POSTPROCESS" bool; POSTPROCESS="$ANSWER"
+  ask_choice '启用 LLM 后处理？y/n' "$POSTPROCESS" y n; POSTPROCESS="$ANSWER"
 fi
 if [[ "$RECONFIGURE" -eq 0 ]]; then
-  if [[ -n "$RIME_OVERRIDE" ]]; then RIME="$RIME_OVERRIDE"; else ask '安装 rime-ice 词库？y/n' "$RIME" bool; RIME="$ANSWER"; fi
-  if [[ -n "$ZHWIKI_OVERRIDE" ]]; then ZHWIKI="$ZHWIKI_OVERRIDE"; else ask '安装 zhwiki 扩展词典？y/n' "$ZHWIKI" bool; ZHWIKI="$ANSWER"; fi
-  if [[ -n "$MOEGIRL_OVERRIDE" ]]; then MOEGIRL="$MOEGIRL_OVERRIDE"; else ask '安装 moegirl 扩展词典？y/n' "$MOEGIRL" bool; MOEGIRL="$ANSWER"; fi
-  if [[ -n "$DENOISE_OVERRIDE" ]]; then DENOISE="$DENOISE_OVERRIDE"; else ask '安装 RNNoise 降噪资产？y/n' "$DENOISE" bool; DENOISE="$ANSWER"; fi
+  ASSET_KEYS=() ASSET_LABELS=() ASSET_CHECKED=()
+  for asset in RIME ZHWIKI MOEGIRL DENOISE; do
+    override="${asset}_OVERRIDE"
+    if [[ -n "${!override}" ]]; then
+      printf -v "$asset" '%s' "${!override}"
+      continue
+    fi
+    case "$asset" in
+      RIME) label='安装 rime-ice 词库' ;;
+      ZHWIKI) label='安装 zhwiki 扩展词典' ;;
+      MOEGIRL) label='安装 moegirl 扩展词典' ;;
+      DENOISE) label='安装 RNNoise 降噪资产' ;;
+    esac
+    [[ "${!asset}" != y ]] || ASSET_CHECKED+=("${#ASSET_KEYS[@]}")
+    ASSET_KEYS+=("$asset"); ASSET_LABELS+=("$label")
+  done
+  if [[ ${#ASSET_KEYS[@]} -gt 0 ]]; then
+    if [[ "$DEFAULTS" -eq 1 ]]; then
+      selected="${ASSET_CHECKED[*]}"
+      printf '词库与降噪资产：采用默认\n' >&2
+    else
+      selected="$(tui_select --multi --title '词库与降噪资产（空格/数字切换勾选，回车确认）' \
+        --checked "${ASSET_CHECKED[*]}" -- "${ASSET_LABELS[@]}")"
+    fi
+    ASSET_CONFIRM=()
+    for ((index=0; index<${#ASSET_KEYS[@]}; index++)); do
+      asset="${ASSET_KEYS[$index]}"
+      printf -v "$asset" '%s' n
+      if [[ " $selected " == *" $index "* ]]; then
+        printf -v "$asset" '%s' y
+        ASSET_CONFIRM+=("${ASSET_LABELS[$index]}")
+      fi
+    done
+    printf '已选：%s\n' "${ASSET_CONFIRM[*]:-不安装任何可选资产}" >&2
+  fi
 fi
 case "$VOICE_PLAN" in
   siliconflow)

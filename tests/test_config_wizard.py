@@ -4,7 +4,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import pty
+import select
+import signal
 import subprocess
+import termios
+import time
 import sys
 import tempfile
 import unittest
@@ -45,6 +50,19 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertEqual(first["qwen_model"], "1.7b")
         self.assertEqual(first["hotkeys"], {"voice": "Ctrl+Alt+V", "raw": "Ctrl+Alt+B", "paste": "Ctrl+Alt+P"})
         self.assertIsNone(first["postprocess"])
+
+    def test_piped_zero_at_assets_clears_all_assets(self):
+        # 管道交互里资产多选输 0 = 一个都不装（红队：此前空集不可达）。
+        ran = self.wizard(text="\n" * 6 + "0\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["assets"],
+                         {"rime_ice": False, "zhwiki": False, "moegirl": False, "denoise": False})
+
+    def test_defaults_and_piped_enters_produce_same_answers_tail(self):
+        defaults = self.wizard("--defaults")
+        self.assertEqual(defaults.returncode, 0, defaults.stderr)
+        first = json.loads(self.result.read_text())
         self.assertNotIn("启用 LLM 后处理？", defaults.stderr)
         self.assertIn("未配置云端 LLM（llm.json 不存在）", defaults.stderr)
         self.assertIn("scripts/setup-llm-cloud.sh", defaults.stderr)
@@ -325,6 +343,236 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertNotEqual(ran.returncode, 0)
         self.assertFalse(self.result.exists())
         self.assertFalse(self.config.exists())
+
+    def test_numbered_plan_selects_nondefault_and_assets_share_one_question(self):
+        ran = self.wizard(text="2\n\n\n\n1,4\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["voice_plan"], "siliconflow")
+        self.assertEqual(result["assets"], dict(rime_ice=True, zhwiki=False, moegirl=False, denoise=True))
+        self.assertNotIn("本地 Qwen 下载", ran.stderr)
+        self.assertEqual(ran.stdout, str(self.result) + "\n")
+        self.assertEqual(ran.stderr.count("已选："), 5)
+
+    def test_numbered_plan_invalid_number_reprompts(self):
+        ran = self.wizard(text="9\n2\n" + "\n" * 4)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertIn("输入不合法", ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["voice_plan"], "siliconflow")
+
+    def test_numbered_download_both_model_and_llm_toggle(self):
+        self.write_llm(enabled=True)
+        ran = self.wizard(text="\n3\n2\n\n\n\n2\n\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["qwen_sizes"], ["0.6B", "1.7B"])
+        self.assertEqual(result["qwen_model"], "0.6b")
+        self.assertFalse(result["postprocess"])
+        self.assertTrue(all(result["assets"].values()))
+
+    def test_numbered_assets_cannot_reenable_explicit_overrides(self):
+        ran = self.wizard("--voice-plan", "keyboard-only", "--no-zhwiki", "--no-denoise",
+                          text="\n\n\n1,2\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["assets"],
+                         dict(rime_ice=True, zhwiki=False, moegirl=True, denoise=False))
+        self.assertNotIn("安装 zhwiki", ran.stderr)
+        self.assertNotIn("安装 RNNoise", ran.stderr)
+
+    def test_numbered_model_outside_download_set_reprompts(self):
+        ran = self.wizard(text="\n2\n1\n2\n" + "\n" * 4)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertIn("默认模型必须在本次下载集合中", ran.stderr)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["qwen_sizes"], ["0.6B"])
+        self.assertEqual(result["qwen_model"], "0.6b")
+
+
+class TuiSelectTest(unittest.TestCase):
+    def selector(self, *args, text=""):
+        return subprocess.run([sys.executable, str(ROOT / "scripts/tui-select.py"), *args],
+                              input=text, text=True, capture_output=True, timeout=5)
+
+    def test_empty_line_uses_zero_based_default(self):
+        ran = self.selector("--title", "测试菜单", "--default", "1", "--", "第一项", "第二项", text="\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "1\n")
+        self.assertIn("2) 第二项 [默认]", ran.stderr)
+        self.assertIn("测试菜单", ran.stderr)
+        self.assertNotIn("\x1b", ran.stderr)
+
+    def test_number_is_one_based_and_confirms(self):
+        ran = self.selector("--", "第一项", "第二项", text="2\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "1\n")
+
+    def test_multi_checked_accepts_commas_spaces_duplicates_and_empty_set(self):
+        for checked, expected in (("0, 2 2", "0 2\n"), ("", "\n")):
+            with self.subTest(checked=checked):
+                ran = self.selector("--multi", "--checked", checked, "--", "甲", "乙", "丙", text="\n")
+                self.assertEqual(ran.returncode, 0, ran.stderr)
+                self.assertEqual(ran.stdout, expected)
+
+    def test_multi_numeric_reply_replaces_checked_set(self):
+        ran = self.selector("--multi", "--checked", "0", "--", "甲", "乙", "丙", text="3,2 3\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "1 2\n")
+
+    def test_multi_reply_zero_clears_nonempty_checked(self):
+        # 默认勾选非空时，空集在降级模式原本不可达（红队 2026-10-11）：
+        # 0 是显式"清空全部"，与 TTY 空格逐项取消的能力对齐。
+        ran = self.selector("--multi", "--checked", "0,1,2", "--", "甲", "乙", "丙", text="0\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "\n")
+        self.assertIn("0=清空全部", ran.stderr)
+
+    def test_invalid_numbers_reprompt_until_valid(self):
+        ran = self.selector("--", "甲", "乙", text="0\n3\nno\n1,2\n2\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "1\n")
+        self.assertEqual(ran.stderr.count("输入不合法"), 4)
+
+    def test_invalid_multi_numbers_reprompt(self):
+        ran = self.selector("--multi", "--", "甲", "乙", text="1,9\n2\n")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(ran.stdout, "1\n")
+        self.assertIn("输入不合法", ran.stderr)
+
+    def test_eof_is_failure_even_after_invalid_input(self):
+        for text in ("", "99\n", "\x1b\n", "q\n"):
+            with self.subTest(text=text):
+                ran = self.selector("--", "甲", "乙", text=text)
+                self.assertEqual(ran.returncode, 1, ran.stderr)
+                self.assertEqual(ran.stdout, "")
+                self.assertIn("输入已结束", ran.stderr)
+                if text:
+                    self.assertIn("输入不合法", ran.stderr)
+
+    def test_invalid_parameters_fail_without_traceback(self):
+        for args in (("--default", "9"), ("--default", "坏"), ("--checked", "0"),
+                     ("--multi", "--checked", "2"), ("--未知",)):
+            with self.subTest(args=args):
+                ran = self.selector(*args, "--", "甲", "乙", text="\n")
+                self.assertEqual(ran.returncode, 2, ran.stderr)
+                self.assertEqual(ran.stdout, "")
+                self.assertIn("错误", ran.stderr)
+                self.assertNotIn("Traceback", ran.stderr)
+
+    def test_chinese_help_only_uses_stderr(self):
+        for flag in ("-h", "--help"):
+            ran = self.selector(flag)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertEqual(ran.stdout, "")
+            self.assertIn("用法", ran.stderr)
+            self.assertIn("回车", ran.stderr)
+
+    def tty_selection(self, keys, *args, send_signal=False):
+        master, slave = pty.openpty()
+        process = None
+        try:
+            saved = termios.tcgetattr(slave)
+            if hasattr(termios, "tcsetwinsize"):
+                termios.tcsetwinsize(slave, (24, 30))
+            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/tui-select.py"),
+                                        *args, "--", "第一项很长" * 10, "第二项"],
+                                       stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            # 等 raw 模式就绪再输入，避免在规范模式中被回显/缓冲。
+            decoration = b""
+            deadline = time.monotonic() + 5
+            while b"\x1b[?25l" not in decoration:
+                remaining = deadline - time.monotonic()
+                self.assertGreater(remaining, 0, "终端菜单未及时就绪")
+                ready, _, _ = select.select([process.stderr], [], [], remaining)
+                self.assertTrue(ready, "终端菜单未及时就绪")
+                chunk = os.read(process.stderr.fileno(), 4096)
+                self.assertTrue(chunk, "选择器在菜单就绪前退出")
+                decoration += chunk
+            if send_signal:
+                process.send_signal(signal.SIGINT)
+            else:
+                os.write(master, keys)
+            _, tail = process.communicate(timeout=5)
+            decoration += tail
+            self.assertEqual(termios.tcgetattr(slave), saved, "终端属性未恢复")
+            output = b""
+            while select.select([master], [], [], 0)[0]:
+                output += os.read(master, 4096)
+            self.assertIn(b"\x1b[?25h", decoration)
+            return process.returncode, output.decode(), decoration.decode()
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(master)
+            os.close(slave)
+
+    def test_real_tty_down_enter_and_terminal_restore(self):
+        rc, stdout, stderr = self.tty_selection(b"\x1b[B\r")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "1")
+        self.assertIn("\x1b[7m", stderr)
+        self.assertNotIn("很长" * 10, stderr)  # 窄窗口确实截断长选项。
+
+    def test_real_tty_digit_and_home_end_movement(self):
+        for keys, expected in ((b"2", "1"), (b"j\x1b[H\r", "0"),
+                               (b"\x1b[F\r", "1"), (b"jk\r", "0")):
+            with self.subTest(keys=keys):
+                rc, stdout, stderr = self.tty_selection(keys)
+                self.assertEqual(rc, 0, stderr)
+                self.assertEqual(stdout.strip(), expected)
+
+    def test_real_tty_multi_space_and_numeric_toggle(self):
+        rc, stdout, stderr = self.tty_selection(b" \x1b[B \r", "--multi", "--checked", "0")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "1")
+        rc, stdout, stderr = self.tty_selection(b"12\r", "--multi")
+        self.assertEqual(rc, 0, stderr)
+        self.assertEqual(stdout.strip(), "0 1")
+
+    def test_real_tty_cancel_and_sigint_restore_terminal(self):
+        for keys in (b"\x1b", b"q", b"\x03"):
+            with self.subTest(keys=keys):
+                rc, stdout, stderr = self.tty_selection(keys)
+                self.assertEqual(rc, 130, stderr)
+                self.assertEqual(stdout, "")
+        rc, stdout, stderr = self.tty_selection(b"", send_signal=True)
+        self.assertEqual(rc, 130, stderr)
+        self.assertEqual(stdout, "")
+
+    def test_real_tty_sigterm_restores_terminal(self):
+        # SIGTERM 默认动作会在 finally 恢复 termios 之前杀死进程，
+        # 遗留 raw 模式 + 隐藏光标（红队 2026-10-11 PTY 实测）。
+        master, slave = pty.openpty()
+        process = None
+        try:
+            saved = termios.tcgetattr(slave)
+            if hasattr(termios, "tcsetwinsize"):
+                termios.tcsetwinsize(slave, (24, 30))
+            process = subprocess.Popen([sys.executable, str(ROOT / "scripts/tui-select.py"),
+                                        "--title", "t", "--", "第一项", "第二项"],
+                                       stdin=slave, stdout=slave, stderr=subprocess.PIPE)
+            decoration = b""
+            deadline = time.monotonic() + 5
+            while b"\x1b[?25l" not in decoration:
+                remaining = deadline - time.monotonic()
+                self.assertGreater(remaining, 0, "终端菜单未及时就绪")
+                ready, _, _ = select.select([process.stderr], [], [], remaining)
+                self.assertTrue(ready, "终端菜单未及时就绪")
+                chunk = os.read(process.stderr.fileno(), 4096)
+                self.assertTrue(chunk, "选择器在菜单就绪前退出")
+                decoration += chunk
+            process.send_signal(signal.SIGTERM)
+            _, tail = process.communicate(timeout=5)
+            decoration += tail
+            self.assertEqual(process.returncode, 130, decoration.decode(errors="replace"))
+            self.assertEqual(termios.tcgetattr(slave), saved, "SIGTERM 后终端属性未恢复")
+            self.assertIn(b"\x1b[?25h", decoration, "SIGTERM 后未恢复光标显示")
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(master)
+            os.close(slave)
 
 
 if __name__ == "__main__":
