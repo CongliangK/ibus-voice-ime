@@ -172,16 +172,34 @@ PY
     REBUILD=1
   fi
   if [[ $REBUILD -eq 0 ]] && "$VENV/bin/python" -m pip --isolated check && \
-    "$VENV/bin/python" - <<'PY'
+    "$VENV/bin/python" - "$ROOT_DIR/requirements-qwen-asr.txt" - <<'PY'
+# REUSE 判据直接读 requirements 文件逐项核验（packaging.Requirement），
+# 不再手写第二份基线——两处漂移会让旧 venv 绕过新增的 pin（红队 2026-10-11 发现）。
 import importlib.metadata as m
 import sys
 try:
+    from packaging.requirements import Requirement
     from packaging.version import Version
-    ok = (m.version('qwen-asr') == '0.0.6' and m.version('transformers') == '4.57.6'
-          and Version('1.22') <= Version(m.version('modelscope')) < Version('2')
-          and Version('2.6') <= Version(m.version('torch')) < Version('2.13'))
-except (m.PackageNotFoundError, ValueError, ImportError):
-    ok = False
+except ImportError:
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.version import Version
+ok = True
+with open(sys.argv[1]) as f:
+    for raw in f:
+        line = raw.split('#', 1)[0].strip()
+        if not line:
+            continue
+        req = Requirement(line)
+        try:
+            version = Version(m.version(req.name))
+        except m.PackageNotFoundError:
+            ok = False
+            print(f'  [REUSE 失败] 未安装：{req.name}')
+            break
+        if not req.specifier.contains(version, prereleases=True):
+            ok = False
+            print(f'  [REUSE 失败] {req.name} {version} 不满足 {req.specifier}')
+            break
 sys.exit(0 if ok else 1)
 PY
   then
@@ -207,6 +225,15 @@ fi
 PY="$VENV/bin/python"
 echo "Qwen3-ASR venv Python：$("$PY" -V 2>&1)"
 if [[ $REUSE -eq 0 ]]; then
+  # torch 范围内最新版（当前 2.12.x）捆绑 CUDA 13 运行库，NVIDIA 官方要求驱动 >=580；
+  # gpu-probe 只验证 nvidia-smi 可用，不校验驱动版本，旧驱动会在下载数 GB 后运行时失败
+  # （红队 2026-10-11 P1）。这里在安装前给出明确预警与降档指引，不硬性阻断。
+  if NVIDIA_DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -n1)" \
+     && [[ "$NVIDIA_DRIVER" =~ ^([0-9]+) ]] && (( BASH_REMATCH[1] < 580 )); then
+    echo "⚠ 检测到 NVIDIA 驱动 $NVIDIA_DRIVER < 580：requirements 中 torch 将解析为 2.12.x（捆绑 CUDA 13，"
+    echo "  官方要求驱动 >=580）。若后续运行时验收（CUDA/Triton 矩阵运算）失败，请在 requirements-qwen-asr.txt"
+    echo "  临时收紧为 torch==2.9.0（CUDA 12.8 线，要求驱动 >=525）后重跑本脚本。" >&2
+  fi
   # pip 自升级失败不致命：旧 pip 仍可能完成依赖安装，真正的安装错误由下一行报告
   if ! "$PY" -m pip --isolated install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then
     echo "⚠ pip 自升级失败（网络？），继续使用现有 pip 安装依赖……" >&2

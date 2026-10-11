@@ -35,8 +35,10 @@ def select_python(explicit: str = "") -> str:
         path = shutil.which(candidate) or candidate
         info = interpreter_info(path)
         major, minor, _ = info["version"]
-        if major != 3 or not 10 <= minor <= 14:
-            raise RuntimeError(f"不支持的 Qwen 解释器版本：{major}.{minor}（允许 3.10–3.14，自动选择仅使用 3.12）")
+        # 精确 pin 集只在 3.12 上完整验收；librosa>=1.0（requirements-qwen-asr.txt）
+        # 元数据 Requires-Python>=3.12，3.10/3.11 在解析阶段即失败（红队 2026-10-11 实测）。
+        if major != 3 or not 12 <= minor <= 14:
+            raise RuntimeError(f"不支持的 Qwen 解释器版本：{major}.{minor}（允许 3.12–3.14：依赖 pin 集在 3.12 验收，librosa 1.0 要求 Python>=3.12）")
         if not explicit and minor != 12:
             continue
         return str(Path(path).absolute())
