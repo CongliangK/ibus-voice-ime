@@ -144,6 +144,12 @@ if ! systemctl --user set-environment \
 fi
 IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" ibus write-cache >/dev/null 2>&1 || true
 
+# 开机自愈：systemd 拉起的 ibus-daemon（--cache auto）被系统级注册缓存短路，
+# 用户组件永不被扫——drop-in 改为 --cache refresh 强制重扫（无 unit 时跳过）。
+if [[ -x "$ROOT_DIR/scripts/ensure-ibus-cache-refresh.sh" ]]; then
+  "$ROOT_DIR/scripts/ensure-ibus-cache-refresh.sh" || true
+fi
+
 # Add to GNOME input sources without removing existing Rime.
 if [[ "$NO_RESTART" != 1 ]] && command -v gsettings >/dev/null 2>&1; then
   python3 - <<'PY'

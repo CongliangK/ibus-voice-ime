@@ -241,19 +241,24 @@ check_ibus_registration() {
     fail "组件 exec 未指向本仓库（指向了旧副本？）"
     FAILED_ITEMS+=(component-xml)
   fi
-  # daemon 视角：XML 与输入源都在、注册缓存（~/.cache/ibus/bus/registry）却
-  # 被一次无 IBUS_COMPONENT_PATH 的 daemon 重启抹掉时，GNOME/systemd 以
-  # --cache auto 拉起的 ibus-daemon（开机/重登即是）会直接信任旧缓存而
-  # 永不再扫用户组件目录——重启电脑后"输入法消失"的根因。引擎进程正在
-  # 运行说明旧 daemon 已加载（缓存坏但进程未换），此时只降为 WARN。
+  # daemon 视角：systemd 拉起的 ibus-daemon（--cache auto）会被系统级注册
+  # 缓存 /var/cache/ibus/bus/registry 短路（读有效系统缓存即用，永不到
+  # 用户缓存/IBUS_COMPONENT_PATH 扫描分支）；用户缓存被无组件路径的旧版
+  # 重启覆写同样致病——两者症状一致：XML 与输入源都在，daemon 却不认识
+  # voice-custom，重启电脑后输入法消失。引擎进程正在运行说明旧 daemon 已
+  # 加载（进程未换），此时只降为 WARN。无法连接 daemon（CI/无桌面会话）
+  # 时跳过本检测，不产生环境依赖的假 FAIL。
   if command -v ibus >/dev/null 2>&1; then
-    if ibus list-engine 2>/dev/null | grep -q '^  voice-custom '; then
-      ok "IBus daemon 已加载 voice-custom 引擎"
-    elif pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus" >/dev/null 2>&1; then
-      warn "IBus daemon 未注册 voice-custom（注册缓存疑被覆写）" "当前引擎进程仍存活可继续用；但下次重启/重新登录后输入法会消失" "运行 ./scripts/doctor.sh fix 或 ./scripts/ibus-restart.sh 重建注册缓存"
-    else
-      fail "IBus daemon 未注册 voice-custom：组件 XML 在，但 daemon 注册缓存里没有（重启电脑后输入法消失即此因）"
-      FAILED_ITEMS+=(ibus-registry)
+    _daemon_engines="$(ibus list-engine 2>/dev/null)" && [[ -n "$_daemon_engines" ]] || _daemon_engines=""
+    if [[ -n "$_daemon_engines" ]]; then
+      if grep -q '^  voice-custom ' <<<"$_daemon_engines"; then
+        ok "IBus daemon 已加载 voice-custom 引擎"
+      elif pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus" >/dev/null 2>&1; then
+        warn "IBus daemon 未注册 voice-custom（系统级注册缓存短路或缓存被覆写）" "当前引擎进程仍存活可继续用；但下次重启/重新登录后输入法会消失" "运行 ./scripts/doctor.sh fix 或 ./install.sh 加固开机自愈并重建注册缓存"
+      else
+        fail "IBus daemon 未注册 voice-custom：组件 XML 在，但 daemon 注册缓存里没有（重启电脑后输入法消失即此因）"
+        FAILED_ITEMS+=(ibus-registry)
+      fi
     fi
   fi
   if [[ -f "$ENV_FILE" ]]; then
@@ -776,13 +781,15 @@ do_fix() {
         fi
         ;;
       ibus-registry)
-        # 重建注册缓存（write-cache 只原子替换 ~/.cache/ibus/bus/registry，
-        # 不依赖 daemon）；缓存里记录的 XML mtime 随之刷新，重启由统一的
-        # ibus-restart.sh 完成（其自带组件路径并再次重扫固化）。
-        echo "==> 重建 IBus 组件注册缓存（ibus write-cache）"
+        # 双层修复：① drop-in 保证 systemd 拉起的 daemon（开机）强制重扫
+        # 组件路径——auto 模式会被系统级注册缓存短路，光修缓存挡不住下次
+        # 开机复发；② write-cache 只原子替换 ~/.cache/ibus/bus/registry，
+        # 兜底非 systemd 路径。重启由统一的 ibus-restart.sh 完成。
+        echo "==> 加固 ibus 开机自愈（systemd drop-in）并重建组件注册缓存"
+        "$ROOT_DIR/scripts/ensure-ibus-cache-refresh.sh" || true
         if IBUS_COMPONENT_PATH="$HOME/.local/share/ibus/component:/usr/share/ibus/component" \
            ibus write-cache >/dev/null 2>&1; then
-          fixed "注册缓存已重建；重启输入法后生效（见下方统一重启步骤）"
+          fixed "注册缓存已重建 + 开机强制重扫已加固；重启输入法后生效（见下方统一重启步骤）"
           restarted=1
         else
           fail "ibus write-cache 失败，请手动运行 ./scripts/ibus-restart.sh"

@@ -22,6 +22,7 @@ fix 分派存在对应重建分支。
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tempfile
 import unittest
@@ -107,6 +108,76 @@ class DoctorRegistryDetectionStaticGuard(unittest.TestCase):
         self.assertIn("FAILED_ITEMS+=(ibus-registry)", script)
         self.assertIn("ibus-registry)", script)
         self.assertIn("voice-custom", script.split("ibus-registry)")[0].split("IBus 注册")[-1])
+
+    def test_fix_hardens_with_dropin_and_install_wires_it(self) -> None:
+        doctor = (ROOT / "scripts" / "doctor.sh").read_text(encoding="utf-8")
+        install = (ROOT / "install.sh").read_text(encoding="utf-8")
+        # fix 分支必须补写开机自愈 drop-in（光修缓存挡不住系统缓存短路）。
+        # 精确匹配 case 标签行，避免误中检测段的 FAILED_ITEMS+=(ibus-registry)。
+        parts = re.split(r"\n\s*ibus-registry\)\s*\n", doctor)
+        self.assertGreaterEqual(len(parts), 2, msg="doctor.sh 缺少 ibus-registry fix 分支")
+        branch = parts[1].split(";;")[0]
+        self.assertIn("ensure-ibus-cache-refresh.sh", branch)
+        self.assertIn("ibus write-cache", branch)
+        # install.sh 也必须接入同一脚本。
+        self.assertIn("ensure-ibus-cache-refresh.sh", install)
+
+
+SYSTEMCTL_STUB = """#!/usr/bin/env bash
+printf 'systemctl argv=[%s]\\n' "$*" >> "$STUB_LOG"
+if [[ "$1" == --user && "$2" == cat ]]; then exit "${STUB_HAS_UNIT:-0}"; fi
+exit 0
+"""
+
+
+class EnsureIBusCacheRefreshDropinTest(unittest.TestCase):
+    """ensure-ibus-cache-refresh.sh：unit 存在写 drop-in，不存在静默跳过。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name) / "home"
+        self.bin = Path(self._tmp.name) / "bin"
+        (self.home / ".config").mkdir(parents=True)
+        self.bin.mkdir(parents=True)
+        stub = self.bin / "systemctl"
+        stub.write_text(SYSTEMCTL_STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        self.log = Path(self._tmp.name) / "stub.log"
+        self.dropin = (self.home / ".config/systemd/user"
+                       / "org.freedesktop.IBus.session.GNOME.service.d"
+                       / "ibus-voice-ime-cache-refresh.conf")
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _run(self, has_unit: bool) -> tuple[int, str]:
+        env = {
+            "PATH": f"{self.bin}:{os.environ['PATH']}",
+            "HOME": str(self.home),
+            "STUB_LOG": str(self.log),
+            "STUB_HAS_UNIT": "0" if has_unit else "1",
+        }
+        proc = subprocess.run(
+            ["bash", str(ROOT / "scripts" / "ensure-ibus-cache-refresh.sh")],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+        calls = self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+        return proc.returncode, calls
+
+    def test_unit_present_writes_dropin_with_refresh(self) -> None:
+        code, calls = self._run(has_unit=True)
+        self.assertEqual(code, 0)
+        self.assertTrue(self.dropin.exists(), msg=f"drop-in 未写入：{calls}")
+        content = self.dropin.read_text(encoding="utf-8")
+        self.assertIn("ExecStart=\n", content)  # 先清空原 ExecStart
+        self.assertIn("--cache refresh", content)
+        self.assertIn("daemon-reload", calls)
+
+    def test_unit_absent_skips_silently(self) -> None:
+        code, calls = self._run(has_unit=False)
+        self.assertEqual(code, 0)
+        self.assertFalse(self.dropin.exists())
+        self.assertNotIn("daemon-reload", calls)
 
 
 if __name__ == "__main__":

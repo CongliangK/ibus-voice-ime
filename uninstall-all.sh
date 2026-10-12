@@ -987,6 +987,14 @@ step "删除 systemd 服务文件与守护脚本拷贝目录"
 rm_path "$SERVICE_LINK" "蓝牙恢复 default.target.wants 精确链接"
 rm_path "$SERVICE_FILE" "蓝牙恢复 systemd 用户服务"
 rm_path "$BT_INSTALL_DIR" "bt-play-restore 脚本安装目录（含 __pycache__）"
+# ibus 单元 drop-in（--cache refresh 开机自愈）：只删本项目文件；
+# 目录空了顺带删除，别人的 drop-in 不动。
+IBUS_UNIT_NAME="org.freedesktop.IBus.session.GNOME.service"
+IBUS_DROPIN_DIR="$HOME/.config/systemd/user/$IBUS_UNIT_NAME.d"
+rm_path "$IBUS_DROPIN_DIR/ibus-voice-ime-cache-refresh.conf" "ibus 单元 --cache refresh drop-in"
+if [[ -d "$IBUS_DROPIN_DIR" && -z "$(ls -A "$IBUS_DROPIN_DIR" 2>/dev/null)" ]]; then
+  rm_path "$IBUS_DROPIN_DIR" "ibus 单元 drop-in 空目录"
+fi
 if command -v systemctl >/dev/null 2>&1; then
   if systemctl --user daemon-reload 2>/dev/null; then
     printf '  [已刷新] systemctl --user daemon-reload\n'

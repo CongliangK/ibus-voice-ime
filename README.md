@@ -117,7 +117,7 @@ tail -f ~/.local/share/ibus-voice-ime/engine.log
 
 常见问题速查：
 
-- **重启电脑后输入法消失**：IBus 注册缓存被无组件路径的旧版重启覆写所致，`./scripts/doctor.sh fix` 或 `./scripts/ibus-restart.sh` 一次即愈（机制见 [AGENTS.md](AGENTS.md)「注册缓存机制」）
+- **重启电脑后输入法消失**：IBus 默认缓存模式被系统级注册缓存短路，用户组件开机不被扫描；安装已自动写入 systemd 自愈（强制重扫）。旧版安装的机器跑 `./scripts/doctor.sh fix` 或重跑 `./install.sh` 一次即愈（机制见 [AGENTS.md](AGENTS.md)「注册缓存机制」）
 - **键盘无候选**：部署大词库 `./scripts/setup-rime-ice.sh`；内置 librime 加载失败时会自动回退系统 librime
 - **语音没反应**：`arecord -l` 确认有麦克风；首次语音需加载模型，等数十秒属正常
 - **无 NVIDIA GPU**：切换云端后端（见上文「切换语音后端」）
