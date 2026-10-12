@@ -490,7 +490,16 @@ tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sid
 
 ## 卸载细节
 
-`uninstall-all.sh` 会清理：IBus 组件注册、GNOME 输入源/引擎列表（四个 gsettings 键）、自定义快捷键（含 dconf 子树）、environment.d 与 systemd 用户管理器/DBus 激活环境、蓝牙恢复守护服务、登录 autostart、用户数据/配置/运行时目录，并重启 IBus；结束后做残留验证扫描，任何残留以非零退出码报警。跨项目共享缓存（`~/.triton/cache`、`~/.cache/pip`、`~/.cache/modelscope`、`~/.modelscope`）与仓库本体（`vendor/`、`.venv*`）不在删除范围；Qwen 模型共享缓存（默认 `~/.cache/ibus-voice-ime/models`）同样保留——卸载后重装或换克隆目录可直接复用，确要释放磁盘再手动删除该目录。
+`uninstall-all.sh` 会清理：IBus 组件注册、GNOME 输入源/引擎列表（四个 gsettings 键）、自定义快捷键（含 dconf 子树）、environment.d 与 systemd 用户管理器/DBus 激活环境、蓝牙恢复守护服务、登录 autostart、用户数据/配置/运行时目录，并重启 IBus；结束后做残留验证扫描，任何残留以非零退出码报警。跨项目共享缓存（`~/.triton/cache`、`~/.cache/pip`、`~/.cache/modelscope`、`~/.modelscope`）默认不在删除范围。
+
+两个可选深清理 flag：
+
+- `--purge-models`：额外删除 Qwen 模型共享缓存（默认整个 `~/.cache/ibus-voice-ime`；候选位置从当前环境、environment.d 与 systemd 用户管理器环境解析 `VOICE_IME_MODEL_CACHE`，HOME 外路径按安全边界拒绝并提示手动处理）。
+- `--purge-repo`：额外删除脚本所在的仓库克隆本身（`.venv*`、`.python`、`.tools`、`.cache/uv`、`vendor/` 等全部下载产物一并清除）。**仅当克隆带 `.git/ibus-voice-ime-bootstrap` 引导器标记且含 `setup.sh`/`install.sh` 身份文件时执行**——即 `remote-install.sh` curl 安装的克隆；普通开发克隆拒绝删除并列为残留。
+
+### remote-uninstall.sh 远程卸载引导器
+
+`curl -fsSL .../remote-uninstall.sh | bash` 在任意目录可用：定位克隆（环境变量与 `remote-install.sh` 同名同义，`IBUS_VOICE_IME_DIR` 默认 `~/.local/share/ibus-voice-ime-repo`），调用其中的 `uninstall-all.sh --purge --purge-models --purge-repo`，并在结束后复核克隆确实已删；默认即「彻底清空回到安装前状态」。安全设计：绝不 sudo、不碰系统文件与跨项目共享缓存；有终端时要求输入 `yes` 确认，无控制终端（SSH/CI/管道）必须显式 `--yes` 才执行，未确认前零删除。选项：`--yes`、`--keep-user-data`（透传为 keep 模式）、`-h`。本地克隆缺失时尝试从 `IBUS_VOICE_IME_REPO` 推导 GitHub raw 地址下载 `uninstall-all.sh` 兜底（此时无仓库可删，`--purge-repo` 自然跳过）；下载失败则报错并给出手动指引。
 
 ## 更多文档
 

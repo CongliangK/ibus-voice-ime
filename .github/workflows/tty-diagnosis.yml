@@ -10,23 +10,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10"]
+        python: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Environment snapshot
+      - name: Probe matrix (winsize x interpreter)
         run: |
-          echo "python3=$(command -v python3)"; python3 -V
-          echo "locale: $(locale 2>&1 | head -3)"; echo "TERM=${TERM:-unset}"
-          python3 -c "import sys; print('stdout enc:', sys.stdout.encoding)"
-      - name: Direct pty probe of config-wizard
+          echo "== A: setup-python python3, WITH winsize =="
+          python3 tools/ci-tty-diagnose.py --label A-winsize-setuppython || true
+          echo "== B: setup-python python3, NO winsize =="
+          python3 tools/ci-tty-diagnose.py --no-winsize --label B-nowinsize-setuppython || true
+          echo "== C: system python3, NO winsize =="
+          python3 tools/ci-tty-diagnose.py --no-winsize --python /usr/bin/python3 --label C-nowinsize-syspython || true
+          echo "== D: system python3, WITH winsize =="
+          python3 tools/ci-tty-diagnose.py --python /usr/bin/python3 --label D-winsize-syspython || true
+      - name: Full failing unittest under this matrix python
         run: |
-          python3 tools/ci-tty-diagnose.py || true
-      - name: Run the failing unittest verbosely
-        run: |
-          cd tests && timeout 300 python3 -m unittest -v test_config_wizard.ConfigWizardTest.test_tty_wizard_captures_all_three_hotkeys_and_confirms 2>&1 | tail -40 || true
-      - name: Same test with system python on PATH first
-        run: |
-          cd tests && timeout 300 env PATH="/usr/bin:$PATH" VOICE_IME_WIZARD_PYTHON=/usr/bin/python3 python3 -m unittest -v test_config_wizard.ConfigWizardTest.test_tty_wizard_captures_all_three_hotkeys_and_confirms 2>&1 | tail -40 || true
+          cd tests && timeout 300 python3 -m unittest -v test_config_wizard 2>&1 | tail -25 || true

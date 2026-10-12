@@ -132,6 +132,28 @@ tail -f ~/.local/share/ibus-voice-ime/engine.log
 ./uninstall.sh                    # 轻量卸载：仅移除 IBus 组件注册与环境变量
 ```
 
+### 一键彻底卸载（任意目录，curl 调用）
+
+对 `curl | bash` 安装的机器，在任何文件夹都能一条命令回到安装前的干净状态（删除注册/热键/环境、用户数据与 API key、Qwen 模型缓存、整个克隆含 `.venv*`/`vendor/` 等全部下载产物；跨项目共享缓存与系统文件不触碰）：
+
+```bash
+# 有终端时会要求输入 yes 确认
+curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-uninstall.sh | bash
+# 无人值守 / 无终端（SSH、CI）必须显式 --yes
+curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-uninstall.sh | bash -s -- --yes
+# 想保留个人词库/配置/热词，其余照删
+curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-uninstall.sh | bash -s -- --keep-user-data
+```
+
+克隆目录由与 `remote-install.sh` 相同的 `IBUS_VOICE_IME_DIR` 等环境变量控制。也可以在克隆内手动分级卸载：
+
+```bash
+./uninstall-all.sh --purge --purge-models                 # 清注册+数据+模型缓存，保留克隆
+./uninstall-all.sh --purge --purge-models --purge-repo    # 连克隆一起彻底删除（仅限 curl 安装的克隆）
+```
+
+`--purge-repo` 只删除带引导器标记 `.git/ibus-voice-ime-bootstrap` 的克隆（即 `remote-install.sh` 安装的）；普通开发克隆会被拒绝，防止误删未提交的工作副本。
+
 ## 许可证
 
 本项目整体以 [GPL-3.0](LICENSE) 发布。
