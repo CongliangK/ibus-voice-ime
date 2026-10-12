@@ -101,18 +101,8 @@ if [[ -z "$UNINSTALL_SCRIPT" ]]; then
   fi
 fi
 
-# ② 版本探测：只传卸载脚本实际支持的参数。旧版脚本（无 --purge-models）也
-# 能正常卸载注册足迹与用户数据；模型缓存与克隆删除由本引导器兜底完成。
-script_supports() { grep -qF -- "$1" "$UNINSTALL_SCRIPT"; }
-ARGS=()
-if [[ "$KEEP_USER_DATA" -eq 1 ]]; then ARGS+=(--keep-user-data); else ARGS+=(--purge); fi
-MODELS_BY_SCRIPT=0
-if script_supports --purge-models; then
-  ARGS+=(--purge-models)
-  MODELS_BY_SCRIPT=1
-else
-  printf '提示：本地卸载脚本为旧版（不支持 --purge-models）；模型缓存将由引导器兜底删除。\n'
-fi
+# 版本探测与参数构建在克隆更新之后进行（见下）：更新可能把旧版卸载脚本
+# 换成新版，提前探测会用过期结论漏传 --purge-models。
 
 printf '%s\n' '================ ibus-voice-ime 远程彻底卸载 ================'
 printf '克隆目录：          %s\n' "$DIR"
@@ -152,7 +142,35 @@ if [[ "$HAD_CLONE" -eq 1 ]]; then
   update_clone || printf '%s\n' '（更新失败：继续使用克隆内的本地卸载脚本。）'
 fi
 
+# ② 版本探测（必须在更新之后）：只向卸载脚本传递它实际支持的参数。用
+# `--help` 输出判定而非 grep 脚本正文——注释里提到参数不代表 case 分支真的
+# 认识它。旧版脚本也完全兼容——模型缓存与克隆删除由引导器兜底完成。
+script_supports() { bash "$UNINSTALL_SCRIPT" --help 2>/dev/null | grep -qF -- "$1"; }
+ARGS=()
+if [[ "$KEEP_USER_DATA" -eq 1 ]]; then ARGS+=(--keep-user-data); else ARGS+=(--purge); fi
+MODELS_BY_SCRIPT=0
+if script_supports --purge-models; then
+  ARGS+=(--purge-models)
+  MODELS_BY_SCRIPT=1
+else
+  printf '提示：本地卸载脚本为旧版（不支持 --purge-models）；模型缓存将由引导器兜底删除。\n'
+fi
+
+# ③ 兜底缓存候选提前抓取（卸载脚本随后会删除 environment.d 文件）：
+# 当前 shell 环境 + environment.d 持久环境中的 VOICE_IME_MODEL_CACHE。
+FALLBACK_CACHE_CANDIDATES=()
+collect_fallback_cache_candidates() {
+  local value
+  [[ -z "${VOICE_IME_MODEL_CACHE:-}" ]] || FALLBACK_CACHE_CANDIDATES+=("$VOICE_IME_MODEL_CACHE")
+  value="$(sed -n -E 's/^[[:space:]]*(export[[:space:]]+)?VOICE_IME_MODEL_CACHE=(.+)$/\2/p' \
+    "$HOME/.config/environment.d/ibus-voice-ime.conf" 2>/dev/null | tail -n 1 || true)"
+  value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
+  [[ -z "$value" ]] || FALLBACK_CACHE_CANDIDATES+=("$value")
+  FALLBACK_CACHE_CANDIDATES+=("${XDG_CACHE_HOME:-$HOME/.cache}/ibus-voice-ime")
+}
+
 RC=0
+collect_fallback_cache_candidates
 bash "$UNINSTALL_SCRIPT" "${ARGS[@]}" || RC=$?
 
 # ② 模型缓存兜底：卸载脚本为旧版（未收到 --purge-models）时由引导器删除。
@@ -160,7 +178,7 @@ if [[ "$MODELS_BY_SCRIPT" -eq 0 ]]; then
   purge_model_cache_fallback() {
     local home_real raw path resolved
     home_real="$(realpath -e -- "$HOME" 2>/dev/null)" || return 1
-    for raw in "${VOICE_IME_MODEL_CACHE:-}" "${XDG_CACHE_HOME:-$HOME/.cache}/ibus-voice-ime"; do
+    for raw in "${FALLBACK_CACHE_CANDIDATES[@]}"; do
       [[ -n "$raw" ]] || continue
       path="$(realpath -m -- "${raw/#\~/$HOME}")" || continue
       resolved="$(realpath -m -- "$path")" || continue

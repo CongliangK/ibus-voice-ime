@@ -13,15 +13,19 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "remote-uninstall.sh"
 
-# 旧版卸载脚本 stub：不含 --purge-models（版本探测应识别为旧版并兜底）。
+# 旧版卸载脚本 stub：--help 输出不含 --purge-models（版本探测识别为旧版）。
 STUB_OLD = """#!/usr/bin/env bash
+if [[ "${1:-}" == --help ]]; then  # 版本探测调用：打印头注释（同真实脚本），不记日志
+  awk 'NR>1{if(/^#/){sub(/^# ?/,"");print;next}exit}' "$0"
+  exit 0
+fi
 echo "args:$*" >> "$STUB_LOG"
 echo "cwd:$(pwd)"
 exit "${STUB_EXIT:-0}"
 """
 
-# 新版卸载脚本 stub：支持 --purge-models / --purge-repo。
-STUB_NEW = STUB_OLD + "# supports: --purge-models --purge-repo\n"
+# 新版卸载脚本 stub：--help（头注释）声明支持 --purge-models / --purge-repo。
+STUB_NEW = "#!/usr/bin/env bash\n# supports: --purge-models --purge-repo\n" + STUB_OLD[STUB_OLD.index("\n") + 1:]
 
 
 @unittest.skipUnless(shutil.which("bash"), "需要本地 bash，测试不联网")
@@ -115,6 +119,22 @@ class RemoteUninstallTest(unittest.TestCase):
         self.assertIn("--purge-models", args)
         self.assertFalse(self.clone.exists())
 
+    def test_envd_custom_model_cache_captured_for_fallback(self):
+        # environment.d 中的 VOICE_IME_MODEL_CACHE 在卸载脚本删除该文件前
+        # 就被引导器抓取为兜底候选（回归：运行后才读会扑空）。
+        self.make_clone(stub=STUB_OLD)
+        envd = self.home / ".config" / "environment.d"
+        envd.mkdir(parents=True)
+        custom = self.home / "custom-models"
+        custom.mkdir()
+        (custom / "w.bin").write_bytes(b"w")
+        (envd / "ibus-voice-ime.conf").write_text(
+            "VOICE_IME_MODEL_CACHE=" + str(custom) + "\n", encoding="utf-8")
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(custom.exists())
+        self.assertFalse((self.cache / "ibus-voice-ime").exists())
+
     def test_missing_clone_unreachable_repo_fails(self):
         # 无克隆、非 github 仓库布局：应报错而不是静默成功。
         result = self.run_script("--yes")
@@ -200,7 +220,8 @@ class RemoteUninstallUpdateTest(unittest.TestCase):
         self.git(None, "clone", str(self.remote), str(self.seed))
         for name in ("setup.sh", "install.sh"):
             (self.seed / name).write_text("#!/bin/sh\n", encoding="utf-8")
-        (self.seed / "uninstall-all.sh").write_text(STUB_NEW, encoding="utf-8")
+        # v1 是旧版卸载脚本（不支持 --purge-models）；远端随后升级到新版。
+        (self.seed / "uninstall-all.sh").write_text(STUB_OLD, encoding="utf-8")
         (self.seed / "version.txt").write_text("v1\n", encoding="utf-8")
         self.git(self.seed, "add", "-A")
         self.git(self.seed, "commit", "-m", "v1")
@@ -222,14 +243,18 @@ class RemoteUninstallUpdateTest(unittest.TestCase):
                               stdin=subprocess.DEVNULL, start_new_session=True)
 
     def test_clone_updated_to_remote_latest_before_uninstall(self):
-        # 远端出现 v2；引导器应先把克隆更新到 v2 再运行其中的卸载脚本。
+        # 远端把旧版卸载脚本升级到新版；引导器应先更新克隆、再按新版脚本
+        # 探测参数（回归：探测发生在更新之前会漏传 --purge-models）。
+        (self.seed / "uninstall-all.sh").write_text(STUB_NEW, encoding="utf-8")
         (self.seed / "version.txt").write_text("v2\n", encoding="utf-8")
         self.git(self.seed, "commit", "-am", "v2")
         self.git(self.seed, "push", "origin", "main")
         result = self.run_script("--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("已更新克隆到远端最新版", result.stdout)
-        self.assertFalse(self.clone.exists())  # 更新后照常兜底删除
+        args = self.log.read_text(encoding="utf-8").splitlines()[0].removeprefix("args:").split()
+        self.assertIn("--purge-models", args)      # 探测在更新之后：新版参数已透传
+        self.assertFalse(self.clone.exists())      # 更新后照常兜底删除
 
     def test_update_failure_falls_back_to_local(self):
         # 克隆的 origin 不可达（指向空目录）：回退本地版本继续卸载。

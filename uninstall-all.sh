@@ -350,7 +350,12 @@ PY
     residue "无法验证：配置路径快照失败；拒绝继续卸载"
     return 1
   fi
-  for record in "${CUSTOM_PATHS[@]}"; do residue "未清理的自定义路径：$record"; done
+  # 自定义路径（自定义词典/日志/Rime 目录等覆盖）按设计不盲删：它们在固定
+  # 安装足迹边界之外，可能属于用户其他克隆/项目。指向它们的环境键本身已被
+  # 后续步骤清理，这里只提示人工确认，不计入残留、不阻断卸载退出码。
+  for record in "${CUSTOM_PATHS[@]}"; do
+    printf '  [提示]   自定义路径未删除（在卸载边界外，请按需手动处理）：%s\n' "$record"
+  done
   return 0
 }
 
