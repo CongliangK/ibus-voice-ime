@@ -28,6 +28,7 @@ done
 FAILURES=0
 WARNINGS=0
 WARN_TITLES=() WARN_IMPACTS=() WARN_GUIDANCE=()
+FAIL_MSGS=()   # 汇总段复述每条 FAIL 的原因与修复方案，用户不必回翻上方明细
 
 ok()   { printf '  [OK]   %s\n' "$1"; }
 skip() { printf '  [SKIP] %s\n' "$1"; }
@@ -36,7 +37,11 @@ warn() {
   WARNINGS=${#WARN_TITLES[@]}
   printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[WARNINGS-1]}" "${WARN_IMPACTS[WARNINGS-1]}" "${WARN_GUIDANCE[WARNINGS-1]}"
 }
-fail() { printf '  [FAIL] %s\n' "$1"; FAILURES=$((FAILURES + 1)); }
+fail() {
+  FAIL_MSGS+=("${1//$'\n'/ }")
+  FAILURES=${#FAIL_MSGS[@]}
+  printf '  [FAIL] %s\n' "$1"
+}
 header() { printf '\n== %s ==\n' "$1"; }
 
 # ---------------------------------------------------------------- 系统与桌面
@@ -121,13 +126,7 @@ PY
   if [[ "$RIME_LOAD" == "OK" ]]; then
     ok "内置 librime 运行时可加载"
   else
-    fail "内置 librime 无法加载：${RIME_LOAD#FAIL: }。内置库为 x86_64 Fedora 构建，"
-    echo "         引擎会自动尝试回退系统 librime（安装 librime 后重启输入法即可）："
-    echo "           Fedora: sudo dnf install librime   Debian/Ubuntu: sudo apt install librime"
-    echo "         也可显式指定（写入 ~/.config/environment.d/ibus-voice-ime.conf 持久生效）："
-    echo "           Fedora:   VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1"
-    echo "           Debian系: VOICE_IME_RIME_LIBRARY=/usr/lib/x86_64-linux-gnu/librime.so.1"
-    echo "           VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data"
+    fail "内置 librime 无法加载：${RIME_LOAD#FAIL: }。内置库为 x86_64 Fedora 构建，引擎会自动尝试回退系统 librime（安装 librime 后重启输入法即可）：Fedora: sudo dnf install librime；Debian/Ubuntu: sudo apt install librime。也可显式指定（写入 ~/.config/environment.d/ibus-voice-ime.conf 持久生效）：Fedora: VOICE_IME_RIME_LIBRARY=/usr/lib64/librime.so.1；Debian系: VOICE_IME_RIME_LIBRARY=/usr/lib/x86_64-linux-gnu/librime.so.1、VOICE_IME_RIME_SHARED_DATA_DIR=/usr/share/rime-data"
   fi
 else
   warn "内置 librime 运行时缺失" "键盘需要可加载的系统 librime 作为回退" "运行 ./scripts/vendor-rime-runtime.sh；已配置系统 librime 时可忽略"
@@ -234,13 +233,18 @@ fi
 
 # ---------------------------------------------------------------- 汇总
 printf '\n== 汇总 ==\n'
+# 先复述 FAIL 的原因与修复方案（doctor 会解析本段并透传到其自身汇总），
+# 用户不必在一长串明细输出里翻找。
+for ((i=0; i<${#FAIL_MSGS[@]}; i++)); do
+  printf '  [FAIL] %s\n' "${FAIL_MSGS[i]}"
+done
 for ((i=0; i<${#WARN_TITLES[@]}; i++)); do
   printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[i]}" "${WARN_IMPACTS[i]}" "${WARN_GUIDANCE[i]}"
 done
 # 保留原计数行格式：doctor 与外层安装入口依赖此约定。
 echo "  FAIL: $FAILURES  WARN: $WARNINGS"
 if [[ "$FAILURES" -gt 0 ]]; then
-  echo "  存在必需组件缺失，请先解决 FAIL 项。"
+  echo "  存在必需组件缺失，请按上方 [FAIL] 条目的修复方案处理后重跑本脚本。"
   echo "  EXIT: 1"
   exit 1
 fi

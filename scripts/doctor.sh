@@ -30,6 +30,7 @@ esac
 FAILS=0
 WARNINGS=0
 WARN_TITLES=() WARN_IMPACTS=() WARN_GUIDANCE=()
+FAIL_MSGS=()     # 汇总段复述每条 FAIL 的原因与修复方案，用户不必回翻上方明细
 FIXED=0
 FIX_FAILURES=0
 FAILED_ITEMS=()   # 待修复条目 id，fix 模式逐个治疗
@@ -49,7 +50,11 @@ warn() {
   register_warn "$1" "$2" "$3"
   printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[WARNINGS-1]}" "${WARN_IMPACTS[WARNINGS-1]}" "${WARN_GUIDANCE[WARNINGS-1]}"
 }
-fail() { printf '  [FAIL] %s\n' "$1"; FAILS=$((FAILS + 1)); }
+fail() {
+  FAIL_MSGS+=("${1//$'\n'/ }")
+  FAILS=${#FAIL_MSGS[@]}
+  printf '  [FAIL] %s\n' "$1"
+}
 # 信息行（不计数）：既有事实的说明，如验收 receipt 匹配时的降噪提示。
 info() { printf '  [INFO]  %s\n' "$1"; }
 # 模式感知跳过说明（不计数）：本机条件使某项检查失去意义时说明原因。
@@ -114,10 +119,15 @@ check_env_dependencies() {
   if [[ -x "$ROOT_DIR/scripts/check-environment.sh" ]]; then
     "$ROOT_DIR/scripts/check-environment.sh" >"$out" 2>&1 || true
     cat "$out"
-    # 只登记预检最终汇总中的 WARN（原检查段也会输出，不能双计数）。
+    # 只登记预检最终汇总中的 WARN/FAIL（原检查段也会输出，不能双计数）。
     # 明细约定：标题 —— 影响；指引；保留来源方便用户定位。
+    local env_fail_msgs=()
     while IFS= read -r line; do
       if [[ "$line" == '== 汇总 ==' ]]; then in_summary=1; continue; fi
+      if [[ $in_summary -eq 1 && "$line" == '  [FAIL] '* ]]; then
+        env_fail_msgs+=("${line#'  [FAIL] '}")
+        continue
+      fi
       [[ $in_summary -eq 1 && "$line" == '  [WARN] '* ]] || continue
       detail="${line#'  [WARN] '}"
       title="${detail%% —— *}"; detail="${detail#* —— }"
@@ -126,7 +136,14 @@ check_env_dependencies() {
     done < "$out"
     # 汇总行形如 “FAIL: 0  WARN: 2”
     if grep -qE 'FAIL: [1-9]' "$out"; then
-      fail "环境依赖存在 FAIL 项（见上方输出，需人工处理）"
+      if [[ ${#env_fail_msgs[@]} -gt 0 ]]; then
+        # 逐条透传 check-environment 汇总中的 FAIL 原因与修复方案。
+        for line in "${env_fail_msgs[@]}"; do
+          fail "[环境预检] $line"
+        done
+      else
+        fail "环境依赖存在 FAIL 项（预检汇总未给出明细，请查看上方「环境依赖」段输出）"
+      fi
       FAILED_ITEMS+=(env-deps)
     fi
   else
@@ -145,7 +162,7 @@ check_unified_config() {
     if vout="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -m ibus_voice_ime.config validate 2>&1)"; then
       ok "config validate 通过"
     else
-      fail "用户 config.json 校验失败（修复后重跑 ./install.sh 或手动编辑）："
+      fail "用户 config.json 校验失败：$(grep -m3 -E '^.+' <<<"$vout" | paste -sd'；' )。修复：修正后重跑 ./install.sh 或手动编辑 $cfg_json"
       while IFS= read -r line; do
         [[ -n "$line" ]] && printf '         %s\n' "$line"
       done <<< "$vout"
@@ -313,7 +330,7 @@ check_stale_engine_env() {
           for part in "${parts[@]}"; do
             [[ -n "$part" ]] || continue
             if [[ ! -e "$part" ]]; then
-              fail "引擎环境 $var 指向不存在的路径：$part"
+              fail "引擎环境 $var 指向不存在的路径：$part。修复：./scripts/doctor.sh fix（自动重启引擎，run-engine.sh 会自愈陈旧继承值）；或手动运行 ./scripts/ibus-restart.sh / 重新登录"
               dead=$((dead + 1))
             fi
           done
@@ -344,8 +361,7 @@ check_rime_assets() {
   if rime_ice_sources_present; then
     ok "rime-ice 方案 + 词库源（cn_dicts）就绪"
   elif [[ -f "$RIME_DATA/rime_ice.schema.yaml" ]]; then
-    fail "半残态：rime_ice.schema.yaml 在，但 cn_dicts 词库缺失（gitignore 资产未部署）"
-    fail "  引擎将回退 luna_pinyin_simp 或出零候选。修复：./init.sh 或 ./scripts/setup-rime-ice.sh"
+    fail "半残态：rime_ice.schema.yaml 在，但 cn_dicts 词库缺失（gitignore 资产未部署）。影响：引擎将回退 luna_pinyin_simp 或出零候选。修复：./init.sh 或 ./scripts/setup-rime-ice.sh"
     FAILED_ITEMS+=(rime-ice-deploy)
   else
     warn "rime-ice 方案文件不存在" "键盘使用内置 luna，可正常打字但词库较小" "运行 ./scripts/setup-rime-ice.sh；接受 luna 可忽略"
@@ -511,7 +527,7 @@ check_asr_backend() {
               ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
             else
               printf '%s\n' "$preflight_out"
-              fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
+              fail "Qwen 运行时验收失败：$(grep -m3 '\[FAIL' <<<"$preflight_out" | paste -sd'；' )。修复：先看具体阶段报错（不要先删除模型或重装 CUDA）；常见处理 ./scripts/setup-qwen-asr.sh 重建或 $0 fix"
               have_venv=0
             fi
           else
@@ -522,11 +538,10 @@ check_asr_backend() {
         else
           printf '%s\n' "$static_out"
           if grep -q '\[FAIL:python_headers\]' <<<"$static_out"; then
-            fail "sidecar 解释器缺 Python.h 开发头文件（旧版安装脚本用系统 Python 建 venv 的遗留问题；Triton 首次编译内核必失败）"
-            fail "  一键修复：$0 fix（自动备份旧 venv、用自带头文件的 Python 3.12 重建；模型不重新下载）"
+            fail "sidecar 解释器缺 Python.h 开发头文件（旧版安装脚本用系统 Python 建 venv 的遗留问题；Triton 首次编译内核必失败）。一键修复：$0 fix（自动备份旧 venv、用自带头文件的 Python 3.12 重建；模型不重新下载）"
             FAILED_ITEMS+=(qwen-python-headers)
           else
-            fail "Qwen 静态验收失败（见上方 [FAIL:xxx] 类别）"
+            fail "Qwen 静态验收失败：$(grep -m3 '\[FAIL' <<<"$static_out" | paste -sd'；' )。修复：$0 fix 或运行 ./scripts/setup-qwen-asr.sh 重建 sidecar 环境"
             FAILED_ITEMS+=(qwen-setup)
           fi
           have_venv=0
@@ -683,7 +698,7 @@ check_exec_bits() {
   if [[ ${#missing[@]} -eq 0 ]]; then
     ok "全部 shell 脚本可执行"
   else
-    fail "以下脚本缺可执行位："
+    fail "以下脚本缺可执行位：$(for f in "${missing[@]}"; do printf '%s ' "${f#"$ROOT_DIR"/}"; done)。修复：chmod +x 这些脚本，或运行 $0 fix"
     for f in "${missing[@]}"; do printf '         %s\n' "${f#"$ROOT_DIR"/}"; done
     FAILED_ITEMS+=(exec-bits)
   fi
@@ -807,7 +822,7 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
   do_fix
   printf '\n== 修复后复查 ==\n'
   FAILS=$FIX_FAILURES; WARNINGS=0; FAILED_ITEMS=()
-  WARN_TITLES=(); WARN_IMPACTS=(); WARN_GUIDANCE=()
+  WARN_TITLES=(); WARN_IMPACTS=(); WARN_GUIDANCE=(); FAIL_MSGS=()
   check_env_dependencies
   check_unified_config
   check_ibus_registration
@@ -819,6 +834,10 @@ if [[ "$MODE" == "fix" && ${#FAILED_ITEMS[@]} -gt 0 ]]; then
 fi
 
 printf '\n== 汇总 ==\n'
+# 先复述每条 FAIL 的原因与修复方案（与明细一致，无需回翻上方输出）。
+for ((i=0; i<${#FAIL_MSGS[@]}; i++)); do
+  printf '  [FAIL] %s\n' "${FAIL_MSGS[i]}"
+done
 for ((i=0; i<${#WARN_TITLES[@]}; i++)); do
   printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[i]}" "${WARN_IMPACTS[i]}" "${WARN_GUIDANCE[i]}"
 done
@@ -826,7 +845,7 @@ printf 'FAIL: %s  WARN: %s' "$FAILS" "$WARNINGS"
 [[ "$MODE" == "fix" ]] && printf '  FIXED: %s' "$FIXED"
 printf '\n'
 if [[ $FAILS -gt 0 ]]; then
-  echo "仍有问题未解决；按上方各 FAIL 行的提示处理，或提 issue 附本输出。"
+  echo "仍有问题未解决：请按上方各 [FAIL] 条目的原因与修复方案处理后重跑本脚本；或提 issue 附本输出。"
   echo "EXIT: 1"
   exit 1
 fi
