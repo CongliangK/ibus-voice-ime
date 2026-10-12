@@ -281,6 +281,10 @@ def terminal(title, default, checked, multi, options):
             columns, rows = os.get_terminal_size(sys.stdout.fileno())
         except OSError:
             columns, rows = 80, 24
+        if columns <= 0 or rows <= 0:
+            # 0x0 pty（未设 winsize 的终端）会把菜单截成空标签且只画一行，
+            # 用户完全看不到选项——退回常规尺寸而非静默不可用。
+            columns, rows = 80, 24
         columns, rows = max(1, columns - 1), max(1, rows)
         # 行数严格不超过终端高度：1 行窗口只画当前项，2 行起才容纳标题；
         # 最后一行不写换行，避免每次重绘把内容滚出屏幕（红队栅格仿真）。

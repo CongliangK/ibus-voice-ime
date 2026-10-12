@@ -17,6 +17,20 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def set_pty_winsize(fd: int, rows: int, cols: int) -> None:
+    """Python 3.11 前没有 termios.tcsetwinsize，用 TIOCSWINSZ ioctl 兜底。
+
+    不设置 winsize 的 pty 是 0x0：tui-select 只能画 1 列 1 行，任何选项
+    文本都不可见，tty 类测试会在等提示时超时（GitHub 3.10 矩阵实测）。
+    """
+    try:
+        termios.tcsetwinsize(fd, (rows, cols))
+    except AttributeError:
+        import fcntl
+        import struct
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
 class ConfigWizardTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="voice-ime-wizard-test-")
@@ -42,8 +56,7 @@ class ConfigWizardTest(unittest.TestCase):
         process = None
         try:
             saved = termios.tcgetattr(slave)
-            if hasattr(termios, "tcsetwinsize"):
-                termios.tcsetwinsize(slave, (24, 120))
+            set_pty_winsize(slave, 24, 120)
             process = subprocess.Popen(["bash", str(ROOT / "scripts/config-wizard.sh"), *args],
                                        stdin=slave, stdout=subprocess.PIPE, stderr=slave, env=self.env)
             decoration = b""
@@ -540,8 +553,7 @@ class TuiSelectTest(unittest.TestCase):
         process = None
         try:
             saved = termios.tcgetattr(slave)
-            if hasattr(termios, "tcsetwinsize"):
-                termios.tcsetwinsize(slave, (24, 30))
+            set_pty_winsize(slave, 24, 30)
             options = [] if "--capture" in args else ["--", "第一项很长" * 10, "第二项"]
             command = [sys.executable, str(ROOT / "scripts/tui-select.py"), *args, *options]
             if check_disposition:
@@ -709,8 +721,7 @@ sys.exit(rc)
         process = None
         try:
             saved = termios.tcgetattr(slave)
-            if hasattr(termios, "tcsetwinsize"):
-                termios.tcsetwinsize(slave, (24, 30))
+            set_pty_winsize(slave, 24, 30)
             process = subprocess.Popen([sys.executable, str(ROOT / "scripts/tui-select.py"),
                                         "--title", "t", "--", "第一项", "第二项"],
                                        stdin=slave, stdout=slave, stderr=subprocess.PIPE)

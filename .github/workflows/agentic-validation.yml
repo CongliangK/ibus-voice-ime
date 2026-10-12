@@ -8,9 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # 同分支新推送取消进行中的旧运行，节省额度且结果总是最新提交的。
+  group: agentic-validation-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release-readiness:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -24,8 +30,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Install sox
-        # ubuntu runner 不预装 sox；缺了会让 audio_preprocess 相关测试整体 skip。
-        run: sudo apt-get update && sudo apt-get install -y sox
+      - name: Install test dependencies
+        # sox：audio_preprocess 相关测试缺了会整体 skip；
+        # packaging：test_qwen_setup 用它从 requirements 动态推导版本基线
+        # （setup-python 的独立 CPython 不自带该包）。
+        run: |
+          sudo apt-get update && sudo apt-get install -y sox
+          python -m pip install --disable-pip-version-check packaging
       - name: Run release gate
         run: python tools/validate.py release
