@@ -1,4 +1,5 @@
-"""远程卸载引导器离线测试：stub 卸载脚本记录调用参数；验证确认门与目录校验。"""
+"""远程卸载引导器离线测试：stub 卸载脚本记录调用参数；验证确认门、版本探测、
+克隆更新优先与兜底删除。"""
 from __future__ import annotations
 
 import os
@@ -12,12 +13,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "remote-uninstall.sh"
 
-STUB_UNINSTALL = """#!/usr/bin/env bash
+# 旧版卸载脚本 stub：不含 --purge-models（版本探测应识别为旧版并兜底）。
+STUB_OLD = """#!/usr/bin/env bash
 echo "args:$*" >> "$STUB_LOG"
 echo "cwd:$(pwd)"
-if [[ -n "${STUB_RM_CLONE:-}" ]]; then rm -rf -- "$STUB_RM_CLONE"; fi
 exit "${STUB_EXIT:-0}"
 """
+
+# 新版卸载脚本 stub：支持 --purge-models / --purge-repo。
+STUB_NEW = STUB_OLD + "# supports: --purge-models --purge-repo\n"
 
 
 @unittest.skipUnless(shutil.which("bash"), "需要本地 bash，测试不联网")
@@ -27,7 +31,8 @@ class RemoteUninstallTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.home = self.root / "home"
-        self.home.mkdir()
+        self.cache = self.home / ".cache"
+        self.cache.mkdir(parents=True)
         self.clone = self.root / "clone"
         self.log = self.root / "events.log"
         self.env = {key: value for key, value in os.environ.items()
@@ -39,9 +44,11 @@ class RemoteUninstallTest(unittest.TestCase):
                         IBUS_VOICE_IME_REF="main",
                         STUB_LOG=str(self.log))
 
-    def make_clone(self, *, marker: bool = True) -> None:
+    def make_clone(self, *, marker: bool = True, stub: str = STUB_OLD) -> None:
         self.clone.mkdir(parents=True)
-        (self.clone / "uninstall-all.sh").write_text(STUB_UNINSTALL, encoding="utf-8")
+        (self.clone / "uninstall-all.sh").write_text(stub, encoding="utf-8")
+        (self.clone / "setup.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.clone / "install.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         git_dir = self.clone / ".git"
         git_dir.mkdir()
         if marker:
@@ -74,29 +81,39 @@ class RemoteUninstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("尚未做任何删除", result.stderr)
         self.assertFalse(self.log.exists())  # stub 未被调用
+        self.assertTrue(self.clone.exists())  # 确认前零删除
 
-    def test_yes_runs_purge_all(self):
-        self.make_clone()
-        # stub 模拟成功路径：删除克隆目录，引导器应确认并退出 0。
-        self.env["STUB_RM_CLONE"] = str(self.clone)
+    def test_old_script_still_gets_full_purge(self):
+        # 旧版卸载脚本：只收到兼容参数，模型缓存与克隆由引导器兜底删除。
+        self.make_clone(stub=STUB_OLD)
+        (self.cache / "ibus-voice-ime" / "models").mkdir(parents=True)
+        (self.cache / "ibus-voice-ime" / "models" / "w.bin").write_bytes(b"w")
         result = self.run_script("--yes")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        recorded = self.log.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(len(recorded), 1)
-        args = recorded[0].removeprefix("args:").split()
+        args = self.log.read_text(encoding="utf-8").splitlines()[0].removeprefix("args:").split()
+        self.assertEqual(args, ["--purge"])
+        self.assertFalse(self.clone.exists())       # 引导器兜底删除克隆
+        self.assertFalse((self.cache / "ibus-voice-ime").exists())  # 兜底删模型缓存
+
+    def test_new_script_receives_purge_models(self):
+        self.make_clone(stub=STUB_NEW)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        args = self.log.read_text(encoding="utf-8").splitlines()[0].removeprefix("args:").split()
         self.assertIn("--purge", args)
         self.assertIn("--purge-models", args)
-        self.assertIn("--purge-repo", args)
-        self.assertNotIn("--keep-user-data", args)
+        self.assertNotIn("--purge-repo", args)      # 克隆由引导器统一兜底删除
+        self.assertFalse(self.clone.exists())
 
     def test_keep_user_data_forwarded(self):
-        self.make_clone()
+        self.make_clone(stub=STUB_NEW)
         result = self.run_script("--yes", "--keep-user-data")
-        self.assertEqual(result.returncode, 1)  # stub 未真删克隆 -> 警告转非零
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         args = self.log.read_text(encoding="utf-8").splitlines()[0].removeprefix("args:").split()
         self.assertIn("--keep-user-data", args)
         self.assertNotIn("--purge", args)
         self.assertIn("--purge-models", args)
+        self.assertFalse(self.clone.exists())
 
     def test_missing_clone_unreachable_repo_fails(self):
         # 无克隆、非 github 仓库布局：应报错而不是静默成功。
@@ -111,24 +128,38 @@ class RemoteUninstallTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("缺少 uninstall-all.sh", result.stdout + result.stderr)
 
-    def test_nonzero_exit_propagates(self):
+    def test_nonzero_exit_keeps_clone_for_debugging(self):
         self.make_clone()
         self.env["STUB_EXIT"] = "3"
         result = self.run_script("--yes")
         self.assertEqual(result.returncode, 3)
-        self.assertIn("仍存在", result.stdout + result.stderr)
+        self.assertTrue(self.clone.exists())        # 失败保留克隆供排查
+        self.assertIn("保留克隆目录供排查", result.stdout + result.stderr)
 
-    def test_clone_leftover_warns_even_on_zero(self):
-        self.make_clone()
-        result = self.run_script("--yes")  # stub 退出 0 但目录仍在
+    def test_dev_clone_without_marker_refused(self):
+        # 无引导器标记（开发克隆）：拒绝删除，保持非零提醒。
+        self.make_clone(marker=False)
+        result = self.run_script("--yes")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("仍存在", result.stdout + result.stderr)
+        self.assertTrue(self.clone.exists())
+        self.assertIn("拒绝删除克隆目录", result.stdout + result.stderr)
+
+    def test_model_cache_outside_home_not_touched(self):
+        self.make_clone(stub=STUB_OLD)
+        outside = self.root / "outside-models"
+        outside.mkdir()
+        (outside / "w.bin").write_bytes(b"w")
+        self.env["VOICE_IME_MODEL_CACHE"] = str(outside)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 1)  # HOME 外拒绝删除 -> 警告非零
+        self.assertTrue((outside / "w.bin").exists())
+        self.assertIn("HOME 外", result.stdout + result.stderr)
 
     def test_dir_with_trailing_slash_normalized(self):
-        self.make_clone()
+        self.make_clone(marker=False)  # 拒删路径下的警告分支
         self.env["IBUS_VOICE_IME_DIR"] = str(self.clone) + "/./"
         result = self.run_script("--yes")
-        self.assertEqual(result.returncode, 1)  # 目录仍存在 -> 警告路径
+        self.assertEqual(result.returncode, 1)
         self.assertTrue(self.log.exists())
 
     def test_invalid_dir_value_rejected(self):
@@ -136,6 +167,80 @@ class RemoteUninstallTest(unittest.TestCase):
         result = self.run_script("--yes")
         self.assertEqual(result.returncode, 1)
         self.assertIn("非法", result.stderr)
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("bash"), "需要本地 git 与 bash，测试不联网")
+class RemoteUninstallUpdateTest(unittest.TestCase):
+    """确认后的第一步：引导器管理的克隆先尝试更新到远端最新版。"""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="remote-uninstall-update-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.remote = self.root / "remote.git"
+        self.clone = self.root / "clone"
+        self.log = self.root / "events.log"
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("IBUS_VOICE_IME_", "STUB_", "GIT_"))}
+        self.env.update(HOME=str(self.home), GIT_CONFIG_NOSYSTEM="1",
+                        GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+                        IBUS_VOICE_IME_DIR=str(self.clone),
+                        IBUS_VOICE_IME_REPO=str(self.remote),
+                        IBUS_VOICE_IME_REF="main",
+                        STUB_LOG=str(self.log))
+        self.git_env = {**self.env, "GIT_AUTHOR_NAME": "离线测试",
+                        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                        "GIT_COMMITTER_NAME": "离线测试",
+                        "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+        subprocess.run(["git", "init", "--bare", "-b", "main", str(self.remote)],
+                       check=True, capture_output=True, env=self.git_env)
+        self.seed = self.root / "seed"
+        self.git(None, "clone", str(self.remote), str(self.seed))
+        for name in ("setup.sh", "install.sh"):
+            (self.seed / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (self.seed / "uninstall-all.sh").write_text(STUB_NEW, encoding="utf-8")
+        (self.seed / "version.txt").write_text("v1\n", encoding="utf-8")
+        self.git(self.seed, "add", "-A")
+        self.git(self.seed, "commit", "-m", "v1")
+        self.git(self.seed, "push", "origin", "main")
+        self.git(None, "clone", str(self.remote), str(self.clone))
+        marker = self.clone / ".git" / "ibus-voice-ime-bootstrap"
+        marker.write_text("old\n", encoding="utf-8")
+
+    def git(self, cwd, *args):
+        argv = ["git"]
+        if cwd is not None:
+            argv += ["-C", str(cwd)]
+        subprocess.run(argv + list(args), check=True, capture_output=True,
+                       env=self.git_env)
+
+    def run_script(self, *args):
+        return subprocess.run(["bash", str(SCRIPT), *args], env=self.env,
+                              capture_output=True, text=True,
+                              stdin=subprocess.DEVNULL, start_new_session=True)
+
+    def test_clone_updated_to_remote_latest_before_uninstall(self):
+        # 远端出现 v2；引导器应先把克隆更新到 v2 再运行其中的卸载脚本。
+        (self.seed / "version.txt").write_text("v2\n", encoding="utf-8")
+        self.git(self.seed, "commit", "-am", "v2")
+        self.git(self.seed, "push", "origin", "main")
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("已更新克隆到远端最新版", result.stdout)
+        self.assertFalse(self.clone.exists())  # 更新后照常兜底删除
+
+    def test_update_failure_falls_back_to_local(self):
+        # 克隆的 origin 不可达（指向空目录）：回退本地版本继续卸载。
+        broken = self.root / "broken.git"
+        broken.mkdir()
+        subprocess.run(["git", "-C", str(self.clone), "remote", "set-url", "origin",
+                        str(broken)], check=True, capture_output=True, env=self.git_env)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("更新失败", result.stdout)
+        self.assertTrue(self.log.exists())
 
 
 if __name__ == "__main__":

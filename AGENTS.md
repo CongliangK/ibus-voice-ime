@@ -499,7 +499,7 @@ tail -f ~/.local/share/ibus-voice-ime/qwen-asr-server.log # 本地 Qwen3-ASR sid
 
 ### remote-uninstall.sh 远程卸载引导器
 
-`curl -fsSL .../remote-uninstall.sh | bash` 在任意目录可用：定位克隆（环境变量与 `remote-install.sh` 同名同义，`IBUS_VOICE_IME_DIR` 默认 `~/.local/share/ibus-voice-ime-repo`），调用其中的 `uninstall-all.sh --purge --purge-models --purge-repo`，并在结束后复核克隆确实已删；默认即「彻底清空回到安装前状态」。安全设计：绝不 sudo、不碰系统文件与跨项目共享缓存；有终端时要求输入 `yes` 确认，无控制终端（SSH/CI/管道）必须显式 `--yes` 才执行，未确认前零删除。选项：`--yes`、`--keep-user-data`（透传为 keep 模式）、`-h`。本地克隆缺失时尝试从 `IBUS_VOICE_IME_REPO` 推导 GitHub raw 地址下载 `uninstall-all.sh` 兜底（此时无仓库可删，`--purge-repo` 自然跳过）；下载失败则报错并给出手动指引。
+`curl -fsSL .../remote-uninstall.sh | bash` 在任意目录可用：定位克隆（环境变量与 `remote-install.sh` 同名同义，`IBUS_VOICE_IME_DIR` 默认 `~/.local/share/ibus-voice-ime-repo`），默认即「彻底清空回到安装前状态」。三段式流程：① 确认后先把**引导器管理的克隆**（带 `.git/ibus-voice-ime-bootstrap` 标记）更新到远端最新版——克隆即将删除，安全要求低于 remote-install.sh，但绝不 reset 开发克隆；更新失败回退本地版本，不阻断。② **版本探测**：`grep` 卸载脚本是否支持 `--purge-models`，只传兼容参数子集——旧版卸载脚本照样能完成注册/环境/数据清理。③ **兜底删除**：模型共享缓存（`VOICE_IME_MODEL_CACHE` + 默认 `~/.cache/ibus-voice-ime`，仅限 HOME 内路径）与克隆目录本身（标记 + 身份文件判据，开发克隆拒绝）由引导器自己删除，不依赖卸载脚本版本；卸载脚本非零退出时保留克隆供排查。安全设计：绝不 sudo、不碰系统文件与跨项目共享缓存；有终端时要求输入 `yes` 确认，无控制终端（SSH/CI/管道）必须显式 `--yes` 才执行，未确认前零删除。选项：`--yes`、`--keep-user-data`（透传为 keep 模式）、`-h`。本地克隆缺失时尝试从 `IBUS_VOICE_IME_REPO` 推导 GitHub raw 地址下载 `uninstall-all.sh` 兜底；下载失败则报错并给出手动指引。
 
 ## 更多文档
 

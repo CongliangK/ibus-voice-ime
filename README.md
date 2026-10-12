@@ -145,7 +145,7 @@ curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remo
 curl -fsSL https://raw.githubusercontent.com/CongliangK/ibus-voice-ime/main/remote-uninstall.sh | bash -s -- --keep-user-data
 ```
 
-克隆目录由与 `remote-install.sh` 相同的 `IBUS_VOICE_IME_DIR` 等环境变量控制。也可以在克隆内手动分级卸载：
+克隆目录由与 `remote-install.sh` 相同的 `IBUS_VOICE_IME_DIR` 等环境变量控制。引导器确认后会先把本地克隆更新到远端最新版再运行其中的卸载脚本（仅限 curl 安装的克隆；更新失败自动回退本地版本，不阻断卸载）；克隆里的 `uninstall-all.sh` 即使是旧版也完全兼容——版本探测只传支持的参数，模型缓存与克隆目录由引导器兜底删除。也可以在克隆内手动分级卸载：
 
 ```bash
 ./uninstall-all.sh --purge --purge-models                 # 清注册+数据+模型缓存，保留克隆
