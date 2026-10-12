@@ -233,7 +233,8 @@ class EnvSanitizeEntrypointTest(EnvSanitizeSandbox):
         # strip 语义只在 QWEN 两键：padded/tilde 用例必须用真实键名。
         strip_key = PATH_KEYS[0]
         cases = {strip_key: f"  {rescue} ",
-                 "VOICE_IME_QWEN_ASR_MODEL_PATH": f"~{user}/.cache",
+                 # ~user 家目录必然存在（.cache 在 CI runner 等环境可能没有）。
+                 "VOICE_IME_QWEN_ASR_MODEL_PATH": f"~{user}",
                  "V_MISSING": "/tmp/definitely-deleted-old/x"}
         out = self.helper(**cases)
         self.assertIn("unset V_MISSING", out)

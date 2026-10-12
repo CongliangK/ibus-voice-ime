@@ -1,0 +1,31 @@
+name: TTY Diagnosis
+on:
+  push:
+    branches: ["ci/tty-diagnosis"]
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Probe matrix (winsize x interpreter)
+        run: |
+          echo "== A: setup-python python3, WITH winsize =="
+          python3 tools/ci-tty-diagnose.py --label A-winsize-setuppython || true
+          echo "== B: setup-python python3, NO winsize =="
+          python3 tools/ci-tty-diagnose.py --no-winsize --label B-nowinsize-setuppython || true
+          echo "== C: system python3, NO winsize =="
+          python3 tools/ci-tty-diagnose.py --no-winsize --python /usr/bin/python3 --label C-nowinsize-syspython || true
+          echo "== D: system python3, WITH winsize =="
+          python3 tools/ci-tty-diagnose.py --python /usr/bin/python3 --label D-winsize-syspython || true
+      - name: Full failing unittest under this matrix python
+        run: |
+          cd tests && timeout 300 python3 -m unittest -v test_config_wizard 2>&1 | tail -25 || true

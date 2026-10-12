@@ -7,6 +7,14 @@
 #   ./uninstall-all.sh                    # 默认 = --keep-user-data：保留个人数据
 #   ./uninstall-all.sh --keep-user-data   # 同上（显式指定）
 #   ./uninstall-all.sh --purge            # 彻底删除所有用户数据与配置（含 API key）
+#   ./uninstall-all.sh --purge-models     # 额外删除 Qwen 模型共享缓存（默认
+#                                          # ~/.cache/ibus-voice-ime，含 VOICE_IME_MODEL_CACHE
+#                                          # 自定义位置），可与其他模式组合
+#   ./uninstall-all.sh --purge-repo       # 额外删除本脚本所在的仓库克隆本身（含
+#                                          # .venv*、.python、.tools、vendor/ 等全部下载
+#                                          # 产物）。仅当克隆带引导器标记
+#                                          # .git/ibus-voice-ime-bootstrap（即 remote-install.sh
+#                                          # curl 安装的克隆）时执行；开发克隆会被拒绝。
 #   ./uninstall-all.sh -h | --help        # 显示本帮助
 #
 # 两种模式都删除（安装足迹，与个人数据无关）：
@@ -41,7 +49,18 @@
 # --purge 额外删除：上表全部保留项，以及 ~/.local/share/ibus-voice-ime/ 与
 #   ~/.config/ibus-voice-ime/ 两个目录本身（llm.json 中的 API key 一并清除）。
 #
-# 安全边界：绝不删除仓库自身内容（vendor/、.venv*、.qwen-asr-setup.state 等）；
+# --purge-models 额外删除：Qwen 模型共享缓存目录（默认
+#   ${XDG_CACHE_HOME:-~/.cache}/ibus-voice-ime 及 VOICE_IME_MODEL_CACHE 指定的
+#   自定义位置；从当前环境、environment.d 与 systemd 用户管理器环境解析，
+#   HOME 外的自定义位置按安全边界拒绝删除并提示手动处理）。
+#
+# --purge-repo 额外删除：仓库克隆本身（ROOT_DIR 全目录：.venv-qwen-asr、
+#   .python、.tools、.cache/uv、vendor/models 等所有下载产物一并清除）。
+#   仅对带 .git/ibus-voice-ime-bootstrap 标记的克隆执行（remote-install.sh
+#   安装的克隆必有该标记）；普通开发克隆拒绝，防止误删未提交的工作副本。
+#
+# 安全边界：绝不删除仓库自身内容（vendor/、.venv*、.qwen-asr-setup.state 等；
+#   显式 --purge-repo 时例外——那正是它的职责，且仅限引导器克隆）；
 # 绝不 sudo、不改 /usr 与系统文件；不触碰其他输入法的文件（~/.cache/ibus 下
 # 其他引擎目录、~/.config/ibus/ 的 ibus 总线套接字、~/.config/pi-secrets/）。
 # ibus 缓存通过 `ibus write-cache` 重建刷新（不整删 ~/.cache/ibus）。
@@ -55,10 +74,14 @@ usage() { awk 'NR==1{next} /^#/{sub(/^# ?/, ""); print; next} {exit}' "$0"; }
 MODE="keep"
 SAW_PURGE=0
 SAW_KEEP=0
+PURGE_MODELS=0
+PURGE_REPO=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --purge)           SAW_PURGE=1; MODE="purge"; shift ;;
     --keep-user-data)  SAW_KEEP=1; MODE="keep"; shift ;;
+    --purge-models)    PURGE_MODELS=1; shift ;;
+    --purge-repo)      PURGE_REPO=1; shift ;;
     -h|--help)         usage; exit 0 ;;
     *) echo "未知参数：$1（查看 --help）" >&2; exit 2 ;;
   esac
@@ -328,6 +351,78 @@ PY
     return 1
   fi
   for record in "${CUSTOM_PATHS[@]}"; do residue "未清理的自定义路径：$record"; done
+  return 0
+}
+
+# 模型共享缓存候选位置：当前环境 + environment.d + systemd 用户管理器环境 +
+# 默认路径（${XDG_CACHE_HOME:-~/.cache}/ibus-voice-ime，含其下 models/）。
+# 只在 --purge-models 时用于删除/验证；路径统一 ~ 展开与 realpath 规范化。
+MODEL_CACHE_PATHS=()
+collect_model_cache_paths() {
+  local output decoded
+  if ! output="$(python3 - "$ENV_FILE" <<'PY'
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+candidates = []
+def add(raw):
+    raw = (raw or '').strip()
+    if not raw:
+        return
+    path = os.path.realpath(str(Path(raw).expanduser()))
+    if path not in candidates:
+        candidates.append(path)
+
+add(os.environ.get('VOICE_IME_MODEL_CACHE', ''))
+sources = [os.environ.get('XDG_CACHE_HOME', '')]
+try:
+    sources.append(Path(sys.argv[1]).read_text(encoding='utf-8'))
+except FileNotFoundError:
+    pass
+except Exception:
+    print(json.dumps({'error': f'无法验证：environment.d 读取失败 {sys.argv[1]}'}))
+try:
+    sources.append(subprocess.check_output(
+        ['systemctl', '--user', 'show-environment'], text=True))
+except Exception:
+    print(json.dumps({'error': '无法验证：systemctl show-environment 读取失败'}))
+for source in sources:
+    if not source:
+        continue
+    for line in source.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.partition('=')[0], line.partition('=')[2].strip()
+        if key == 'VOICE_IME_MODEL_CACHE':
+            if value.startswith(("'", '"')):
+                try:
+                    value = ' '.join(shlex.split(value))
+                except Exception:
+                    value = ''
+            add(value)
+xdg = os.environ.get('XDG_CACHE_HOME', '').strip() or '~/.cache'
+add(str(Path(xdg).expanduser()) + '/ibus-voice-ime')
+for path in candidates:
+    print(json.dumps([path], ensure_ascii=False))
+PY
+)"; then
+    residue "无法验证：模型缓存路径收集失败"
+    return 1
+  fi
+  if ! decoded="$(python3 -c 'import json,sys
+for line in sys.argv[1].splitlines():
+    print(json.loads(line)[0])' "$output")"; then
+    residue "无法验证：模型缓存路径转码失败"
+    return 1
+  fi
+  MODEL_CACHE_PATHS=()
+  if [[ -n "$decoded" ]]; then mapfile -t MODEL_CACHE_PATHS <<< "$decoded"; fi
   return 0
 }
 
@@ -1081,6 +1176,18 @@ fi
 step "删除运行时目录（IPC 套接字 / 剪贴板暂存）"
 rm_path "$RUNTIME_DIR" "XDG 运行时目录（voice.sock、clipboard-paste.txt）"
 
+# --------------------------------------------- 7b) 模型共享缓存（可选） --
+if [[ "$PURGE_MODELS" -eq 1 ]]; then
+  step "删除 Qwen 模型共享缓存（--purge-models）"
+  collect_model_cache_paths || true
+  if [[ ${#MODEL_CACHE_PATHS[@]} -eq 0 ]]; then
+    printf '  [已跳过] 模型共享缓存：未发现任何候选路径\n'
+  fi
+  for cache_path in "${MODEL_CACHE_PATHS[@]}"; do
+    rm_path "$cache_path" "Qwen 模型共享缓存（含 models/ 权重；HOME 外路径按安全边界拒绝）"
+  done
+fi
+
 # ------------------------------------------------------------ 8) 重启 IBus --
 step "重启 IBus 让组件移除生效"
 # GNOME 沿用完整替换配方；其他桌面走 ibus restart（与 uninstall.sh 同款，
@@ -1167,6 +1274,11 @@ verify_absent "$SERVICE_LINK" "default.target.wants 服务精确链接"
 verify_absent "$SERVICE_FILE" "systemd 服务文件"
 verify_absent "$BT_INSTALL_DIR" "守护脚本安装目录"
 verify_absent "$RUNTIME_DIR" "运行时目录"
+if [[ "$PURGE_MODELS" -eq 1 ]]; then
+  for cache_path in "${MODEL_CACHE_PATHS[@]}"; do
+    verify_absent "$cache_path" "Qwen 模型共享缓存（--purge-models）"
+  done
+fi
 if [[ "$MODE" == "purge" ]]; then
   verify_absent "$DATA_DIR" "用户数据目录"
   for config_dir in "${CONFIG_DIRS[@]}"; do verify_absent "$config_dir" "用户配置目录"; done
@@ -1267,6 +1379,29 @@ for i in "${!PROCESS_LABELS[@]}"; do
   fi
 done
 
+# ------------------------------------------------- 10) 仓库克隆本身（可选） --
+if [[ "$PURGE_REPO" -eq 1 ]]; then
+  step "删除仓库克隆本身（--purge-repo）"
+  BOOTSTRAP_MARKER="$ROOT_DIR/.git/ibus-voice-ime-bootstrap"
+  REPO_RM_OK=0
+  if [[ -f "$BOOTSTRAP_MARKER" && -f "$ROOT_DIR/setup.sh" && -f "$ROOT_DIR/install.sh" ]] \
+     && [[ "$ROOT_DIR" != "$HOME_REAL" && "$HOME_REAL" != "$ROOT_DIR" && "$HOME_REAL" != "$ROOT_DIR/"* ]]; then
+    # 本脚本正位于 ROOT_DIR 内：bash 已持有脚本 fd，目录树 unlink 后仍可读完。
+    if rm -rf -- "$ROOT_DIR" 2>/dev/null; then
+      REPO_RM_OK=1
+      DELETED_COUNT=$((DELETED_COUNT + 1))
+      printf '  [已删除] %s（.venv*、.python、.tools、vendor/ 等全部下载产物一并清除）\n' "$ROOT_DIR"
+    else
+      RESIDUES+=("无法删除仓库克隆：$ROOT_DIR（检查占用进程/权限后手动 rm -rf）")
+    fi
+  else
+    RESIDUES+=("拒绝删除仓库克隆：缺少引导器标记 .git/ibus-voice-ime-bootstrap 或身份文件（setup.sh/install.sh），或路径异常；开发克隆请自行确认后手动删除：$ROOT_DIR")
+  fi
+  if [[ "$REPO_RM_OK" -eq 1 ]]; then
+    verify_absent "$ROOT_DIR" "仓库克隆目录（--purge-repo）"
+  fi
+fi
+
 # ------------------------------------------------------------ 汇总 --
 printf '\n============================================\n'
 printf '卸载完成（模式：%s）。\n' "$MODE"
@@ -1279,7 +1414,16 @@ if [[ "$MODE" == "keep" ]]; then
 fi
 printf '共享缓存未清理（跨项目共用）：\n'
 printf '  %s\n' "$HOME/.triton/cache" "$HOME/.cache/pip" "$HOME/.cache/modelscope" "$HOME/.modelscope"
-printf '注意：仓库本身未做任何改动（vendor/、.venv* 等仍在 %s）。\n' "$ROOT_DIR"
+if [[ "$PURGE_MODELS" -eq 1 ]]; then
+  printf 'Qwen 模型共享缓存已按 --purge-models 处理（见上方各步输出）。\n'
+else
+  printf 'Qwen 模型共享缓存未清理（重装可复用）：~/.cache/ibus-voice-ime（或 VOICE_IME_MODEL_CACHE 自定义位置）；彻底释放磁盘请加 --purge-models。\n'
+fi
+if [[ "$PURGE_REPO" -eq 1 ]]; then
+  printf '仓库克隆已按 --purge-repo 处理（见上方输出；拒绝时会列为残留）。\n'
+else
+  printf '注意：仓库本身未做任何改动（vendor/、.venv* 等仍在 %s）；彻底删除请加 --purge-repo。\n' "$ROOT_DIR"
+fi
 if [[ ${#RESIDUES[@]} -gt 0 ]]; then
   printf '\n⚠ 发现 %s 处残留（见上方 [残留] 行），请人工处理：\n' "${#RESIDUES[@]}"
   for item in "${RESIDUES[@]}"; do printf '  - %s\n' "$item"; done
