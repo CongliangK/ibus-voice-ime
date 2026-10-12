@@ -544,7 +544,10 @@ print("'" + os.environ['STUB_ROOT'] + "/scripts/voice-toggle.sh'")
         doctor = self.run_script('scripts/doctor.sh', STUB_GI_RC='1')
         self.assertEqual(doctor.returncode, 1, doctor.stdout + doctor.stderr)
         summary, _ = self.summary(doctor)
-        self.assertIn('环境依赖存在 FAIL 项', doctor.stdout)
+        # 汇总段逐条透传预检 FAIL 的原因与修复方案（962a20f 起不再使用泛化句）。
+        self.assertIn('[环境预检] PyGObject 未安装', summary)
+        self.assertIn('python3-gobject', summary)
+        self.assertNotIn('FAIL: 0', summary)
         self.assertIn('FAIL: 1', summary)
         self.assertIn('EXIT: 1', summary)
 

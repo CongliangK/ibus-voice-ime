@@ -1,0 +1,32 @@
+name: TTY Diagnosis
+on:
+  push:
+    branches: ["ci/tty-diagnosis"]
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Environment snapshot
+        run: |
+          echo "python3=$(command -v python3)"; python3 -V
+          echo "locale: $(locale 2>&1 | head -3)"; echo "TERM=${TERM:-unset}"
+          python3 -c "import sys; print('stdout enc:', sys.stdout.encoding)"
+      - name: Direct pty probe of config-wizard
+        run: |
+          python3 tools/ci-tty-diagnose.py || true
+      - name: Run the failing unittest verbosely
+        run: |
+          cd tests && timeout 300 python3 -m unittest -v test_config_wizard.ConfigWizardTest.test_tty_wizard_captures_all_three_hotkeys_and_confirms 2>&1 | tail -40 || true
+      - name: Same test with system python on PATH first
+        run: |
+          cd tests && timeout 300 env PATH="/usr/bin:$PATH" VOICE_IME_WIZARD_PYTHON=/usr/bin/python3 python3 -m unittest -v test_config_wizard.ConfigWizardTest.test_tty_wizard_captures_all_three_hotkeys_and_confirms 2>&1 | tail -40 || true
