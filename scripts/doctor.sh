@@ -308,6 +308,11 @@ check_stale_engine_env() {
   #     其存在性/合法性由 check_llm_cloud_config 段负责，此处跳过——否则
   #     同一次检查里一个段对同一条件报 OK、另一个段报 FAIL，且 fix 模式
   #     的"重启引擎"永远修不好（run-engine 重启后导出同样的默认路径）；
+  #   - VOICE_IME_LLM_LOG 是按需创建的日志文件：LLM 未启用/尚未写过日志时
+  #     文件不存在是合法状态（2026-10 更新后假阳性事故：switch-*.sh 重启
+  #     daemon 时导出的默认 llm.jsonl 路径被本检查误报 FAIL，且 fix 重启
+  #     后 switch 脚本会再次注入同样路径，永远修不好）。真正陈旧的父目录
+  #     由 run-engine.sh 的自愈段负责（父目录不存在时 unset）；
   #   - 只检查以 / 开头的绝对路径值（URL 等非路径值不参与存在性判断）；
   #   - 冒号分隔的多路径值逐段检查（空段跳过），不做整串 -e。
   local pid line var val part dead=0
@@ -317,6 +322,9 @@ check_stale_engine_env() {
       case "$line" in
         VOICE_IME_LLM_CONFIG=*)
           # 可选连接文件，见上方语义边界说明。
+          ;;
+        VOICE_IME_LLM_LOG=*)
+          # 按需创建的日志文件，缺失合法，见上方语义边界说明。
           ;;
         VOICE_IME_*=/*ibus-voice-ime*)
           var="${line%%=*}" val="${line#*=}"

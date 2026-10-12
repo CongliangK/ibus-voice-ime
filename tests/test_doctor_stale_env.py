@@ -87,6 +87,24 @@ class DoctorStaleEnvTest(unittest.TestCase):
             [],
         )
 
+    def test_optional_llm_log_absent_file_is_not_flagged(self) -> None:
+        # 2026-10 回归：llm.jsonl 是按需创建的日志文件，缺失合法，不得 FAIL
+        # （switch-*.sh 曾向 daemon 注入默认路径，被本检查误报且 fix 修不好）。
+        self.assertEqual(
+            _run_case_block(
+                "VOICE_IME_LLM_LOG=/home/x/.local/share/ibus-voice-ime/llm.jsonl"
+            ),
+            [],
+        )
+
+    def test_llm_log_prefix_collision_is_not_skipped(self) -> None:
+        # 前缀冲突守卫：VOICE_IME_LLM_LOG_EXTRA 不是日志变量，仍须检查。
+        msgs = _run_case_block(
+            "VOICE_IME_LLM_LOG_EXTRA=/nonexistent/ibus-voice-ime/llm.jsonl"
+        )
+        self.assertEqual(len(msgs), 1)
+        self.assertIn("VOICE_IME_LLM_LOG_EXTRA", msgs[0])
+
     def test_stale_absolute_repo_path_is_flagged(self) -> None:
         msgs = _run_case_block(
             "VOICE_IME_RIME_LIBRARY=/nonexistent/ibus-voice-ime/lib/librime.so.1"

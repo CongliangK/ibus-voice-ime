@@ -134,7 +134,6 @@ VOICE_IME_LLM_CANDIDATES="${VOICE_IME_SWITCH_LLM_CANDIDATES:-1}" \
 VOICE_IME_LLM_BASE_URL="${VOICE_IME_SWITCH_LLM_BASE_URL:-http://127.0.0.1:18080/v1}" \
 VOICE_IME_LLM_API_KEY="${VOICE_IME_SWITCH_LLM_API_KEY:-local}" \
 VOICE_IME_LLM_MODEL="${VOICE_IME_SWITCH_LLM_MODEL:-qwen3.5-0.8b}" \
-VOICE_IME_LLM_LOG="${VOICE_IME_LLM_LOG:-$HOME/.local/share/ibus-voice-ime/llm.jsonl}" \
 "$ROOT_DIR/scripts/ibus-restart.sh" >/dev/null || true
 # 激活语义见 scripts/activate-voice-engine.sh（GNOME 输入源注册即可用，重试后降级判定）
 "$(dirname "$0")/activate-voice-engine.sh" || true

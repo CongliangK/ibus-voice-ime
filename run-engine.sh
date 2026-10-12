@@ -104,6 +104,17 @@ eval "$("$ROOT_DIR/scripts/env-sanitize.sh" \
   unset VOICE_IME_LLM_CONFIG
 }
 
+# VOICE_IME_LLM_LOG 同理，但语义是"按需创建的日志文件"：文件本身不存在是
+# 合法的（首次写入时才创建），因此只对"父目录不存在"的陈旧值自愈——典型
+# 根因是 switch-*.sh 在旧仓库路径时代重启 daemon 时导出的默认值，仓库迁移
+# 后父目录消失。父目录存在则保留，写入方（llm_postprocess）负责建文件。
+if [[ -n "${VOICE_IME_LLM_LOG:-}" && "${VOICE_IME_LLM_LOG}" == /* ]]; then
+  if [[ ! -d "$(dirname "$VOICE_IME_LLM_LOG")" ]]; then
+    echo "[run-engine] 自愈：继承的 VOICE_IME_LLM_LOG 父目录不存在（$VOICE_IME_LLM_LOG），已忽略" >&2
+    unset VOICE_IME_LLM_LOG
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # 统一 JSON 配置时代（docs/configuration.md）：本脚本不再导出任何
 # VOICE_IME_* 默认值——渠道/行为默认统一由 config/defaults.json 在进程内生效
