@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT_DIR/.venv-qwen-asr"
 MODELS_DIR="${VOICE_IME_QWEN_ASR_MODELS_DIR:-$ROOT_DIR/vendor/models/qwen3-asr}"
+# 共享模型缓存：分档真实数据统一放这里，仓库 vendor 下只建符号链接（既有
+# vendor 路径语义不变，引擎/验收/REUSE 判据照旧读 vendor 路径）。跨克隆复用，
+# 卸载或更换克隆目录不丢 6.2GB 权重；VOICE_IME_MODEL_CACHE 可自定义位置。
+MODEL_CACHE="${VOICE_IME_MODEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ibus-voice-ime/models}"
+[[ "$MODEL_CACHE" == /* ]] || MODEL_CACHE="$ROOT_DIR/$MODEL_CACHE"
 ENABLE_NOW="${VOICE_IME_ENABLE_QWEN_ASR:-1}"
 BOOTSTRAP="$(command -v python3)"
 CHECK="$ROOT_DIR/scripts/qwen-preflight.py"
@@ -28,6 +33,67 @@ fi
 # 只读验收（--verify-only）在任何下载集合/默认模型变量解析之前完成：
 # 验收读取的是实际持久化的 sidecar 配置，不应被下载集合变量阻断（红队发现）。
 TIMEOUT="${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}"
+# 下载到缓存内的临时目录（.part-*）；中断/失败时由 finish() 统一清理。
+PART_DIRS=()
+# 共享缓存分档锁：安装锁（fd 9）是每克隆的，挡不住跨克隆对同一共享缓存的
+# TOCTOU（红队实测并发 mv 嵌套）；分档 flock 在缓存目录上跨克隆串行化。
+CACHE_LOCK_FD=8
+cache_lock() {  # <size>
+  mkdir -p -- "$MODEL_CACHE"
+  eval "exec $CACHE_LOCK_FD>\"\$MODEL_CACHE/.lock-Qwen3-ASR-\$1\""
+  flock "$CACHE_LOCK_FD" || { echo "无法锁定共享缓存（$MODEL_CACHE）。" >&2; exit 1; }
+}
+cache_unlock() {
+  flock -u "$CACHE_LOCK_FD" 2>/dev/null || true
+  eval "exec $CACHE_LOCK_FD>&-" 2>/dev/null || true
+}
+
+# 验收 receipt：记录「何时用哪套解释器/依赖/模型通过了 smoke 验收」，doctor
+# 匹配当前实际（reqs sha256/解释器/模型清单）时把 WARN 降为 INFO。纯附加产物：
+# 写入失败只提示，绝不阻断验收成功。
+write_verify_receipt() {  # <python> <model_dir>
+  local receipt="$VENV/verify-receipt.json"
+  if [[ ! -d "$VENV" || -L "$VENV" ]]; then
+    echo "验收 receipt 未写入：$VENV 不是常规目录（--verify-only 不创建 venv）。"
+    return 0
+  fi
+  if ! "$BOOTSTRAP" - "$receipt" "$1" "$2" "$ROOT_DIR/requirements-qwen-asr.txt" \
+      "$ROOT_DIR" "${GPU_BRIEF:-unknown}" "${VOICE_IME_QWEN_ASR_DTYPE:-bfloat16}" <<'PY'
+import hashlib, json, os, sys, time
+receipt_path, python, model_path, reqs_path, root_dir, gpu, dtype = sys.argv[1:8]
+def sha256(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+files = {}
+for name in sorted(os.listdir(model_path)):
+    full = os.path.join(model_path, name)
+    if os.path.isfile(full):
+        status = os.stat(full)
+        # mtime_ns：秒级 mtime 挡不住同秒篡改（红队实测同长度替换+还原秒
+        # 可骗过 INFO）；保留 mtime 字段仅为兼容旧 receipt（旧 receipt 会因
+        # 无 mtime_ns 匹配失败 → 恢复 WARN，属安全方向的失效）。
+        files[name] = {'size': status.st_size, 'mtime': int(status.st_mtime),
+                       'mtime_ns': status.st_mtime_ns}
+receipt = {
+    'stage': 'smoke', 'python': python, 'reqs_sha256': sha256(reqs_path),
+    'model_path': model_path, 'model_files': files, 'gpu': gpu, 'dtype': dtype,
+    'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S%z'), 'root_dir': root_dir,
+}
+tmp = receipt_path + '.tmp'
+with open(tmp, 'w', encoding='utf-8') as stream:
+    json.dump(receipt, stream, ensure_ascii=False, indent=2, sort_keys=True)
+os.replace(tmp, receipt_path)
+PY
+  then
+    echo "⚠ 验收 receipt 写入失败（不影响验收结果）：$receipt" >&2
+    return 0
+  fi
+  echo "验收 receipt 已写入：$receipt"
+}
+
 if [[ $VERIFY_ONLY -eq 1 ]]; then
   # Match the launcher's persisted overrides, without sourcing shell syntax or
   # ever modifying environment.d / JSON. Values containing spaces remain safe.
@@ -37,7 +103,15 @@ if [[ $VERIFY_ONLY -eq 1 ]]; then
   TARGETS="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$BOOTSTRAP" -c 'from ibus_voice_ime.asr import qwen_asr_runtime as r; print(r._python()); print(r.model_id())')"
   mapfile -t CHECK_TARGETS <<< "$TARGETS"
   [[ ${#CHECK_TARGETS[@]} -eq 2 ]] || { echo "无法解析实际 sidecar 配置" >&2; exit 1; }
-  exec "$BOOTSTRAP" "$CHECK" --python "${CHECK_TARGETS[0]}" --stage smoke --model "${CHECK_TARGETS[1]}" --timeout "$TIMEOUT"
+  GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
+  if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+    eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+  fi
+  if "$BOOTSTRAP" "$CHECK" --python "${CHECK_TARGETS[0]}" --stage smoke --model "${CHECK_TARGETS[1]}" --timeout "$TIMEOUT"; then
+    write_verify_receipt "${CHECK_TARGETS[0]}" "${CHECK_TARGETS[1]}"
+    exit 0
+  fi
+  exit 1
 fi
 
 # 未指定集合时保持旧行为：两档均下载。显式空集合与未知分档须在任何安装前拒绝。
@@ -134,6 +208,31 @@ if [[ "$ENABLE_NOW" != "0" ]]; then
   export VOICE_IME_QWEN_ASR_DTYPE="${VOICE_IME_QWEN_ASR_DTYPE:-bfloat16}"
 fi
 
+# 下载预算只作提示，不改变缓存、下载集合或完整性判据。模型常量来自
+# Qwen/Qwen3-ASR-{0.6B,1.7B} 发布快照的权重/配套文件体积（十进制 GB，
+# 四舍五入：约 1.8 / 4.4GB）；依赖按 torch CUDA 13 全家桶典型安装估算，
+# 并非精确承诺，版本/平台、已有缓存和重建备份都会改变实际峰值。
+MODEL_TENTHS=0 SEEN_SIZES=" "
+printf '\n== 下载预算（估算，缓存命中会减少下载）==\n'
+for size in "${QWEN_SIZES[@]}"; do
+  [[ "$SEEN_SIZES" != *" $size "* ]] || continue
+  SEEN_SIZES+="$size "
+  case "$size" in
+    0.6B) echo '  模型 0.6B ≈1.8GB'; MODEL_TENTHS=$((MODEL_TENTHS + 18)) ;;
+    1.7B) echo '  模型 1.7B ≈4.4GB'; MODEL_TENTHS=$((MODEL_TENTHS + 44)) ;;
+  esac
+done
+echo '  依赖 venv 典型 ~6GB（torch cu13 全家桶；下载缓存/临时解包另占空间）。'
+if [[ -d "$HOME/.cache/pip" ]]; then
+  echo '  检测到 ~/.cache/pip：同机重装依赖通常直接命中缓存（不扫描缓存大小，实际命中以 pip 为准）。'
+else
+  echo '  pip 缓存未检测到：首次可能需下载数 GB 依赖；后续同机重装可复用缓存。'
+fi
+# 保守预留：新 venv 6GB + pip 缓存/临时解包约 12GB + 所选模型；旧备份另计。
+PEAK_TENTHS=$((MODEL_TENTHS + 180))
+printf '  预计磁盘峰值（新装保守预留）：约 %d.%dGB；重建保留旧 venv 时还需额外 ~6GB，实际依版本/缓存而变。\n' "$((PEAK_TENTHS / 10))" "$((PEAK_TENTHS % 10))"
+echo '  中断可续装：重跑同一命令，已就绪依赖/模型会复用；尚未完成的临时模型下载可能重下。'
+
 # CPython downloads are independent from the pip package mirror. Default is
 # repository-local managed 3.12, including headers, even if distro 3.12 exists.
 # The helper bootstraps local uv when absent; explicit choices never fall back.
@@ -164,6 +263,9 @@ finish() {
     fi
     mv -- "$BACKUP" "$VENV"
     echo "已恢复原 venv；未切换后端。" >&2
+  fi
+  if [[ ${#PART_DIRS[@]} -gt 0 ]]; then
+    rm -rf -- "${PART_DIRS[@]}"
   fi
   rm -f "$STATE_FILE"
   exit "$rc"
@@ -271,20 +373,97 @@ fi
 
 MS_CLI="$VENV/bin/modelscope"
 [[ -x "$MS_CLI" ]] || { echo "venv 未安装 modelscope CLI。" >&2; exit 1; }
-mkdir -p "$MODELS_DIR"
+mkdir -p "$MODELS_DIR" "$MODEL_CACHE"
+echo "共享模型缓存：$MODEL_CACHE（VOICE_IME_MODEL_CACHE 可自定义；vendor 下建符号链接）"
+
+# 分档完整性判定（配置和全部权重分片存在）：下载前、下载后、缓存复用三处共用，
+# 与验收器 --model-only 同一逻辑，vendor 符号链接会透明穿透到缓存目录。
+model_ready() {
+  "$BOOTSTRAP" "$CHECK" --model-only --model "$1" >/dev/null 2>&1
+}
+
 for size in "${QWEN_SIZES[@]}"; do
   model_dir="$MODELS_DIR/Qwen3-ASR-$size"
-  if "$BOOTSTRAP" "$CHECK" --model-only --model "$model_dir" >/dev/null 2>&1; then
-    echo "模型配置及全部分片已存在：$model_dir"
-  else
+  cache_dir="$MODEL_CACHE/Qwen3-ASR-$size"
+  if [[ -L "$model_dir" ]]; then
+    if model_ready "$model_dir"; then
+      echo "模型配置及全部分片已存在：$model_dir"
+      continue
+    fi
+    # 链接目标不完整：指向本缓存的删链接走下方缓存补齐流程；指向其他位置
+    # （用户自定义布局）保持旧语义在原位补齐，不擅自改写。
+    if [[ "$(readlink -- "$model_dir")" == "$cache_dir" ]]; then
+      rm -f -- "$model_dir"
+    else
+      echo "下载/补齐 Qwen/Qwen3-ASR-$size（保留已有文件）……"
+      "$MS_CLI" download --model "Qwen/Qwen3-ASR-$size" --local_dir "$model_dir"
+      "$BOOTSTRAP" "$CHECK" --model-only --model "$model_dir"
+      continue
+    fi
+  fi
+  if [[ -d "$model_dir" ]]; then
+    # 旧布局：vendor 下真实目录。完整则迁入共享缓存并在原位留符号链接；
+    # 迁移与缓存发布共用分档 flock（跨克隆串行，防 TOCTOU 嵌套）；
+    # mv 失败或缓存位已被占用时保留原状，不阻断安装。
+    if model_ready "$model_dir"; then
+      echo "模型配置及全部分片已存在：$model_dir"
+      cache_lock "$size"
+      if [[ ! -e "$cache_dir" ]] && mv -- "$model_dir" "$cache_dir"; then
+        ln -s -- "$cache_dir" "$model_dir"
+        echo "已迁移到共享缓存：$cache_dir（vendor 内留符号链接；卸载/更换克隆目录不丢模型）"
+      else
+        echo "共享缓存迁移跳过（缓存目录已存在或移动失败）：继续使用 $model_dir"
+      fi
+      cache_unlock
+      continue
+    fi
     echo "下载/补齐 Qwen/Qwen3-ASR-$size（保留已有文件）……"
     "$MS_CLI" download --model "Qwen/Qwen3-ASR-$size" --local_dir "$model_dir"
     "$BOOTSTRAP" "$CHECK" --model-only --model "$model_dir"
+    continue
   fi
+  cache_lock "$size"
+  if model_ready "$cache_dir"; then
+    echo "模型配置及全部分片已在共享缓存（跳过下载，重建符号链接）：$cache_dir"
+    ln -s -- "$cache_dir" "$model_dir"
+    cache_unlock
+    continue
+  fi
+  if [[ ! -e "$cache_dir" ]]; then
+    # 全新下载：mktemp 临时目录（不依赖 $$ 的跨 PID 唯一性）；分档 flock
+    # 串行化并发克隆——先在 .part 内通过真实 model-only 校验才发布，
+    # CLI 伪成功（rc0 但缺权重）不会把半成品定稿成正式分档（红队实测）。
+    part_dir="$(mktemp -d "$MODEL_CACHE/.part-Qwen3-ASR-${size}-XXXXXX")"
+    PART_DIRS=("$part_dir")
+    echo "下载 Qwen/Qwen3-ASR-$size 到共享缓存（临时目录校验通过后落位）……"
+    if ! "$MS_CLI" download --model "Qwen/Qwen3-ASR-$size" --local_dir "$part_dir"; then
+      rm -rf -- "$part_dir"; PART_DIRS=(); cache_unlock
+      echo "下载 Qwen/Qwen3-ASR-$size 失败（临时目录已清理，可重试续装）。" >&2
+      exit 1
+    fi
+    if ! "$BOOTSTRAP" "$CHECK" --model-only --model "$part_dir"; then
+      rm -rf -- "$part_dir"; PART_DIRS=(); cache_unlock
+      echo "临时目录未通过完整性校验，已清理；不发布半成品到共享缓存。" >&2
+      exit 1
+    fi
+    if [[ ! -e "$cache_dir" ]]; then
+      mv -- "$part_dir" "$cache_dir"
+    else
+      rm -rf -- "$part_dir"   # 并发克隆已抢先定稿：复用其成果
+    fi
+    PART_DIRS=()
+  else
+    echo "补齐共享缓存中的 Qwen/Qwen3-ASR-$size（保留已有文件）……"
+    "$MS_CLI" download --model "Qwen/Qwen3-ASR-$size" --local_dir "$cache_dir"
+  fi
+  "$BOOTSTRAP" "$CHECK" --model-only --model "$cache_dir"
+  ln -s -- "$cache_dir" "$model_dir"
+  cache_unlock
 done
 if [[ "$GPU_STATE" == "ok" ]]; then
   VOICE_IME_QWEN_ASR_MAX_NEW_TOKENS=16 "$BOOTSTRAP" "$CHECK" --python "$PY" \
     --stage smoke --model "$DEFAULT_MODEL_DIR" --timeout "$TIMEOUT"
+  write_verify_receipt "$PY" "$DEFAULT_MODEL_DIR"
 fi
 # Preserve exact resolved dependency versions for issue reports; not a universal
 # CUDA lock. No user configuration is changed before the gates above pass.

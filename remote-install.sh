@@ -20,6 +20,35 @@ network_hint() {
   printf '%s\n' '请检查网络、仓库地址和分支；可设置 https_proxy，或将 IBUS_VOICE_IME_REPO 指向可信镜像后重试。' >&2
 }
 
+# 安装再生目录：setup-rime-ice.sh 每次安装从上游 rime-ice 复制/改写整个
+# vendor/rime/share/rime-data（含按 --no-zhwiki 等选项改写 rime_ice.dict.yaml
+# 的 import_tables），枚举单个文件注定不完备（红队实测多条覆盖点）。
+# 模型：该目录整体属于"安装再生的运行时数据"（全部保持 git 跟踪，离线
+# 种子不丢）——更新时自动还原 tracked/暂存修改、清理非 ignored 的未跟踪
+# 残留；用户不应在此目录内保存任何手工修改。
+GENERATED_DIR='vendor/rime/share/rime-data'
+
+# 单个 porcelain 路径（剥引号）是否在再生目录内。
+is_generated_path() {
+  local path="$1"
+  path="${path%\"}"; path="${path#\"}"
+  [[ "$path" == "$GENERATED_DIR"/* ]]
+}
+
+# 判断 porcelain 行（含重命名 old -> new 的两侧）的全部路径是否都在再生
+# 目录内。绝不按空白拆词：带空格路径必须整段解析（红队 A2 发现）。
+is_generated_line() {
+  local line="$1" left right
+  line="${line:3}"
+  if [[ "$line" == *' -> '* ]]; then
+    left="${line%% -> *}"
+    right="${line#* -> }"
+    is_generated_path "$left" && is_generated_path "$right"
+  else
+    is_generated_path "$line"
+  fi
+}
+
 DIR="${IBUS_VOICE_IME_DIR-${HOME-}/.local/share/ibus-voice-ime-repo}"
 REPO="${IBUS_VOICE_IME_REPO-https://github.com/CongliangK/ibus-voice-ime.git}"
 REF="${IBUS_VOICE_IME_REF-main}"
@@ -58,8 +87,40 @@ if [[ -e "$DIR" || -L "$DIR" ]]; then
   [[ "$TOP" == "$DIR" ]] || fail '安装目录不是 Git 仓库根目录，不会覆盖。'
   ORIGIN="$(git -C "$DIR" remote get-url origin 2>/dev/null)" || fail '现有克隆缺少 origin 远端，不会覆盖。'
   [[ "$ORIGIN" == "$REPO" ]] || fail '现有克隆的 origin 与 IBUS_VOICE_IME_REPO 不匹配，不会覆盖；请检查仓库地址或使用其他目录。'
-  CHANGES="$(git -C "$DIR" status --porcelain --untracked-files=all)" || fail '无法检查本地变更，拒绝自动更新。'
-  [[ -z "$CHANGES" ]] || fail '现有克隆有未提交变更（含未跟踪文件），拒绝自动覆盖；请把需要的文件备份到克隆目录之外，或删除整个克隆目录让引导器重新拉取（不要在克隆里提交：本地提交同样会被拒绝自动更新）。'
+  # 变更分流：再生目录内的变更（tracked 修改/删除/暂存/未跟踪残留）更新时
+  # 自动还原/清理；目录外的任何变更照旧拒绝。本地提交保护（marker）与
+  # ignored 碰撞预检都先于还原执行——拒绝路径绝无副作用（红队发现顺序漏洞）。
+  # porcelain -z + 整段 python 分类：NUL 记录（重命名/复制是两条），文件名
+  # 含 " -> "、空格、换行、非 UTF-8 均不会被误解析（红队 A2 发现）。
+  CLASSIFY="$(git -C "$DIR" status --porcelain -z --untracked-files=all | python3 -c '
+import sys
+GEN = "vendor/rime/share/rime-data/"
+fields = sys.stdin.buffer.read().split(b"\0")
+generated = other = 0
+i = 0
+while i < len(fields):
+    rec = fields[i]; i += 1
+    if not rec:
+        continue
+    paths = [rec[3:]]
+    if rec[:1] in (b"R", b"C") and i < len(fields):
+        paths.append(fields[i]); i += 1
+    if all(p.decode("utf-8", "surrogateescape").startswith(GEN) for p in paths):
+        generated += 1
+    else:
+        other += 1
+print(generated, other)')" || fail '无法检查本地变更，拒绝自动更新。'
+  GENERATED_DIRTY=0 OTHER_COUNT=0
+  read -r GENERATED_COUNT OTHER_COUNT <<<"$CLASSIFY" || true
+  [[ "${GENERATED_COUNT:-0}" -gt 0 ]] && GENERATED_DIRTY=1
+  # 嵌套 git 仓库不会被 clean -f 删除（需 -ff）；安装不会在再生目录里创建
+  # 仓库，出现即视为用户数据，拒绝而不是强删（红队 A2 发现）。
+  if [[ -n "$(find "$DIR/$GENERATED_DIR" -name .git -print -quit 2>/dev/null)" ]]; then
+    fail "再生目录 $GENERATED_DIR 内存在嵌套 Git 仓库（用户数据），拒绝自动更新；请自行处理后重试。"
+  fi
+  if [[ "${OTHER_COUNT:-1}" -ne 0 ]]; then
+    fail "现有克隆有未提交变更（含未跟踪文件），拒绝自动覆盖；请把需要的文件备份到克隆目录之外，或删除整个克隆目录让引导器重新拉取（不要在克隆里提交：本地提交同样会被拒绝自动更新）。注：$GENERATED_DIR/ 内的变更属安装再生数据，会自动还原，不计入。"
+  fi
   printf '%s\n' '正在更新已有的干净克隆……'
   # 显式分支映射支持浅克隆切换分支，避免 reset 到过时的远端跟踪引用。
   if ! git -C "$DIR" fetch --depth 1 origin "+refs/heads/$REF:refs/remotes/origin/$REF"; then
@@ -70,23 +131,79 @@ if [[ -e "$DIR" || -L "$DIR" ]]; then
   # 标签/简写歧义防护：一律用全限定 ref，避免名为 origin/<ref> 的标签
   # 让 reset 指向旧版本（红队 2026-10-11 发现）。
   NEW_HEAD="$(git -C "$DIR" rev-parse --verify "$TARGET_REF^{commit}")" || fail '远端分支解析失败，尚未重置本地文件。'
-  # ignored 文件碰撞预检：本地被忽略的文件若与新版本跟踪文件同名，
-  # reset --hard 会静默覆盖（用户数据丢失）；先拒绝并点名文件。
-  COLLISION="$(comm -12 \
-    <(git -C "$DIR" ls-tree -r --name-only "$TARGET_REF") \
-    <(git -C "$DIR" ls-files -o -i --exclude-standard))" || true
-  [[ -z "$COLLISION" ]] || fail "本地被忽略的文件与新版本文件同名，拒绝覆盖：$(printf '%s ' $COLLISION)"
+  # ignored 文件碰撞预检（fail-closed）：本地被忽略的文件若与新版本跟踪
+  # 文件冲突，reset --hard 会静默覆盖/删除（用户数据丢失）。两类冲突都查：
+  # 完全同名与路径前缀冲突（ignored 文件 a.local vs incoming 目录 a.local/x，
+  # 或反之）。结果经退出码传递（0=无冲突 2=有冲突 其它=预检故障），不用
+  # stdout 文本判据——文件名恰为换行等畸形名时命令替换会剥成空串导致假
+  # 通过；内部子进程失败必须显式非零退出，否则 fail-open（红队注入实测）。
+  COLLISION_RC=0
+  COLLISION="$(
+    DIR="$DIR" TARGET_REF="$TARGET_REF" python3 /dev/stdin <<'PY_COLLISION'
+import os, subprocess, sys
+repo, target_ref = os.environ["DIR"], os.environ["TARGET_REF"]
+def die(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+def git_bytes(*args):
+    proc = subprocess.run(["git", "-C", repo, *args], capture_output=True)
+    if proc.returncode != 0:
+        die("git " + " ".join(args[:2]) + " failed: " + proc.stderr.decode("utf-8", "replace").strip())
+    return proc.stdout
+incoming = set(p.decode("utf-8", "surrogateescape") for p in git_bytes("ls-tree", "-r", "--name-only", "-z", target_ref).split(b"\0") if p)
+proc = subprocess.run(["git", "-C", repo, "ls-files", "-o", "-i", "--exclude-standard", "-z"],
+                      capture_output=True)
+if proc.returncode != 0:
+    die("git ls-files failed: " + proc.stderr.decode("utf-8", "replace").strip())
+ignored = [p.decode("utf-8", "surrogateescape") for p in proc.stdout.split(b"\0") if p]
+hits = set()
+for g in ignored:
+    if g in incoming:
+        hits.add(g)
+        continue
+    parts = g.split("/")
+    if any("/".join(parts[:i]) in incoming for i in range(1, len(parts))):
+        hits.add(g)
+        continue
+    if any(t.startswith(g + "/") for t in incoming):
+        hits.add(g)
+for h in sorted(hits):
+    name = h.encode("utf-8", "surrogateescape")
+    name = name.replace(b"\n", b"LF-ESC").replace(b"\r", b"CR-ESC")
+    sys.stdout.buffer.write(name + b"\n")
+sys.exit(2 if hits else 0)
+PY_COLLISION
+  )" || COLLISION_RC=$?
+  case "$COLLISION_RC" in
+    0) ;;
+    2) fail "本地被忽略的文件与新版本跟踪路径冲突，拒绝覆盖：$COLLISION" ;;
+    *) fail 'ignored 碰撞预检失败（fail-closed），拒绝自动更新。' ;;
+  esac
   # 本地提交保护：引导器用 .git 内的同步标记识别自己管理的克隆；HEAD
   # 与标记不一致说明用户提交过本地变更，浅克隆无法区分落后/分叉，
   # 一律拒绝自动重置（红队 2026-10-11 发现本地提交会被 reset 删除）。
   MARKER="$DIR/.git/ibus-voice-ime-bootstrap"
   HEAD_NOW="$(git -C "$DIR" rev-parse HEAD)"
   if [[ "$HEAD_NOW" != "$NEW_HEAD" ]]; then
-    if [[ -f "$MARKER" && "$(cat -- "$MARKER")" == "$HEAD_NOW" ]]; then
-      git -C "$DIR" reset --hard "$TARGET_REF" || fail '更新本地克隆失败，请检查目录权限与 Git 状态。'
-    else
+    [[ -f "$MARKER" && "$(cat -- "$MARKER")" == "$HEAD_NOW" ]] ||
       fail '克隆的 HEAD 与引导器上次同步的不一致（可能存在本地提交）；为防数据丢失拒绝自动更新，请自行处理后再试。'
-    fi
+  fi
+  # 所有拒绝性检查（origin/变更分流/碰撞/本地提交）均已通过才动工作区：
+  # ① reset -q 先把该目录的 index 条目还原到 HEAD（清掉暂存的新增/重命名
+  # ——checkout HEAD -- dir 不移除 HEAD 没有的 index 项，红队实测 staged-new
+  # 残留假成功）；② checkout HEAD -- dir 恢复工作区；③ clean 清非 ignored
+  # 未跟踪残留（下载产物多为 ignored，不受影响）；reset 前清理避免阻塞。
+  if [[ $GENERATED_DIRTY -eq 1 ]]; then
+    git -C "$DIR" reset -q -- "$GENERATED_DIR" ||
+      fail "还原安装再生目录 $GENERATED_DIR 失败（reset），拒绝自动更新。"
+    git -C "$DIR" checkout HEAD -- "$GENERATED_DIR" ||
+      fail "还原安装再生目录 $GENERATED_DIR 失败，拒绝自动更新。"
+    git -C "$DIR" clean -fdq -- "$GENERATED_DIR" ||
+      fail "清理安装再生目录 $GENERATED_DIR 失败，拒绝自动更新。"
+    printf '已还原安装再生目录 %s（setup-rime-ice.sh 每次安装会从上游覆盖它；目录内手工修改不保留）。\n' "$GENERATED_DIR"
+  fi
+  if [[ "$HEAD_NOW" != "$NEW_HEAD" ]]; then
+    git -C "$DIR" reset --hard "$TARGET_REF" || fail '更新本地克隆失败，请检查目录权限与 Git 状态。'
   fi
   printf '%s\n' "$NEW_HEAD" > "$MARKER"
 else

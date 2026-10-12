@@ -76,9 +76,13 @@ with (root / 'events.jsonl').open('a') as stream:
     stream.write(json.dumps({'name': name, 'args': sys.argv[1:],
         'sizes': os.environ.get('VOICE_IME_QWEN_ASR_SIZES'),
         'model': os.environ.get('VOICE_IME_QWEN_ASR_MODEL'),
+        'enable': os.environ.get('VOICE_IME_ENABLE_QWEN_ASR'),
         'postprocess': os.environ.get('VOICE_IME_SWITCH_LLM_POSTPROCESS'),
         'has_key': bool(os.environ.get('VOICE_IME_SILICONFLOW_API_KEY'))}) + '\\n')
-if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
+if name == 'init.sh':
+    # 真实 init.sh 契约：汇总末尾输出 TSV 状态标记供 setup.sh 门控语音验收。
+    print('VOICE_IME_INIT_STATE\\tvoice=' + os.environ.get('STUB_INIT_VOICE_STATE', 'ok'))
+    sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
 ''')
 
     def script(self, relative, content):
@@ -159,6 +163,84 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
         self.assertEqual(self.events()[-1]['sizes'], '0.6B')
         self.assertEqual(self.events()[-1]['model'], '0.6b')
 
+    def test_qwen_flags_skip_wizard_and_forward_legal_subsets(self):
+        for flags, sizes, model in ((['--qwen-sizes', '0.6B'], '0.6B', '0.6b'),
+                                    (['--qwen-sizes', '0.6B 1.7B', '--qwen-model', '0.6b'], '0.6B 1.7B', '0.6b'),
+                                    (['--qwen-model', '1.7b'], '0.6B 1.7B', '1.7b')):
+            with self.subTest(flags=flags):
+                self.log.unlink(missing_ok=True)
+                result = self.run_setup('--yes', '--skip-verify', '--skip-doctor', *flags)
+                self.assert_success(result)
+                self.assertEqual(self.names(), ['init.sh'])
+                self.assertEqual((self.events()[0]['sizes'], self.events()[0]['model']), (sizes, model))
+                self.assertIn('语音方案 local-qwen', result.stdout)
+
+    def test_qwen_flags_invalid_exit_two_before_any_work(self):
+        for flags in (['--qwen-sizes'], ['--qwen-sizes', ''], ['--qwen-sizes', ' '],
+                      ['--qwen-sizes', '0.6b'], ['--qwen-sizes', '1.7B bad'],
+                      ['--qwen-sizes', '1.7B\nbad'], ['--qwen-model'],
+                      ['--qwen-model', '2b'], ['--qwen-model', '0.6b', '--cloud', 'mimo'],
+                      ['--keyboard-only', '--qwen-sizes', '0.6B']):
+            with self.subTest(flags=flags):
+                result = self.run_setup('--yes', *flags)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn('错误：--qwen-', result.stderr)
+                self.assertEqual(self.events(), [])
+
+    def test_qwen_flags_override_reconfigure_wizard_result_without_downloads(self):
+        self.config.write_text('{}')
+        result = self.run_setup('--reconfigure', '--yes', '--qwen-sizes', '0.6B', '--qwen-model', '0.6b')
+        self.assert_success(result)
+        self.assertEqual(self.names(), ['wizard', 'apply', 'install.sh'])
+        self.assertIn('--voice-plan', self.events()[0]['args'])
+        self.assertIn('--defaults', self.events()[0]['args'])
+        self.assertEqual(json.loads(self.config.read_text())['asr']['qwen3']['model'], '0.6b')
+        self.assertIn('Qwen 模型：0.6b', result.stdout)
+
+    def test_explicit_qwen_reconfigure_on_tty_never_reasks_model(self):
+        self.config.write_text('{}')
+        master, slave = pty.openpty()
+        try:
+            result = subprocess.run(['bash', str(self.root / 'setup.sh'), '--reconfigure',
+                                     '--qwen-model', '0.6b', '--dry-run'], env=self.env,
+                                    stdin=slave, capture_output=True, text=True, timeout=20)
+            self.assert_success(result)
+            self.assertIn('--defaults', self.events()[0]['args'])
+            self.assertEqual(self.names(), ['wizard'])
+            self.assertIn('默认模型 0.6b', result.stdout)
+        finally:
+            os.close(master)
+            os.close(slave)
+
+    def test_start_card_reads_effective_hotkeys_for_every_desktop_success_exit(self):
+        config = {'recording': {'hotkeys': 'shift+control+x;Super+y',
+                                'raw_hotkeys': 'Alt+Shift+R', 'clipboard_hotkeys': 'Meta+P'},
+                  'asr': {'backend': 'mimo-cloud', 'qwen3': {'model': '0.6b'}}}
+        for flags in (['--keyboard-only'], ['--keyboard-only', '--skip-doctor'],
+                      ['--cloud', 'mimo', '--skip-doctor'], ['--verify-only']):
+            with self.subTest(flags=flags):
+                self.config.write_text(json.dumps(config))
+                result = self.run_setup('--yes', *flags)
+                self.assert_success(result)
+                card = result.stdout.split('== 开始使用 ==')[-1].strip().splitlines()
+                self.assertEqual(len(card), 4, result.stdout)
+                self.assertEqual(card[0], '① Super+Space 切到「自定义语音输入法」')
+                self.assertEqual(card[1], '② 焦点一个文本框')
+                for actual in ('Ctrl+Shift+X / Super+Y', 'Alt+Shift+R', 'Super+P', 'mimo-cloud', '0.6b'):
+                    self.assertIn(actual, card[2])
+                self.assertIn('数十秒', card[3])
+                self.assertEqual(result.stdout.count('== 开始使用 =='), 1)
+
+    def test_start_card_invalid_config_or_hotkeys_falls_back_to_defaults(self):
+        for content in ('broken JSON', json.dumps({'recording': {'hotkeys': 42, 'raw_hotkeys': 'bogus',
+                                                               'clipboard_hotkeys': ['bad']}})):
+            with self.subTest(content=content):
+                self.config.write_text(content)
+                result = self.run_setup('--yes', '--keyboard-only', '--skip-doctor')
+                self.assert_success(result)
+                for key in ('Ctrl+Alt+V', 'Ctrl+Alt+B', 'Ctrl+Alt+P'):
+                    self.assertIn(key, result.stdout)
+
     def test_result_drives_sizes_assets_and_postprocess(self):
         self.llm.parent.mkdir(parents=True)
         self.llm.write_text('{"enabled": false, "custom": "keep"}')
@@ -181,6 +263,34 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
         self.assert_success(result)
         self.assertEqual(self.names(), ['wizard', 'apply', 'init.sh', 'doctor.sh'])
         self.assertEqual(self.events()[2]['args'], ['--no-voice'])
+
+    def test_gpu_skipped_voice_state_blocks_verify(self):
+        # 模式感知门控：init 语音步骤因无 GPU 跳过（voice=gpu_none）后，
+        # 安装流程不再盲目执行 --verify-only；体检照常运行。
+        result = self.run_setup('--defaults', '--yes', STUB_INIT_VOICE_STATE='gpu_none')
+        self.assert_success(result)
+        self.assertEqual(self.names(), ['wizard', 'apply', 'init.sh', 'doctor.sh'])
+        self.assertIn('语音验收跳过', result.stdout)
+        self.assertIn('voice=gpu_none', result.stdout)
+
+    def test_prepare_only_skips_switch_verify_and_doctor(self):
+        # 两段式第一阶段：init --skip-install + ENABLE_NOW=0；无 switch/verify/doctor。
+        result = self.run_setup('--defaults', '--yes', '--prepare-only')
+        self.assert_success(result)
+        self.assertEqual(self.names(), ['wizard', 'apply', 'init.sh'])
+        init, = [event for event in self.events() if event['name'] == 'init.sh']
+        self.assertIn('--skip-install', init['args'])
+        self.assertEqual(init['enable'], '0')
+        self.assertIn('准备完成。第二阶段需在有 GNOME 会话时执行：', result.stdout)
+        self.assertIn('1) ./install.sh', result.stdout)
+
+    def test_prepare_only_rejects_wizard_cloud_plan(self):
+        # 向导选出的云端方案同样拒绝：云端切换会重启输入法，属第二阶段。
+        result = self.run_setup('--defaults', '--yes', '--prepare-only',
+                                payload=result_payload(voice_plan='siliconflow'))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn('--prepare-only 不支持云端方案', result.stderr)
+        self.assertEqual(self.names(), ['wizard'])
 
     def test_cloud_explicit_flag_skips_wizard(self):
         result = self.run_setup('--yes', '--cloud', 'siliconflow', '--skip-doctor',
@@ -284,6 +394,9 @@ if name == 'init.sh': sys.exit(int(os.environ.get('STUB_INIT_RC', '0')))
         self.assert_success(result)
         self.assertEqual(self.names(), ['wizard', 'apply', 'install.sh'])
         self.assertIn('热键 有改动', result.stdout)
+        card = result.stdout.split('== 开始使用 ==')[-1]
+        self.assertIn('语音：Ctrl+Shift+V', card)
+        self.assertEqual(result.stdout.count('== 开始使用 =='), 1)
 
     def test_reconfigure_voice_change_reregisters_without_switch_or_download(self):
         self.config.write_text(json.dumps({'asr': {'backend': 'siliconflow-asr'}}))
@@ -458,7 +571,9 @@ class QwenSizeSelectionTest(unittest.TestCase):
         result = self.fixture.run_setup(VOICE_IME_QWEN_ASR_SIZES='1.7B')
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(marker.read_text(), '故意损坏的模型配置')
-        self.assertEqual(self.fixture.events().count('model'), 2)  # 所选档下载前后检查
+        # 3 次：下载后 .part 完整性校验、发布后正式档检查、smoke 前复查
+        # （.part 先校验后发布，防 CLI 伪成功定稿半成品）。
+        self.assertEqual(self.fixture.events().count('model'), 3)
         self.assertEqual(self.fixture.events().count('download'), 1)
 
     def test_explicit_both_sizes_with_whitespace(self):

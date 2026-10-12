@@ -19,6 +19,12 @@
 #
 # 语音说明：--voice（默认）安装本地 Qwen3-ASR（需 NVIDIA GPU，下载约 6GB）。
 # 无 GPU 时自动跳过并打印云端替代命令，不算失败。
+#
+# 汇总末尾输出机器可读状态标记（TSV，供 setup.sh 门控语音验收）：
+#   VOICE_IME_INIT_STATE<TAB>voice=ok|failed|gpu_none|gpu_partial|skip
+#   ok=安装且验收通过；failed=尝试安装但失败（blocked）；gpu_none/gpu_partial=
+#   因无 GPU/驱动不可用而跳过；skip=--no-voice 主动跳过。setup.sh 只在
+#   voice=ok 时执行 --verify-only，避免无 GPU 时盲目验收。
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,6 +73,8 @@ READY_STEPS=()
 DEGRADED_TITLES=() DEGRADED_IMPACTS=() DEGRADED_COMMANDS=()
 BLOCKED_TITLES=() BLOCKED_IMPACTS=() BLOCKED_COMMANDS=()
 SKIP_STEPS=()
+# 语音步骤终态（ok/failed/gpu_none/gpu_partial/skip），汇总末尾以 TSV 标记输出。
+VOICE_INIT_STATE=""
 
 # 输出可直接粘贴执行的命令：统一单引号包裹——单引号内没有历史扩展（!）、
 # 参数展开（$）与命令替换（反引号），交互 bash 复制粘贴也安全；内嵌单引号
@@ -173,12 +181,19 @@ else
 fi
 
 # ------------------------------------------------------------- 3) 语音 --
+# 预注册前探测一次，避免无 GPU / 驱动不可用时为了注定跳过的语音多重启。
+GPU_STATE="" GPU_REASON="" GPU_ACTION=""
+if [[ $WITH_VOICE -eq 1 ]]; then
+  eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+fi
 if [[ $WITH_VOICE -eq 1 && $DO_INSTALL -eq 1 ]]; then
   # 语音安装末尾的"桌面激活"（ibus engine voice-custom）要求引擎已注册进当前
   # IBus 会话；全新机器上此刻尚未注册，激活必失败（时序缺陷，2026-10 实测）。
-  # 因此先注册一次（幂等），语音步骤的激活检查才有意义；结尾仍会再注册一次刷新。
+  # 因此可用 GPU 的语音步骤仍需预注册并重启；确定跳过时只注册、延后重启。
+  PRE_NO_RESTART=1
+  [[ "$GPU_STATE" != ok ]] || PRE_NO_RESTART=0
   step "install.sh（预注册，供语音步骤桌面激活）"
-  if ! VOICE_IME_INSTALL_FROM_INIT=1 "$ROOT_DIR/install.sh"; then
+  if ! VOICE_IME_INSTALL_FROM_INIT=1 VOICE_IME_NO_RESTART="$PRE_NO_RESTART" "$ROOT_DIR/install.sh"; then
     printf '⚠ 预注册失败：语音步骤的桌面激活可能失败，以语音验收和最终注册结果为准。\n  续装命令：%s\n' "$(retry_command "$ROOT_DIR/install.sh")" >&2
   fi
 fi
@@ -187,22 +202,23 @@ if [[ $WITH_VOICE -eq 1 ]]; then
   # 三态探测：ok=CUDA 链路可用；partial=有 N 卡硬件但驱动不可用（给出修复命令）；
   # none=无 N 卡。旧版只看 nvidia-smi，会把“驱动半装/内核升级后模块未编好”误报成
   # “无 GPU”，用户明明插着卡（2026-10 报障）。
-  GPU_STATE="" GPU_REASON="" GPU_ACTION=""
-  eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
   if [[ "$GPU_STATE" == "ok" ]]; then
     # File existence is not readiness. The setup script reuses matching packages
     # without upgrading, but always checks headers, CUDA/Triton and real inference.
     echo "准备并验收 Qwen3-ASR（独立解释器 / 依赖 / 全部分片 / 短音频推理）……"
     if "$ROOT_DIR/scripts/setup-qwen-asr.sh" "${PROXY_ARG[@]}"; then
       READY_STEPS+=("Qwen3-ASR 本地后端（推理验收通过）")
+      VOICE_INIT_STATE=ok
     else
       record_problem blocked "Qwen3-ASR 本地后端（安装/验收）" "所选本地语音未就绪；键盘可用，语音不能宣称就绪（具体阶段见上方）" "$QWEN_RETRY"
+      VOICE_INIT_STATE=failed
     fi
   elif [[ "$GPU_STATE" == "partial" ]]; then
     echo "检测到 NVIDIA 显卡，但本地语音所需的 CUDA 驱动不可用，跳过本地语音后端（不算失败）："
     echo "  原因：${GPU_REASON:-未知}"
     [[ -n "$GPU_ACTION" ]] && printf '  %s\n' "$GPU_ACTION"
     SKIP_STEPS+=("Qwen3-ASR 本地后端（NVIDIA 驱动不可用）")
+    VOICE_INIT_STATE=gpu_partial
   else
     echo "未检测到 NVIDIA GPU，跳过本地语音后端（不算失败）。"
     echo "云端替代（自备 API Key）："
@@ -210,15 +226,26 @@ if [[ $WITH_VOICE -eq 1 ]]; then
     echo "  VOICE_IME_MIMO_API_KEY='tp-xxx' ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo"
     echo "  VOICE_IME_VOLC_API_KEY='xxx'  ./scripts/switch-volc-bigmodel-asr.sh    # 火山豆包"
     SKIP_STEPS+=("Qwen3-ASR 本地后端（无 GPU）")
+    VOICE_INIT_STATE=gpu_none
   fi
 else
   SKIP_STEPS+=("语音输入（--no-voice）")
+  VOICE_INIT_STATE=skip
 fi
 
 # ------------------------------------------------------- 4) 注册激活 --
 if [[ $DO_INSTALL -eq 1 ]]; then
-  step "install.sh：注册 IBus 组件 / 环境 / 热键并重启输入法"
-  if VOICE_IME_INSTALL_FROM_INIT=1 "$ROOT_DIR/install.sh"; then
+  # 本地语音路径已预注册重启，switch-qwen 最多再重启一次，末尾仅刷新组件/
+  # 配置。失败也不盲目第三次重启：helper 可能在重启后激活才失败，语音仍按
+  # blocked 汇总并提示独立重试。未执行语音激活时末尾正常重启。
+  FINAL_NO_RESTART=0
+  if [[ $WITH_VOICE -eq 1 && "$GPU_STATE" == ok && "${VOICE_IME_ENABLE_QWEN_ASR:-1}" != 0 ]]; then
+    FINAL_NO_RESTART=1
+    step "install.sh：刷新 IBus 注册/配置（本地语音路径已预注册，不重复重启）"
+  else
+    step "install.sh：注册 IBus 组件 / 环境 / 热键并重启输入法"
+  fi
+  if VOICE_IME_INSTALL_FROM_INIT=1 VOICE_IME_NO_RESTART="$FINAL_NO_RESTART" "$ROOT_DIR/install.sh"; then
     READY_STEPS+=("IBus 注册激活")
   else
     record_problem blocked "IBus 注册激活（install.sh）" "组件/桌面注册未完成；输入法不能宣称可用" "$(retry_command "$ROOT_DIR/install.sh")"
@@ -251,6 +278,14 @@ if [[ ${#BLOCKED_TITLES[@]} -gt 0 ]]; then
   echo '✗ 阻断项（安装失败）：'
   print_problems blocked BLOCKED_TITLES BLOCKED_IMPACTS BLOCKED_COMMANDS
 fi
+# 机器可读状态标记（TSV；setup.sh 据此门控语音验收，不 source/eval）。
+# 值域固定无空白，无需 sanitize；仅在汇总发出一次。
+printf 'VOICE_IME_INIT_STATE\tvoice=%s\n' "${VOICE_INIT_STATE:-unknown}"
+if [[ $WITH_VOICE -eq 0 ]]; then
+  # keyboard-only 不改 asr.backend（backend 表示「语音若启用走什么」）：
+  # doctor 仍会按 qwen 配置检查语音资产并可能 FAIL，提前说明属预期，消除困惑。
+  printf '提示：本次 --no-voice 未安装/验收语音后端；体检（./scripts/doctor.sh）仍会按 asr.backend=qwen3-asr 检查语音资产并可能 FAIL（属预期；换云端或补装本地语音后复查即按新状态体检）。\n'
+fi
 EXIT_CODE=0
 if [[ ${#BLOCKED_TITLES[@]} -gt 0 ]]; then EXIT_CODE=1; fi
 if [[ $STRICT_ASSETS -eq 1 && ${#DEGRADED_TITLES[@]} -gt 0 ]]; then
@@ -263,7 +298,7 @@ if [[ $EXIT_CODE -ne 0 ]]; then
   exit "$EXIT_CODE"
 fi
 if [[ $DO_INSTALL -eq 1 ]]; then
-  printf '下一步：Super+Space 切到「自定义语音输入法」；nihao+Space 出词。Ctrl+Alt+V 语音需后端验收通过（无 GPU/跳过语音时不可据此认为就绪）。\n'
+  printf '下一步：Super+Space 切到「自定义语音输入法」；nihao+Space 出词。语音热键以生效配置为准，且需后端验收通过（无 GPU/跳过语音时不可据此认为就绪）。\n'
   printf '健康检查：./scripts/doctor.sh（只检查）/ ./scripts/doctor.sh fix（自动修复）\n'
 else
   printf '（--skip-install：未注册。需要时运行 ./install.sh。）\n'

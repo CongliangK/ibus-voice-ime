@@ -123,6 +123,12 @@ IBUS_COMPONENT_PATH_VALUE="$COMPONENT_DIR:/usr/share/ibus/component"
 # may preserve the old daemon environment until next login.
 # 渠道/后端设置已入 config.json，由 run-engine.sh 进程内读取；这里只透传
 # 路径类变量与 LLM 行为项（照抄原模式）。
+# manager 的 unset 不会清理调用 shell；重启子进程仍须忽略失效旧路径。
+# 有效自定义路径保留，文件/manager 渠道清理继续使用上方原有逻辑。
+eval "$("$ROOT_DIR/scripts/env-sanitize.sh" \
+  VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)"
 IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" \
 LD_LIBRARY_PATH="$ROOT_DIR/vendor/rime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
 VOICE_IME_RIME_LIBRARY="$ROOT_DIR/vendor/rime/lib/librime.so.1" \

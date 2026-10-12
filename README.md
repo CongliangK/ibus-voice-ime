@@ -58,10 +58,12 @@ cd ibus-voice-ime
 #   --keyboard-only         只装键盘输入（Rime 拼音），不下载语音模型
 #   --cloud siliconflow     语音走云端 SiliconFlow（需 VOICE_IME_SILICONFLOW_API_KEY）
 #   --cloud mimo            语音走云端 MiMo（国内直连）
+#   --qwen-sizes "0.6B" --qwen-model 0.6b  显式选择本地小档（也可下载 "0.6B 1.7B"）
 #   --verify-only           不安装，只做语音验收 + 体检
+#   --prepare-only          两段式第一阶段：只准备/验收资产（headless 可用），不注册不激活
 #   --dry-run               只打印执行计划
 # 资产选项透传 init.sh：--no-rime-ice / --no-zhwiki / --no-moegirl / --no-denoise / --proxy URL
-# 无 NVIDIA GPU 时语音步骤自动跳过，并打印云端后端替代命令。
+# 无 NVIDIA GPU 时语音步骤自动跳过并打印云端替代命令，安装后的语音验收也自动跳过（不盲目 FAIL）。
 
 # Super+Space 切换到「自定义语音输入法」；nihao + Space -> 你好；Ctrl+Alt+V 语音；Ctrl+Alt+B 原文语音（免整理）
 ```
@@ -80,14 +82,19 @@ cd ibus-voice-ime
 | `--yes` / `-y` | 无人值守，自动默认且免确认；非终端也自动默认，保留旧入口两档本地模型下载行为 |
 | `--keyboard-only` / `--no-voice` | 仅键盘安装，不下载语音模型 |
 | `--cloud siliconflow` / `--cloud mimo` | 显式选择云端，沿用既有切换脚本和密钥指引 |
+| `--qwen-sizes "0.6B 1.7B"` | 显式选择本地 Qwen 下载集合：非空子集，仅支持 `0.6B` / `1.7B`；正常安装跳过向导，透传 `VOICE_IME_QWEN_ASR_SIZES` |
+| `--qwen-model 0.6b` / `--qwen-model 1.7b` | 显式选择本地默认模型，透传 `VOICE_IME_QWEN_ASR_MODEL`；仅指定单档下载时默认采用该档。默认模型需在集合内或已有就绪模型中，与云端/仅键盘选项互斥 |
 | `--no-rime-ice` / `--no-zhwiki` / `--no-moegirl` / `--no-denoise` | 显式跳过对应资产 |
 | `--proxy URL` | 向资产初始化和验收传递代理 |
 | `--strict-assets` | 透传给 [init.sh](<init.sh>)：请求资产出现降级也返回 exit 1，供 CI 严格验收 |
 | `--verify-only` | 不安装，只做语音验收和体检 |
+| `--prepare-only` | 两段式无人值守第一阶段：只准备/验收资产（无桌面会话可运行），不注册、不激活、不做语音验收/体检；第二阶段需在 GNOME 会话**先运行 `./install.sh`（激活，必须）**，再可选 `./setup.sh --verify-only`（验收+体检，不激活） |
 | `--skip-verify` / `--skip-doctor` | 跳过安装后的验收或体检 |
 | `--dry-run` | 打印实际选择（方案/模型分档/热键变化）与计划，不应用配置、不安装、不下载 |
 
-正常安装中，显式方案/资产选项优先，出现任一此类选项时跳过整个向导，保持原有脚本化调用方式；`--reconfigure` 中则传给向导跳过相应题目。显式 `--defaults` 按向导的默认下载集合执行（新机默认仅 1.7B），与自动默认保留旧下载集合的兼容路径不同。
+正常安装中，显式方案/资产选项（包括 Qwen 模型 flags）优先，出现任一此类选项时跳过整个向导，保持原有脚本化调用方式；`--reconfigure` 中则传给向导跳过相应题目；显式 Qwen 分档/模型 flags 采用整套当前默认值（不重复提问），再覆盖模型选择。显式 `--defaults` 按向导的默认下载集合执行（新机默认仅 1.7B），与自动默认保留旧下载集合的兼容路径不同。
+
+安装（包括跳过体检、云端方案）及重配置成功后，[setup.sh](<setup.sh>) 统一打印「开始使用」四步卡片：切换输入法、焦点文本框、从生效配置读取并规范化的语音/原文/粘贴热键，以及首次本地语音 sidecar 冷启动提示。首次按键后模型加载需数十秒属正常；仅键盘安装不代表语音已就绪。`--dry-run` / `--prepare-only` 不打印可直接使用的卡片。
 
 **已装机器改配置：**
 
@@ -102,11 +109,30 @@ cd ibus-voice-ime
 
 安装脚本的分工：
 
-- **`setup.sh`（一键入口）**：新机安装只需这一个命令——编排 init.sh + 语音验收 + doctor 体检，支持 `--dry-run` 预览与 `--keyboard-only` / `--cloud` 等选项。
+- **`setup.sh`（一键入口）**：新机安装只需这一个命令——编排 init.sh + 语音验收 + doctor 体检，支持 `--dry-run` 预览与 `--keyboard-only` / `--cloud` 等选项。语音验收是模式感知的：仅当所选方案为本地 Qwen 且 init 语音步骤就绪（汇总标记 `VOICE_IME_INIT_STATE` 为 `voice=ok`）时才执行 `--verify-only`；无 GPU / 驱动不可用导致语音跳过时，安装后的验收同样跳过并说明原因（不再盲目验收打 FAIL）。`./setup.sh --verify-only` 显式调用不受此门控。
 - **`init.sh`（一次性初始化）**：下载并配置基础资产（rime-ice 词库、本地 Qwen3-ASR 模型与 venv、RNNoise 降噪模型），完成后自动调用 `install.sh` 完成注册。参数可配置装什么。
 - **`install.sh`（每次轻量注册）**：把引擎安装进当前电脑会话——注册 IBus 组件、写 environment.d、注册 GNOME 输入源/热键、重启输入法。**不下载任何东西**，重启/重新登录后想恢复激活就再跑一次。注册成功不代表语音已通过推理验收。
 
+同一安装流程最多两次 IBus 重启：仅键盘或 GPU 不可用时末尾重启一次；本地语音保留预注册重启以让新组件进入会话，语音切换最多再重启一次，末尾只刷新注册/配置（共两次）。语音失败仍返回失败并给出独立续装命令，但不盲目第三次重启（避免切换已重启后激活才失败的情况）。[install.sh](<install.sh>) 支持 `VOICE_IME_NO_RESTART=1`：写组件、环境和配置，但跳过 IBus 重启与 GNOME 激活；独立运行默认仍完整注册激活。
+
 初始化采用 `ready / degraded / blocked` 三态：rime-ice 失败时键盘回退 luna，RNNoise 失败时降噪回退 notch，两者以「⚠ 降级项」列明影响与精确续装命令，默认仍 exit 0；所选本地语音安装/验收失败或 IBus 注册失败为 blocked（exit 1）。[init.sh](<init.sh>) 与 [setup.sh](<setup.sh>) 均支持 `--strict-assets`，请求资产降级也 exit 1；无 GPU/驱动 partial 的语音跳过仍不算失败。失败出口会复述子步骤续装命令（保留本次代理/词库选项），子步骤幂等，不必重跑向导或重复下载已就绪资产。
+
+### 两段式无人值守安装（headless prepare → desktop activate）
+
+桌面激活（GNOME 输入源/热键注册、重启输入法）必须有桌面会话；SSH/CI 等无会话环境可先完成全部资产准备与验收，激活留到登录桌面后：
+
+```bash
+# 第一阶段（无桌面会话可用）：init --skip-install 语义 + Qwen 准备不激活
+# （VOICE_IME_ENABLE_QWEN_ASR=0：准备+推理验收，但不写配置/不切后端/不重启）。
+# 不注册、不切云端、不做语音验收/体检，跳过的原因见输出。
+./setup.sh --prepare-only --non-interactive        # 可按需加 --proxy / 资产选项
+
+# 第二阶段（登录 GNOME 后）：注册组件/输入源/热键并重启输入法
+./install.sh
+./setup.sh --verify-only                           # 语音验收 + 体检
+```
+
+两阶段均可重复运行，子步骤幂等、已就绪资产不重复下载。`--prepare-only` 与 `--verify-only` / `--reconfigure` / `--cloud` 互斥（云端切换会重启输入法，属于第二阶段）。无 GPU 机器第一阶段会跳过本地语音（属预期，不算失败），第二阶段体检时按「无 GPU + qwen 后端」如实 FAIL 并给出换云端/仅键盘指引。
 
 ### 本地语音的安装验收
 
@@ -131,6 +157,15 @@ VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 
 直接调用 [setup-qwen-asr.sh](<scripts/setup-qwen-asr.sh>) 时，未设置 `VOICE_IME_QWEN_ASR_SIZES` 仍下载两档；可用 `VOICE_IME_QWEN_ASR_SIZES='0.6B' VOICE_IME_QWEN_ASR_MODEL=0.6b` 仅准备并使用小档，或用 `'0.6B 1.7B'` 准备两档。集合外已有模型不删除、不校验；默认模型应位于所选集合或已有就绪模型中。空集合/非法分档会在安装前报错。
 
+下载开始前会打印「下载预算」：0.6B 模型约 1.8GB、1.7B 约 4.4GB，torch cu13 全家桶依赖 venv 典型约 6GB；磁盘峰值需另考虑 pip 缓存、解包临时文件和重建保留的旧 venv。只检测 `~/.cache/pip` 是否存在，不扫描缓存大小；同机重装依赖通常直接命中缓存。中断后重跑同一命令可续装，已就绪资产复用，未完成的临时模型下载可能重下。
+
+**模型共享缓存**：各分档的真实权重统一下载到共享缓存 `$VOICE_IME_MODEL_CACHE`（默认 `${XDG_CACHE_HOME:-~/.cache}/ibus-voice-ime/models`），仓库内 `vendor/models/qwen3-asr/Qwen3-ASR-<size>` 只是指向缓存的**符号链接**——既有 vendor 路径语义不变（引擎、验收、REUSE 判据照旧读 vendor 路径），但换克隆目录、重装系统组件或卸载本输入法都不再丢失 6.2GB 模型。行为要点：
+
+- 缓存中分档已完整（配置和全部权重分片存在）→ 跳过下载，只重建 vendor 符号链接；链接已正确指向完整缓存 → 完全跳过。
+- 全新下载先落缓存内临时目录（`.part-<pid>`），成功后原子定稿；并发克隆互不覆盖，失败/中断自动清理。
+- 旧布局（vendor 下真实目录）会在下次运行时自动迁入缓存并在原位留符号链接（迁移失败则保留原状，不阻断安装）。
+- 自定义位置：`VOICE_IME_MODEL_CACHE=/path/to/models ./scripts/setup-qwen-asr.sh`；多克隆共用同一缓存即可零重复下载。
+
 不加 `VOICE_IME_ENABLE_QWEN_ASR=0` 时，安装器验收成功会默认激活 1.7B 并重启 IBus。**准备环境、写入配置、桌面激活、真实热键语音是四种不同状态**：switch 的重启/引擎选择失败会非零退出，保留已写配置与已验收环境，不能声称桌面就绪。旧 JSON 或 environment.d 中显式指定的外部解释器不会被修复模式覆盖；完整迁移激活需检查这些覆盖并运行 switch，再执行只读验收。另一台 Fedora 在安装系统 3.12 后卡住的新 traceback 尚未提供，不能断言此次补丁已修复那台机器。
 
 下载源互不替代：
@@ -146,6 +181,8 @@ VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 - 重建失败时恢复原 venv，失败环境和旧环境备份保留供排查，不删除模型或用户配置。使用文件锁阻止并发安装；拒绝修改指向其他项目的 venv 符号链接。安装中的 venv 重命名会写入 journal（`.qwen-asr-setup.state`）：SIGKILL/断电中断后，下次安装自动恢复原环境并把半成品移入 `.failed-crash-*` 留档。
 - `--force` 只允许无 GPU 时准备调试环境：不做 GPU 推理验收、不启用后端、不宣称语音就绪。
 - doctor 检查实际 sidecar 解释器、编译条件、CUDA 运算、Triton 和模型分片；不会默认加载整个模型。完整推理验收使用上面的 `--verify-only`。[doctor](<scripts/doctor.sh>) 的 `fix` 对缺头文件/旧 venv 调用同一个新 setup（每次修复只调用一次），保留当前渠道及显式覆盖，修复成功可能重启 IBus，也可能修复其他资产；仅修复 Qwen 且不动桌面请用上面的 `VOICE_IME_ENABLE_QWEN_ASR=0` 命令。
+- **验收 receipt 降噪**：smoke 验收或 `--verify-only` 成功后，安装器把当时的解释器、`requirements-qwen-asr.txt` 的 sha256 和模型文件清单（名称/大小/mtime）写入 `.venv-qwen-asr/verify-receipt.json`（附加产物，写失败不影响验收结果）。doctor 在 GPU 正常路径上做快速 stat 对比：三项均与当前实际一致时，原「模型目录存在但不能证明推理可用」WARN 降为一条 `[INFO]`（不计 WARN，附最近验收时间与强制复验命令）；receipt 缺失、依赖文件变化、解释器或模型文件有变动时恢复原 WARN。
+- doctor 的语音段只检查 config.json 生效的 `asr.backend`。`backend=qwen3-asr` 而本机无可用 NVIDIA GPU（none/partial）属于环境与所选后端不匹配：体检**如实 FAIL**，但明确指引「换云端 `./scripts/switch-siliconflow-asr.sh`（自备 API Key）或仅键盘」，并跳过注定失败的 CUDA 运行时验收；`fix` 此时也不会盲目重装本地 Qwen（装不出来），只复述出路。仅装键盘（`--keyboard-only` / `--no-voice`）不改 backend——backend 表示「语音若启用走什么」，体检按 qwen 检查属预期（init 汇总会提示这句）。
 - 识别/预热超时只回收本输入法拥有的 sidecar，外部服务交给其管理者处理；下一次听写可重新启动。总处理 watchdog 恢复 UI 空闲并丢弃迟到结果，可按次设置 `VOICE_IME_PROCESSING_TIMEOUT`（秒，最大 1800）。它不是任意 Python 工作线程的强制取消器。录音停止采用有界读、TERM→KILL→wait 和非管道 stderr 诊断；成功返回前必须封口 WAV。
 - `/health` 的 `idle/ready/error` 区分懒加载/空闲卸载、模型就绪、加载失败；HTTP 200 只代表服务存活。`/warm` 只有模型真正加载成功才返回成功。稳定加载故障会冷却重试；显存不足不缓存，释放显存后可立即再试。
 
@@ -587,7 +624,7 @@ cd <仓库克隆目录>
 ./uninstall.sh                    # 轻量卸载：仅移除 IBus 组件注册与环境变量
 ```
 
-`uninstall-all.sh` 会清理：IBus 组件注册、GNOME 输入源/引擎列表（四个 gsettings 键）、自定义快捷键（含 dconf 子树）、environment.d 与 systemd 用户管理器/DBus 激活环境、蓝牙恢复守护服务、登录 autostart、用户数据/配置/运行时目录，并重启 IBus；结束后做残留验证扫描，任何残留以非零退出码报警。跨项目共享缓存（`~/.triton/cache`、`~/.cache/pip`、`~/.cache/modelscope`、`~/.modelscope`）与仓库本体（`vendor/`、`.venv*`）不在删除范围。
+`uninstall-all.sh` 会清理：IBus 组件注册、GNOME 输入源/引擎列表（四个 gsettings 键）、自定义快捷键（含 dconf 子树）、environment.d 与 systemd 用户管理器/DBus 激活环境、蓝牙恢复守护服务、登录 autostart、用户数据/配置/运行时目录，并重启 IBus；结束后做残留验证扫描，任何残留以非零退出码报警。跨项目共享缓存（`~/.triton/cache`、`~/.cache/pip`、`~/.cache/modelscope`、`~/.modelscope`）与仓库本体（`vendor/`、`.venv*`）不在删除范围；Qwen 模型共享缓存（默认 `~/.cache/ibus-voice-ime/models`）同样保留——卸载后重装或换克隆目录可直接复用，确要释放磁盘再手动删除该目录。
 
 ## 许可证
 

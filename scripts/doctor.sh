@@ -11,7 +11,9 @@
 # 检查范围：环境依赖（复用 check-environment.sh）、IBus 注册、Rime 词库完整性
 # （重点：新 clone 只带 git 跟踪的 schema，cn_dicts/编译产物在 .gitignore 里，
 # 缺失会进入“方案在、词库无”的半残态——Rime 零候选，只剩记忆层出词）、
-# 语音后端就绪度、桌面热键指向、脚本可执行位。
+# 语音后端就绪度（只检查 config.json 生效的 asr.backend；qwen3-asr 在本机无
+# 可用 NVIDIA GPU 时如实 FAIL 并给出换云端/仅键盘指引，不跑注定失败的 CUDA
+# 运行时验收）、桌面热键指向、脚本可执行位。
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -21,7 +23,7 @@ MODE="check"
 case "${1:-}" in
   "") MODE="check" ;;
   fix) MODE="fix" ;;
-  -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+  -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
   *) echo "用法：$0 [fix]    （无参数 = 只检查；fix = 检查并修复）" >&2; exit 2 ;;
 esac
 
@@ -48,6 +50,10 @@ warn() {
   printf '  [WARN] %s —— %s；%s\n' "${WARN_TITLES[WARNINGS-1]}" "${WARN_IMPACTS[WARNINGS-1]}" "${WARN_GUIDANCE[WARNINGS-1]}"
 }
 fail() { printf '  [FAIL] %s\n' "$1"; FAILS=$((FAILS + 1)); }
+# 信息行（不计数）：既有事实的说明，如验收 receipt 匹配时的降噪提示。
+info() { printf '  [INFO]  %s\n' "$1"; }
+# 模式感知跳过说明（不计数）：本机条件使某项检查失去意义时说明原因。
+skip_note() { printf '  [SKIP] %s\n' "$1"; }
 fixed(){ printf '  [FIXED] %s\n' "$1"; FIXED=$((FIXED + 1)); }
 header() { printf '\n== %s ==\n' "$1"; }
 
@@ -395,6 +401,54 @@ PY
   fi
 }
 
+# 验收 receipt 匹配（快速 stat 对比，不跑推理）：setup-qwen-asr.sh 的 smoke
+# 验收/--verify-only 成功后写 $VENV/verify-receipt.json。解释器、模型路径
+# （归一化比较——换目录同 stat 文件不得骗过 INFO，红队实测）、requirements
+# sha256、模型文件清单（名称/大小/mtime_ns）均与当前实际一致时，向 stdout
+# 打印最近验收时间，退出 0；receipt 缺失/损坏/任一项漂移则退出 1。
+# stat 对比只是"配置未漂移"判据，不是内容完整性/防伪证明；强制复验走
+# ./scripts/setup-qwen-asr.sh --verify-only。
+verify_receipt_matches() {  # <receipt> <python> <model_dir> <requirements>
+  [[ -f "$1" ]] || return 1
+  "$PYTHON" - "$1" "$2" "$3" "$4" <<'PY' 2>/dev/null
+import hashlib, json, os, sys
+receipt_path, python, model_dir, reqs_path = sys.argv[1:5]
+try:
+    with open(receipt_path, encoding='utf-8') as stream:
+        data = json.load(stream)
+    def same_path(left, right):
+        return left == right or os.path.realpath(left) == os.path.realpath(right)
+    if data.get('stage') != 'smoke' or not same_path(str(data.get('python') or ''), python):
+        raise SystemExit(1)
+    if not same_path(str(data.get('model_path') or ''), model_dir):
+        raise SystemExit(1)
+    with open(reqs_path, 'rb') as stream:
+        if data.get('reqs_sha256') != hashlib.sha256(stream.read()).hexdigest():
+            raise SystemExit(1)
+    recorded = data.get('model_files')
+    if not isinstance(recorded, dict):
+        raise SystemExit(1)
+    actual = {name for name in os.listdir(model_dir)
+              if os.path.isfile(os.path.join(model_dir, name))}
+    if set(recorded) != actual:
+        raise SystemExit(1)
+    for name, entry in recorded.items():
+        status = os.stat(os.path.join(model_dir, name))
+        # 必须有 mtime_ns：旧 receipt（只有整秒 mtime）一律失效恢复 WARN——
+        # 折算 mtime*1e9 会让整秒文件的旧 receipt 继续匹配，同秒篡改即可
+        # 骗过 INFO（红队终轮实测）。
+        if (not isinstance(entry, dict) or entry.get('size') != status.st_size
+                or entry.get('mtime_ns') != status.st_mtime_ns):
+            raise SystemExit(1)
+    stamp = str(data.get('timestamp') or '')
+    print(stamp[5:10] + ' ' + stamp[11:16] if len(stamp) >= 16 else stamp)
+except SystemExit:
+    raise
+except Exception:
+    sys.exit(1)
+PY
+}
+
 # ------------------------------------------------------------ 语音后端 --
 check_asr_backend() {
   header "语音后端（当前：$(current_asr_backend)）"
@@ -403,6 +457,28 @@ check_asr_backend() {
   case "$backend" in
     qwen3-asr)
       local have_venv=1 have_model=1 qwen_python preflight_out
+      # 模式感知门控：先探测 GPU 三态。backend=qwen3-asr 而本机无可用
+      # NVIDIA GPU 属「环境与所选后端不匹配」——体检如实 FAIL（GPU 缺失不是
+      # 可忽略的降级），但给出明确出路（换云端/仅键盘），且不再跑注定失败的
+      # CUDA 运行时验收，避免用户被误导去修 venv/模型/重装 CUDA。
+      GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
+      if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+        eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+      fi
+      case "$GPU_STATE" in
+        ok) ok "NVIDIA GPU 可用（${GPU_BRIEF:-型号未知}）" ;;
+        partial)
+          fail "本机 NVIDIA CUDA 驱动不可用，而当前语音后端 qwen3-asr 依赖本地 GPU"
+          printf '         原因：%s\n' "${GPU_REASON:-未知}"
+          [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
+          printf '         出路：修复驱动后运行 ./scripts/setup-qwen-asr.sh 完整验收；或换云端（自备 API Key）VOICE_IME_SILICONFLOW_API_KEY=%s ./scripts/switch-siliconflow-asr.sh；仅用键盘可忽略下方语音资产 FAIL\n' "'sk-xxx'"
+          FAILED_ITEMS+=(qwen-gpu-mismatch)
+          ;;
+        *)
+          fail "本机无可用 NVIDIA GPU，而当前语音后端 qwen3-asr 依赖本地 GPU：换云端 ./scripts/switch-siliconflow-asr.sh（自备 API Key，VOICE_IME_SILICONFLOW_API_KEY='sk-xxx'）或仅键盘（键盘输入不受影响）"
+          FAILED_ITEMS+=(qwen-gpu-mismatch)
+          ;;
+      esac
       qwen_python="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import _python; print(_python())' 2>/dev/null || true)"
       [[ -n "$qwen_python" ]] || qwen_python="$ROOT_DIR/.venv-qwen-asr/bin/python"
       echo "  实际 sidecar 解释器：$qwen_python"
@@ -429,13 +505,19 @@ check_asr_backend() {
         local static_out
         if static_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage static 2>&1)"; then
           printf '%s\n' "$static_out"
-          if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
-            printf '%s\n' "$preflight_out"
-            ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
+          if [[ "$GPU_STATE" == "ok" ]]; then
+            if preflight_out="$("$PYTHON" "$ROOT_DIR/scripts/qwen-preflight.py" --python "$qwen_python" --stage runtime --timeout "${VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT:-180}" 2>&1)"; then
+              printf '%s\n' "$preflight_out"
+              ok "sidecar 开发头文件、CUDA 实际运算、Triton 编译/初始化通过"
+            else
+              printf '%s\n' "$preflight_out"
+              fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
+              have_venv=0
+            fi
           else
-            printf '%s\n' "$preflight_out"
-            fail "Qwen 运行时验收失败（见具体阶段，不要先删除模型或重装 CUDA）"
-            have_venv=0
+            # 无可用 GPU 时 CUDA/Triton 运行时验收不可能通过：跳过并说明，
+            # 避免把「环境与后端不匹配」误报成「运行时验收失败」。
+            skip_note "CUDA 运行时验收：本机无可用 NVIDIA GPU，跳过（见上方 FAIL 指引）"
           fi
         else
           printf '%s\n' "$static_out"
@@ -454,21 +536,28 @@ check_asr_backend() {
         fail "模型配置/权重分片不完整"
         have_model=0
       fi
-      if [[ $have_venv -eq 1 && $have_model -eq 1 ]]; then
-        warn "Qwen 模型目录存在但不能证明推理可用" "分层验收设计：体检检查运行时与分片，不跑模型推理" "本机最近验收过可用 ./scripts/setup-qwen-asr.sh --verify-only 复验；否则运行 ./scripts/setup-qwen-asr.sh 完整安装/验收"
+      if [[ $have_venv -eq 1 && $have_model -eq 1 && "$GPU_STATE" == "ok" ]]; then
+        # 降噪：最近一次 smoke 验收 receipt 仍与当前解释器/依赖/模型清单完全
+        # 匹配时，不必每次体检都提醒"不能证明推理可用"——降为 INFO 并给出
+        # 强制复验命令；receipt 缺失或任一项漂移则保持原 WARN。
+        local receipt="$ROOT_DIR/.venv-qwen-asr/verify-receipt.json" receipt_time
+        receipt_time="$(verify_receipt_matches "$receipt" "$qwen_python" "$model_dir" "$ROOT_DIR/requirements-qwen-asr.txt")" || receipt_time=""
+        if [[ -n "$receipt_time" ]]; then
+          info "最近验收 ${receipt_time} 通过（配置未变）；强制复验：./scripts/setup-qwen-asr.sh --verify-only"
+          # 环境预检导入的同标题 WARN 一并移除：同一问题不能一边 INFO
+          # 一边仍计入 WARN 汇总（真机实测残留导致降噪不彻底）。
+          local drop_title="Qwen 模型目录存在但不能证明推理可用" _i
+          local keep_titles=() keep_impacts=() keep_guidance=()
+          for _i in "${!WARN_TITLES[@]}"; do
+            [[ "${WARN_TITLES[_i]#\[*\] }" == "$drop_title" ]] && continue
+            keep_titles+=("${WARN_TITLES[_i]}"); keep_impacts+=("${WARN_IMPACTS[_i]}"); keep_guidance+=("${WARN_GUIDANCE[_i]}")
+          done
+          WARN_TITLES=("${keep_titles[@]}"); WARN_IMPACTS=("${keep_impacts[@]}"); WARN_GUIDANCE=("${keep_guidance[@]}")
+          WARNINGS=${#WARN_TITLES[@]}
+        else
+          warn "Qwen 模型目录存在但不能证明推理可用" "分层验收设计：体检检查运行时与分片，不跑模型推理" "本机最近验收过可用 ./scripts/setup-qwen-asr.sh --verify-only 复验；否则运行 ./scripts/setup-qwen-asr.sh 完整安装/验收"
+        fi
       fi
-      GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
-      if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
-        eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
-      fi
-      case "$GPU_STATE" in
-        ok) ok "NVIDIA GPU 可用（${GPU_BRIEF:-型号未知}）" ;;
-        partial)
-          warn "NVIDIA 显卡 CUDA 驱动不可用" "本地 GPU 语音后端不可用：${GPU_REASON:-未知}" "${GPU_ACTION:-修复 NVIDIA 驱动后运行 nvidia-smi}；只用键盘/云端可忽略"
-          [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
-          ;;
-        *) warn "无 NVIDIA GPU" "本地 Qwen 后端无法运行" "自备 API Key 后运行 ./scripts/switch-mimo-cloud-asr.sh cn；只用键盘可忽略" ;;
-      esac
       if [[ $have_venv -eq 0 || $have_model -eq 0 ]]; then
         FAILED_ITEMS+=(qwen-setup)
       fi
@@ -648,25 +737,37 @@ do_fix() {
           fail "install.sh 重跑失败，请手动排查"
         fi
         ;;
-      qwen-python-headers|qwen-setup)
+      qwen-python-headers|qwen-setup|qwen-gpu-mismatch)
         # Header failure also queues qwen-setup; prepare only once per fix run.
         [[ $qwen_attempted -eq 0 ]] || continue
         qwen_attempted=1
-        echo "==> 调用 setup-qwen-asr.sh：仓库内自动准备 uv/带头文件的 Python 3.12，备份并迁移旧 venv"
-        echo "    保留渠道/模型/解释器覆盖配置；完整模型不重复下载。DOCTOR_PROXY 传给安装器。"
-        if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
-          local actual_python
-          actual_python="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import _python; print(_python())' 2>/dev/null || true)"
-          if [[ "$actual_python" == "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
-            fixed "默认 Qwen 环境准备完成；实际运行时与模型状态以下方复查为准（--force 无 GPU 时未验收推理）"
-            restarted=1
-          else
-            warn "Qwen 实际解释器仍被配置覆盖" "默认 venv 已准备，但当前 sidecar 仍使用 $actual_python；未改此覆盖，不能声称当前 sidecar 已修复" "检查 asr.qwen3.python / VOICE_IME_QWEN_ASR_PYTHON；需要迁移时运行 ./scripts/switch-qwen-asr.sh"
-            echo "         检查 environment.d / VOICE_IME_QWEN_ASR_PYTHON / config.json 的 asr.qwen3.python；需要迁移激活时手动运行 ./scripts/switch-qwen-asr.sh"
-          fi
+        # 模式感知修复：本机无可用 NVIDIA GPU 时本地 Qwen 装不出可用链路，
+        # 盲目重装注定失败（安装器自身也会拒绝）——只给出路，不做徒劳下载。
+        GPU_STATE="" GPU_REASON="" GPU_ACTION="" GPU_BRIEF=""
+        if [[ -x "$ROOT_DIR/scripts/gpu-probe.sh" ]]; then
+          eval "$("$ROOT_DIR/scripts/gpu-probe.sh" --env)"
+        fi
+        if [[ "$GPU_STATE" != "ok" ]]; then
+          echo "==> 跳过本地 Qwen 重装：本机无可用 NVIDIA GPU（${GPU_REASON:-未检测到}），本地后端无法安装/验收"
+          echo "    换云端（自备 API Key）：VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh（或 MiMo / 火山豆包）"
+          echo "    仅用键盘可忽略语音相关 FAIL；切换后端后复查，体检将按新后端检查"
         else
-          fail "setup-qwen-asr.sh 失败（见具体 uv/Python/pip/编译器/CUDA 错误）；不会自动安装系统包"
-          FIX_FAILURES=$((FIX_FAILURES + 1))
+          echo "==> 调用 setup-qwen-asr.sh：仓库内自动准备 uv/带头文件的 Python 3.12，备份并迁移旧 venv"
+          echo "    保留渠道/模型/解释器覆盖配置；完整模型不重复下载。DOCTOR_PROXY 传给安装器。"
+          if VOICE_IME_ENABLE_QWEN_ASR=0 "$ROOT_DIR/scripts/setup-qwen-asr.sh" ${DOCTOR_PROXY:+--proxy "$DOCTOR_PROXY"}; then
+            local actual_python
+            actual_python="$(PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON" -c 'from ibus_voice_ime.asr.qwen_asr_runtime import _python; print(_python())' 2>/dev/null || true)"
+            if [[ "$actual_python" == "$ROOT_DIR/.venv-qwen-asr/bin/python" ]]; then
+              fixed "默认 Qwen 环境准备完成；实际运行时与模型状态以下方复查为准（--force 无 GPU 时未验收推理）"
+              restarted=1
+            else
+              warn "Qwen 实际解释器仍被配置覆盖" "默认 venv 已准备，但当前 sidecar 仍使用 $actual_python；未改此覆盖，不能声称当前 sidecar 已修复" "检查 asr.qwen3.python / VOICE_IME_QWEN_ASR_PYTHON；需要迁移时运行 ./scripts/switch-qwen-asr.sh"
+              echo "         检查 environment.d / VOICE_IME_QWEN_ASR_PYTHON / config.json 的 asr.qwen3.python；需要迁移激活时手动运行 ./scripts/switch-qwen-asr.sh"
+            fi
+          else
+            fail "setup-qwen-asr.sh 失败（见具体 uv/Python/pip/编译器/CUDA 错误）；不会自动安装系统包"
+            FIX_FAILURES=$((FIX_FAILURES + 1))
+          fi
         fi
         ;;
       stale-env)

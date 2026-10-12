@@ -33,13 +33,13 @@ class QwenSetupTest(unittest.TestCase):
         self.home = self.root / 'home'
         self.home.mkdir()
         self.venv = self.root / '.venv-qwen-asr'
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('VOICE_IME_', 'PYTHONPATH'))}
+        self.env = {key: value for key, value in os.environ.items() if not key.startswith(('VOICE_IME_', 'PYTHONPATH', 'XDG_'))}
         self.env.update(HOME=str(self.home), FAKE_ROOT=str(self.root),
                         VOICE_IME_QWEN_ASR_SETUP_PYTHON=str(self.target),
                         VOICE_IME_CONFIG=str(self.home / 'config.json'))
         self.make_python(self.target, 12)
         self.make_script(self.root / 'scripts/gpu-probe.sh',
-                         "#!/bin/sh\nprintf 'GPU_STATE=%s\\n' \"${FAKE_GPU:-ok}\"\nprintf 'GPU_REASON=fake\\nGPU_ACTION=repair\\n'\n")
+                         "#!/bin/sh\nprintf 'GPU_STATE=%s\\n' \"${FAKE_GPU:-ok}\"\nprintf 'GPU_BRIEF=fake-gpu\\n'\nprintf 'GPU_REASON=fake\\nGPU_ACTION=repair\\n'\n")
         self.make_script(self.root / 'scripts/switch-qwen-asr.sh',
                          "#!/bin/sh\nif [ -e /proc/$$/fd/9 ]; then echo lock-leaked >> \"$FAKE_ROOT/events\"; fi\necho activate >> \"$FAKE_ROOT/events\"\n")
         self.make_script(self.root / 'scripts/qwen-preflight.py', f'''#!{sys.executable}
@@ -133,6 +133,17 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertIn('repair-failures=1', result.stdout)
         self.assertNotIn('restart', self.events())
 
+    def test_doctor_repair_without_gpu_skips_local_reinstall(self):
+        # 模式感知修复：无可用 GPU 时本地 Qwen 装不出可用链路——不盲目重装
+        # （安装器自身也会拒绝），只复述换云端/仅键盘出路，不计修复失败。
+        result = self.run_doctor_repair(FAKE_GPU='none')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('跳过本地 Qwen 重装', result.stdout)
+        self.assertIn('switch-siliconflow-asr.sh', result.stdout)
+        self.assertNotIn('create-venv', self.events())
+        self.assertNotIn('static', self.events())
+        self.assertIn('repair-failures=0', result.stdout)
+
     def test_doctor_external_python_override_not_claimed_repaired(self):
         result = self.run_doctor_repair(VOICE_IME_QWEN_ASR_PYTHON='/external/python')
         self.assertIn('不能声称当前 sidecar 已修复', result.stdout)
@@ -146,6 +157,29 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertLess(events.index('smoke'), events.index('activate'))
         self.assertNotIn('lock-leaked', events)
         self.assertTrue((self.venv / 'installed-requirements.txt').exists())
+
+    def test_download_budget_selected_sizes_peak_and_cache_hint(self):
+        cache = self.home / '.cache/pip'
+        cache.mkdir(parents=True)
+        # 非空缓存只需检查目录，不递归统计体积。
+        (cache / 'fixture').write_bytes(b'cached')
+        result = self.run_setup(VOICE_IME_QWEN_ASR_SIZES='0.6B', VOICE_IME_QWEN_ASR_MODEL='0.6b')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('== 下载预算', result.stdout)
+        self.assertIn('模型 0.6B ≈1.8GB', result.stdout)
+        self.assertNotIn('模型 1.7B ≈4.4GB', result.stdout)
+        self.assertIn('依赖 venv 典型 ~6GB', result.stdout)
+        self.assertIn('同机重装依赖通常直接命中缓存', result.stdout)
+        self.assertIn('预计磁盘峰值', result.stdout)
+        self.assertIn('19.8GB', result.stdout)
+        self.assertIn('中断可续装', result.stdout)
+        self.assertLess(result.stdout.index('== 下载预算'), result.stdout.index('Qwen3-ASR venv Python'))
+
+    def test_download_budget_both_sizes_and_no_cache(self):
+        result = self.run_setup()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for line in ('模型 0.6B ≈1.8GB', '模型 1.7B ≈4.4GB', '24.2GB', 'pip 缓存未检测到'):
+            self.assertIn(line, result.stdout)
 
     def test_header_failure_preserves_old_environment(self):
         self.seed_old_venv()

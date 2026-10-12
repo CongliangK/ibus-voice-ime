@@ -56,7 +56,7 @@ class _SwitchSandbox(unittest.TestCase):
         cls.sb = Path(tempfile.mkdtemp(prefix="cfg-sandbox-"))
         # 脚本副本（ROOT_DIR 将指向沙箱）
         (cls.sb / "scripts").mkdir()
-        for name in ("switch-siliconflow-asr.sh", "switch-qwen-asr.sh", "ibus-restart.sh", "activate-voice-engine.sh"):
+        for name in ("switch-siliconflow-asr.sh", "switch-qwen-asr.sh", "ibus-restart.sh", "activate-voice-engine.sh", "env-sanitize.sh"):
             target = cls.sb / "scripts" / name
             shutil.copy2(ROOT / "scripts" / name, target)
             target.chmod(0o755)

@@ -9,7 +9,9 @@
 #   [FAIL] 缺了必需组件，对应功能无法工作
 #   [WARN] 缺了可选组件或仅在某类环境验证过，功能降级/未验证
 #   [OK]   通过
-# 任一 FAIL 时退出码为 1，否则为 0。WARN 不影响退出码。
+# 另有 [SKIP]（不计数）：模式感知跳过——本机条件使该项检查失去意义时，
+# 说明跳过原因与出路（如无 GPU 时不检查本地 Qwen venv/模型：下载了也无法运行）。
+# 任一 FAIL 时退出码为 1，否则为 0。WARN/SKIP 不影响退出码。
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +30,7 @@ WARNINGS=0
 WARN_TITLES=() WARN_IMPACTS=() WARN_GUIDANCE=()
 
 ok()   { printf '  [OK]   %s\n' "$1"; }
+skip() { printf '  [SKIP] %s\n' "$1"; }
 warn() {
   WARN_TITLES+=("${1//$'\n'/ }"); WARN_IMPACTS+=("${2//$'\n'/ }"); WARN_GUIDANCE+=("${3//$'\n'/ }")
   WARNINGS=${#WARN_TITLES[@]}
@@ -213,14 +216,19 @@ if [[ "$CHECK_GPU" == "1" ]]; then
       warn "Qwen3-ASR 模型未下载" "本地语音不可用，需数 GB 磁盘与对应显存" "运行 ./scripts/setup-qwen-asr.sh；不用本地语音可忽略"
     fi
   elif [[ "$GPU_STATE" == "partial" ]]; then
-    warn "NVIDIA 显卡 CUDA 驱动不可用" "本地 GPU 语音后端不可用：${GPU_REASON:-未知}" "${GPU_ACTION:-修复 NVIDIA 驱动后运行 nvidia-smi}；只用键盘/云端可忽略"
+    # 模式感知：驱动不可用时本地 Qwen 装不出可用链路，venv/模型检查失去
+    # 意义——输出 SKIP（不计 WARN），避免误导用户去下载数 GB 模型；doctor
+    # 体检会对 qwen 后端如实 FAIL 并给出同样出路。
+    skip "本地 Qwen3-ASR 检查：NVIDIA 显卡在但 CUDA 驱动不可用（${GPU_REASON:-未知}），venv/模型检查跳过"
     [[ -n "$GPU_ACTION" ]] && printf '         %s\n' "$GPU_ACTION"
+    echo "         修复驱动后运行 ./scripts/setup-qwen-asr.sh 完整验收；换云端（自备 API Key）：VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh；仅键盘可忽略"
   else
-    warn "未检测到 NVIDIA GPU" "本地 Qwen3-ASR / faster-whisper GPU 后端不可用" "自备 API Key 后运行 ./scripts/switch-mimo-cloud-asr.sh cn 切换云端；只用键盘可忽略"
-    echo "         无 GPU 的替代方案（改用云端识别，零显存）："
+    skip "本地 Qwen3-ASR 检查：本机无可用 NVIDIA GPU，venv/模型检查跳过（下载后也无法运行）"
+    echo "         云端替代（改用云端识别，无需 GPU，自备 API Key）："
     echo "         VOICE_IME_SILICONFLOW_API_KEY='sk-xxx' ./scripts/switch-siliconflow-asr.sh   # 硅基流动（大陆直连；SenseVoiceSmall 官方标注免费，Qwen3-ASR 按秒计费）"
-    echo "         ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo 云端（需 API Key）"
-    echo "         ./scripts/switch-volc-bigmodel-asr.sh  # 火山引擎豆包（需 API Key）"
+    echo "         ./scripts/switch-mimo-cloud-asr.sh cn   # 小米 MiMo 云端"
+    echo "         ./scripts/switch-volc-bigmodel-asr.sh  # 火山引擎豆包"
+    echo "         仅键盘输入可忽略；体检（doctor.sh）仍会按 asr.backend 如实检查并给出本指引"
   fi
 fi
 

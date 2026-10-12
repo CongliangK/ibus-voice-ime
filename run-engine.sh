@@ -83,11 +83,13 @@ fi
 [[ -n "$_INHERITED_RIME_STAGING_DIR" ]] && export VOICE_IME_RIME_STAGING_DIR="$_INHERITED_RIME_STAGING_DIR"
 [[ -n "$_INHERITED_RIME_USER_DATA_DIR" ]] && export VOICE_IME_RIME_USER_DATA_DIR="$_INHERITED_RIME_USER_DATA_DIR"
 
-# QWEN 同类自愈：陈旧的继承路径（仓库迁移残留）不得压过 env 文件/默认值。
-[[ -n "${VOICE_IME_QWEN_ASR_MODEL_PATH:-}" && ! -e "$VOICE_IME_QWEN_ASR_MODEL_PATH" ]] && {
-  echo "[run-engine] 自愈：继承的 VOICE_IME_QWEN_ASR_MODEL_PATH 指向不存在的路径，已忽略" >&2
-  unset VOICE_IME_QWEN_ASR_MODEL_PATH
-}
+# QWEN/MIMO 同类自愈：加载 env 文件后统一检查，覆盖会话与文件残留。
+# 仅忽略失效路径；有效的显式救援值与非路径值保持原样。
+# RIME 保留上方的详细继承报告，LLM_CONFIG 保留下方的可选文件语义。
+eval "$("$ROOT_DIR/scripts/env-sanitize.sh" \
+  VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)"
 
 # LLM_CONFIG 同理：llm.json 是可选连接文件（缺失 = LLM 润色关闭，非错误，
 # 见 llm_cloud_config.load_report 的契约）。陈旧的继承路径（仓库迁移残留）

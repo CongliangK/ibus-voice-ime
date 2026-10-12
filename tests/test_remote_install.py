@@ -30,6 +30,11 @@ sys.exit(int(os.environ.get("STUB_EXIT", "0")))
 ' "$@"
 """
 
+# 安装再生目录（与 remote-install.sh 的 GENERATED_DIR 一致）：setup-rime-ice.sh
+# 每次安装从上游覆盖整个目录（枚举单文件不完备，红队实测），更新时整体还原。
+GENERATED_DIR = "vendor/rime/share/rime-data"
+GENERATED_FILE = f"{GENERATED_DIR}/rime_ice.dict.yaml"   # 远端夹具里跟踪的再生文件
+
 
 @unittest.skipUnless(shutil.which("git") and shutil.which("bash"), "需要本地 git 与 bash，测试不联网")
 class RemoteInstallTest(unittest.TestCase):
@@ -276,6 +281,87 @@ sys.exit(result.returncode)
 
     def test_untracked_files_are_preserved(self):
         self.assert_dirty_clone_preserved(untracked=True)
+
+    def seed_generated_file(self):
+        """远端 main 补一个被跟踪的再生目录文件（克隆后可模拟安装覆盖）。"""
+        (self.remote / ".gitignore").write_text("models/\n", encoding="utf-8")
+        target = self.remote / GENERATED_FILE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("上游旧版\n", encoding="utf-8")
+        self.commit_remote()
+
+    def test_generated_dir_changes_healed_on_update(self):
+        # 安装再生目录内的任何变更（tracked 修改 + 未跟踪残留）更新时自动
+        # 还原/清理；ignored 下载产物（models/）不受影响。
+        self.seed_generated_file()
+        self.assert_success(self.run_installer())
+        (self.install / GENERATED_FILE).write_text("上游新版（安装覆盖）\n", encoding="utf-8")
+        leftover = self.install / GENERATED_DIR / "untracked-leftover.txt"
+        leftover.write_text("非 ignored 残留\n", encoding="utf-8")
+        ignored = self.install / "models" / "qwen-asr.bin"
+        ignored.parent.mkdir(exist_ok=True)
+        ignored.write_bytes(b"12GB-model")
+        (self.remote / "version.txt").write_text("第二版\n", encoding="utf-8")
+        self.commit_remote()
+        result = self.run_installer()
+        self.assert_success(result)
+        self.assertIn("已还原安装再生目录", result.stdout + result.stderr)
+        self.assertEqual((self.install / GENERATED_FILE).read_text(encoding="utf-8"), "上游旧版\n")
+        self.assertFalse(leftover.exists())
+        self.assertEqual(ignored.read_bytes(), b"12GB-model")
+        self.assertEqual(self.git(self.install, "status", "--porcelain"), "")
+
+    def test_generated_dir_plus_other_changes_still_rejected(self):
+        # 再生目录外的变更混入时：拒绝更新，且拒绝路径零副作用——再生
+        # 目录内的修改也原样保留（还原发生在全部拒绝性检查之后）。
+        self.seed_generated_file()
+        self.assert_success(self.run_installer())
+        (self.install / GENERATED_FILE).write_text("上游新版（安装覆盖）\n", encoding="utf-8")
+        (self.install / "version.txt").write_text("用户修改，不可覆盖\n", encoding="utf-8")
+        old_head = self.git(self.install, "rev-parse", "HEAD")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("未提交变更", result.stderr)
+        self.assertEqual((self.install / GENERATED_FILE).read_text(encoding="utf-8"), "上游新版（安装覆盖）\n")
+        self.assertEqual((self.install / "version.txt").read_text(encoding="utf-8"), "用户修改，不可覆盖\n")
+        self.assertEqual(self.git(self.install, "rev-parse", "HEAD"), old_head)
+        self.assertEqual(len(self.events()), 1)
+
+    def test_local_commit_refusal_has_no_side_effects_on_generated_dir(self):
+        # 红队顺序漏洞：本地提交 + 再生目录脏 → 拒绝时不得先还原再生文件。
+        self.seed_generated_file()
+        self.assert_success(self.run_installer())
+        (self.install / GENERATED_FILE).write_text("上游新版\n", encoding="utf-8")
+        (self.install / "local-note.txt").write_text("本地提交\n", encoding="utf-8")
+        self.git(self.install, "add", "--all")
+        self.git(self.install, "commit", "-m", "用户本地提交")
+        (self.install / GENERATED_FILE).write_text("再改一次\n", encoding="utf-8")
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("本地提交", result.stderr)
+        self.assertEqual((self.install / GENERATED_FILE).read_text(encoding="utf-8"), "再改一次\n")
+
+    def test_staged_and_spaced_generated_changes_are_fully_restored(self):
+        # 红队 A2 两项：①目录内暂存修改（AM/M in index）也必须被还原——
+        # checkout -- dir 不动 index 会假成功；②带空格的目录内路径不得被
+        # 按空白拆词误判为目录外变更。
+        spaced_rel = f"{GENERATED_DIR}/带 空格 词库.dict.yaml"
+        spaced = self.remote / spaced_rel
+        spaced.parent.mkdir(parents=True, exist_ok=True)
+        spaced.write_text("种子\n", encoding="utf-8")
+        self.seed_generated_file()
+        self.assert_success(self.run_installer())
+        (self.install / spaced_rel).write_text("安装覆盖\n", encoding="utf-8")
+        self.git(self.install, "add", "--", spaced_rel)          # 暂存态（AM/M）
+        (self.install / GENERATED_FILE).write_text("安装覆盖\n", encoding="utf-8")
+        (self.remote / "version.txt").write_text("第二版\n", encoding="utf-8")
+        self.commit_remote()
+        result = self.run_installer()
+        self.assert_success(result)
+        self.assertIn("已还原安装再生目录", result.stdout + result.stderr)
+        self.assertEqual((self.install / spaced_rel).read_text(encoding="utf-8"), "种子\n")
+        self.assertEqual((self.install / GENERATED_FILE).read_text(encoding="utf-8"), "上游旧版\n")
+        self.assertEqual(self.git(self.install, "status", "--porcelain"), "")
 
     def test_existing_non_git_directory_is_not_overwritten(self):
         self.install.mkdir()

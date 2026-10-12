@@ -5,6 +5,8 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPONENT_DIR="$HOME/.local/share/ibus/component"
 COMPONENT_XML="$COMPONENT_DIR/voice-custom.xml"
 ENGINE_NAME="voice-custom"
+# 仅注册/写配置：批量安装可延后桌面激活，避免同一流程重复重启。
+NO_RESTART="${VOICE_IME_NO_RESTART:-0}"
 
 # 环境预检：只提示不阻断（FAIL/WARN 明细由 check-environment.sh 输出）。
 if [[ -x "$ROOT_DIR/scripts/check-environment.sh" ]]; then
@@ -51,6 +53,13 @@ IBUS_COMPONENT_PATH_VALUE="$COMPONENT_DIR:/usr/share/ibus/component"
 ENV_DIR="$HOME/.config/environment.d"
 ENV_FILE="$ENV_DIR/ibus-voice-ime.conf"
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# 配置初始化/迁移、environment.d 写入和 daemon 重启前清理会话失效路径。
+# 不清空有效救援值，也不触碰既有 RIME 自愈或渠道文件/manager 清理逻辑。
+eval "$("$ROOT_DIR/scripts/env-sanitize.sh" \
+  VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
+  VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)"
 
 # ------------------------------------------------- 统一 JSON 配置 ----------
 # a) 用户 config.json 不存在时生成骨架（已存在不动）。init 只读 HOME/写一个
@@ -136,7 +145,7 @@ fi
 IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" ibus write-cache >/dev/null 2>&1 || true
 
 # Add to GNOME input sources without removing existing Rime.
-if command -v gsettings >/dev/null 2>&1; then
+if [[ "$NO_RESTART" != 1 ]] && command -v gsettings >/dev/null 2>&1; then
   python3 - <<'PY'
 import ast
 import subprocess
@@ -162,12 +171,14 @@ else:
 PY
 fi
 
+if [[ "$NO_RESTART" != 1 ]]; then
 "$ROOT_DIR/scripts/install-gnome-voice-hotkey.sh" || true
 # Ctrl+Alt+P uses a tiny external helper only to read the desktop clipboard and
 # show the visible "正在粘贴" notification.  The helper passes prepared text back
 # to the engine, which commits it through the same _commit_voice_result path as
 # voice recognition results.
 "$ROOT_DIR/scripts/install-gnome-clipboard-paste-hotkey.sh" || true
+fi
 
 # 词库就绪性提示（只警告、不下载——install.sh 定位是轻量的每次注册/激活；
 # 真正的资产初始化由一次性脚本 ./init.sh 完成）。
@@ -179,7 +190,7 @@ fi
 # Let ibus-daemon reload component list.  This briefly restarts input methods.
 # 后端/渠道配置以 config.json 为单一事实源（引擎进程内读取）；这里只透传
 # 路径类变量给重启后的 daemon。
-if command -v ibus >/dev/null 2>&1 || command -v ibus-daemon >/dev/null 2>&1; then
+if [[ "$NO_RESTART" != 1 ]] && { command -v ibus >/dev/null 2>&1 || command -v ibus-daemon >/dev/null 2>&1; }; then
   env \
     IBUS_COMPONENT_PATH="$IBUS_COMPONENT_PATH_VALUE" \
     LD_LIBRARY_PATH="$ROOT_DIR/vendor/rime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
@@ -188,6 +199,9 @@ if command -v ibus >/dev/null 2>&1 || command -v ibus-daemon >/dev/null 2>&1; th
     VOICE_IME_RIME_STAGING_DIR="$ROOT_DIR/vendor/rime/build" \
     VOICE_IME_RIME_USER_DATA_DIR="$HOME/.local/share/ibus-voice-ime/rime-user" \
     "$ROOT_DIR/scripts/ibus-restart.sh" || true
+fi
+if [[ "$NO_RESTART" == 1 ]]; then
+  echo '仅注册/写配置：已按 VOICE_IME_NO_RESTART=1 跳过 IBus 重启与 GNOME 激活。'
 fi
 
 echo
@@ -201,9 +215,7 @@ cat <<EOF
 $HINT_LINE
 切换方式：GNOME 顶栏输入法菜单，或 Super+Space，选择“自定义语音输入法”。
 键盘输入示例：nihao + Space -> 你好
-语音输入热键：Ctrl+Alt+V，默认后端为本地 Qwen3-ASR（1.7B）。
-原文语音输入热键：Ctrl+Alt+B，识别结果不做 LLM 后处理，只做确定性规整后上屏。
-输入法粘贴热键：Ctrl+Alt+P，读取剪贴板并显示“正在粘贴”提示后，通过语音结果同款 commit_text 路径提交文本。
+语音/原文/粘贴热键与后端以生效 config.json 为准；一键入口 setup.sh 完成后会打印「开始使用」卡片。
 EOF
 
 # init.sh 流程内模型尚未下载属预期（下一步语音步骤会装），只在独立运行时提示。
