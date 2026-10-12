@@ -241,6 +241,21 @@ check_ibus_registration() {
     fail "组件 exec 未指向本仓库（指向了旧副本？）"
     FAILED_ITEMS+=(component-xml)
   fi
+  # daemon 视角：XML 与输入源都在、注册缓存（~/.cache/ibus/bus/registry）却
+  # 被一次无 IBUS_COMPONENT_PATH 的 daemon 重启抹掉时，GNOME/systemd 以
+  # --cache auto 拉起的 ibus-daemon（开机/重登即是）会直接信任旧缓存而
+  # 永不再扫用户组件目录——重启电脑后"输入法消失"的根因。引擎进程正在
+  # 运行说明旧 daemon 已加载（缓存坏但进程未换），此时只降为 WARN。
+  if command -v ibus >/dev/null 2>&1; then
+    if ibus list-engine 2>/dev/null | grep -q '^  voice-custom '; then
+      ok "IBus daemon 已加载 voice-custom 引擎"
+    elif pgrep -f "$ROOT_DIR/src/ibus_voice_ime/engine.py --ibus" >/dev/null 2>&1; then
+      warn "IBus daemon 未注册 voice-custom（注册缓存疑被覆写）" "当前引擎进程仍存活可继续用；但下次重启/重新登录后输入法会消失" "运行 ./scripts/doctor.sh fix 或 ./scripts/ibus-restart.sh 重建注册缓存"
+    else
+      fail "IBus daemon 未注册 voice-custom：组件 XML 在，但 daemon 注册缓存里没有（重启电脑后输入法消失即此因）"
+      FAILED_ITEMS+=(ibus-registry)
+    fi
+  fi
   if [[ -f "$ENV_FILE" ]]; then
     if grep -q "VOICE_IME_RIME_LIBRARY=$ROOT_DIR/" "$ENV_FILE"; then
       ok "environment.d 路径指向本仓库"
@@ -758,6 +773,19 @@ do_fix() {
           restarted=1
         else
           fail "install.sh 重跑失败，请手动排查"
+        fi
+        ;;
+      ibus-registry)
+        # 重建注册缓存（write-cache 只原子替换 ~/.cache/ibus/bus/registry，
+        # 不依赖 daemon）；缓存里记录的 XML mtime 随之刷新，重启由统一的
+        # ibus-restart.sh 完成（其自带组件路径并再次重扫固化）。
+        echo "==> 重建 IBus 组件注册缓存（ibus write-cache）"
+        if IBUS_COMPONENT_PATH="$HOME/.local/share/ibus/component:/usr/share/ibus/component" \
+           ibus write-cache >/dev/null 2>&1; then
+          fixed "注册缓存已重建；重启输入法后生效（见下方统一重启步骤）"
+          restarted=1
+        else
+          fail "ibus write-cache 失败，请手动运行 ./scripts/ibus-restart.sh"
         fi
         ;;
       qwen-python-headers|qwen-setup|qwen-gpu-mismatch)

@@ -56,6 +56,8 @@
 
 同一安装流程最多两次 IBus 重启：仅键盘或 GPU 不可用时末尾重启一次；本地语音保留预注册重启以让新组件进入会话，语音切换最多再重启一次，末尾只刷新注册/配置（共两次）。语音失败仍返回失败并给出独立续装命令，但不盲目第三次重启（避免切换已重启后激活才失败的情况）。[install.sh](install.sh) 支持 `VOICE_IME_NO_RESTART=1`：写组件、环境和配置，但跳过 IBus 重启与 GNOME 激活；独立运行默认仍完整注册激活。
 
+**注册缓存机制（重启电脑后输入法消失的根因）**：IBus 1.5.3x 的 `ibus_registry_load` 在进程环境没有 `IBUS_COMPONENT_PATH` 时只扫系统组件目录（用户目录支持在上游源码中被 `#if 0` 禁用），而 GNOME/systemd 开机拉起的 ibus-daemon 走 `--cache auto`——直接信任 `~/.cache/ibus/bus/registry` 缓存、仅缓存失效才重扫。因此**任何一次无该变量的 daemon 重启（refresh 重扫覆写 / auto 失效重扫写缓存）都会把用户组件从 registry 抹掉**，之后 auto daemon 认定缓存有效、永不再扫用户目录：症状为「安装时正常、重启电脑后输入法未注册且不自愈」。install.sh / switch 脚本历来用 env 前缀传路径所以安全，曾经的覆写入口是 doctor fix 与用户手动重启。[ibus-restart.sh](scripts/ibus-restart.sh) 已内置防线：组件 XML 存在时自动推导 `IBUS_COMPONENT_PATH`（调用方显式值优先），重启前先 `ibus write-cache` 原子固化缓存（不与运行中 daemon 交互，非 GNOME 分支同样受益）——所有调用点（含用户手动）天然安全。[doctor](scripts/doctor.sh) 新增 daemon 视角检测（`ibus list-engine` 无 voice-custom 但 XML 在 → FAIL `ibus-registry`；引擎进程仍存活时降为 WARN「重启后会消失」），fix 分派先用 `ibus write-cache` 重建缓存再统一重启。
+
 ### 初始化三态与幂等
 
 初始化采用 `ready / degraded / blocked` 三态：rime-ice 失败时键盘回退 luna，RNNoise 失败时降噪回退 notch，两者以「⚠ 降级项」列明影响与精确续装命令，默认仍 exit 0；所选本地语音安装/验收失败或 IBus 注册失败为 blocked（exit 1）。[init.sh](init.sh) 与 [setup.sh](setup.sh) 均支持 `--strict-assets`，请求资产降级也 exit 1；无 GPU/驱动 partial 的语音跳过仍不算失败。失败出口会复述子步骤续装命令（保留本次代理/词库选项），子步骤幂等，不必重跑向导或重复下载已就绪资产。
