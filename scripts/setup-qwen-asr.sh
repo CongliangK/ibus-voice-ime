@@ -3,6 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT_DIR/.venv-qwen-asr"
+# 会话环境自愈（与 run-engine.sh 同语义）：旧克隆/旧 venv 残留的路径型渠道键
+# 指向已消失的路径时必须忽略，否则验收会去执行一个不存在的解释器并误报失败。
+# 必须在 MODELS_DIR 等派生变量之前执行。注意：父进程（如 setup.sh）的环境无法
+# 被子进程修改——这里的 unset 只作用于本进程及其子进程；持久来源由 install.sh
+# 清理 environment.d 与 systemd 用户环境，重开终端/重新登录后不再出现。
+QWEN_PATH_KEYS=(VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR)
+eval "$("$ROOT_DIR/scripts/env-sanitize.sh" "${QWEN_PATH_KEYS[@]}")"
 MODELS_DIR="${VOICE_IME_QWEN_ASR_MODELS_DIR:-$ROOT_DIR/vendor/models/qwen3-asr}"
 # 共享模型缓存：分档真实数据统一放这里，仓库 vendor 下只建符号链接（既有
 # vendor 路径语义不变，引擎/验收/REUSE 判据照旧读 vendor 路径）。跨克隆复用，

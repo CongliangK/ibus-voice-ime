@@ -899,6 +899,27 @@ do_fix() {
 }
 
 # ------------------------------------------------------------------- 主流程 --
+# 会话环境自愈：旧克隆/旧 venv 残留的路径型渠道键指向已消失的路径时必须忽略，
+# 与 run-engine.sh 的运行期语义一致——否则体检会拿一个不存在的解释器/模型去判定，
+# 把一个「环境变量残留」报成本仓库缺文件（使用者实测的误报）。降级为 WARN 而非
+# 静默忽略：用户仍需知道会话里还有残留、重开终端/重新登录后才彻底消失。
+sanitize_session_env() {
+  local unset_lines stale_keys=() line
+  unset_lines="$("$ROOT_DIR/scripts/env-sanitize.sh" \
+    VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+    VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
+    VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)"
+  [[ -n "$unset_lines" ]] || return 0
+  eval "$unset_lines"
+  while IFS= read -r line; do
+    [[ "$line" == unset\ * ]] && stale_keys+=("${line#unset }")
+  done <<< "$unset_lines"
+  warn "会话环境含已失效的路径型渠道键（本次体检已忽略）" \
+    "$(printf '%s ' "${stale_keys[@]}")指向已不存在的路径（旧克隆/旧 venv 残留）；它们随登录来自 environment.d 或 systemd 用户环境，只在本进程忽略不等于清除" \
+    "运行 ./install.sh 清除 environment.d 与 systemd 用户环境中的对应行，然后重开终端或重新登录（已在运行的终端与 gnome-terminal-server 仍持有旧值）"
+}
+
+sanitize_session_env
 check_env_dependencies
 check_unified_config
 check_ibus_registration
