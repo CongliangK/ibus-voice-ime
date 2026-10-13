@@ -530,6 +530,13 @@ check_asr_backend() {
         ok "Qwen sidecar 解释器存在（仍需运行时验收）"
       else
         fail "Qwen sidecar 解释器缺失：$qwen_python"
+        # 生效路径优先级：环境变量 > 用户 config.json > 仓库默认。指向当前仓库
+        # 之外且不存在时，多半是旧克隆写进 config.json 的绝对路径残留——删掉
+        # 旧克隆目录并不会清掉它，在本仓库重装 venv 也修不好，需改配置本身。
+        if [[ "$qwen_python" == /* && "$qwen_python" != "$ROOT_DIR"/* ]]; then
+          printf '         该路径不在当前仓库（%s）内，且已不存在：它来自旧克隆写入的配置残留，而不是本仓库缺文件。\n' "$ROOT_DIR"
+          printf '         修复：编辑 ~/.config/ibus-voice-ime/config.json 删除 asr.qwen3.python 键（模型同理删 asr.qwen3.model_path），或运行 ./scripts/switch-qwen-asr.sh 1.7b 重写为本仓库路径\n'
+        fi
         have_venv=0
       fi
       local model_dir
@@ -540,6 +547,9 @@ check_asr_backend() {
         ok "Qwen3-ASR 模型就绪（$model_dir）"
       else
         fail "Qwen3-ASR 模型缺失（$model_dir）"
+        if [[ "$model_dir" == /* && "$model_dir" != "$ROOT_DIR"/* && ! -d "$model_dir" ]]; then
+          printf '         该路径同样来自旧克隆的 config.json 残留（asr.qwen3.model_path）；删除该键或运行 ./scripts/switch-qwen-asr.sh 1.7b 后，模型会从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+        fi
         have_model=0
       fi
       if [[ $have_venv -eq 1 ]]; then

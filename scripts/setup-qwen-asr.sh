@@ -146,6 +146,13 @@ flock -n 9 || { echo "另一个 Qwen 安装/修复正在运行，请等待完成
 #   VOICE_IME_PIP_INDEX_URL=default ./scripts/setup-qwen-asr.sh   # 官方 PyPI
 PIP_INDEX_URL="${VOICE_IME_PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 [[ "$PIP_INDEX_URL" != "default" ]] || PIP_INDEX_URL="https://pypi.org/simple"
+# 校验包源：必须是单个 http(s) URL。多个 URL（空格分隔）、贴错位置的网页链接
+# （如 paste/bin 分享页）会让 pip 报出误导性的 "No matching distribution found"。
+if [[ "$PIP_INDEX_URL" != https://* && "$PIP_INDEX_URL" != http://* ]] || [[ "$PIP_INDEX_URL" == *[[:space:]]* ]]; then
+  echo "VOICE_IME_PIP_INDEX_URL 的值不是单个 http(s) URL：$VOICE_IME_PIP_INDEX_URL" >&2
+  echo "请只填一个 PyPI 镜像地址（如 https://pypi.tuna.tsinghua.edu.cn/simple），多镜像/网页链接不能作为包源。" >&2
+  exit 1
+fi
 # Explicit URL even when the caller exported PIP_INDEX_URL; ignore unrelated
 # extra indices/pip.conf without editing any user configuration.
 export PIP_CONFIG_FILE=/dev/null PIP_INDEX_URL
@@ -354,6 +361,27 @@ if [[ $REUSE -eq 0 ]]; then
     echo "⚠ 检测到 NVIDIA 驱动 $NVIDIA_DRIVER < 580：requirements 中 torch 将解析为 2.12.x（捆绑 CUDA 13，"
     echo "  官方要求驱动 >=580）。若后续运行时验收（CUDA/Triton 矩阵运算）失败，请在 requirements-qwen-asr.txt"
     echo "  临时收紧为 torch==2.9.0（CUDA 12.8 线，要求驱动 >=525）后重跑本脚本。" >&2
+  fi
+  # 网络预检：pip 走代理但代理进程没在跑时，会报出误导性的
+  # "No matching distribution found"（versions: none）——先探测代理与包源，
+  # 把"代理拒绝连接"这类网络层问题在下载 GB 级依赖之前明确报出来。
+  # 只警告不阻断：探测失败不代表安装必败（如 doctor fix 透传的代理仅用于
+  # 下载，pip 在部分环境仍可直连），真正的失败以 pip 退出码为准。
+  if [[ -n "${http_proxy:-}${https_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}" ]]; then
+    PROBE_URL="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+    PROBE_HOSTPORT="${PROBE_URL#*://}"; PROBE_HOSTPORT="${PROBE_HOSTPORT%%/*}"
+    PROBE_HOST="${PROBE_HOSTPORT%%:*}"; PROBE_PORT="${PROBE_HOSTPORT##*:}"
+    [[ "$PROBE_PORT" == "$PROBE_HOSTPORT" ]] && PROBE_PORT=80
+    if ! timeout 5 bash -c "exec 3<>/dev/tcp/${PROBE_HOST}/${PROBE_PORT}" 2>/dev/null; then
+      echo "⚠ 警告：检测到代理环境变量（$PROBE_URL），但当前无法连接该代理。" >&2
+      echo "  若 pip 随后报 No matching distribution found / versions: none，这不是包不存在，" >&2
+      echo "  而是所有请求都经过这个不可用的代理。请启动代理进程，或执行：" >&2
+      echo "  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY 后重跑本脚本。" >&2
+    fi
+  fi
+  if ! curl -fsSI --max-time 8 -o /dev/null "$PIP_INDEX_URL" 2>/dev/null; then
+    echo "⚠ 警告：当前网络环境可能无法访问包源 $PIP_INDEX_URL（代理或镜像不可达）。" >&2
+    echo "  继续尝试安装；若 pip 失败，请先解决网络/代理问题后重跑。" >&2
   fi
   # pip 自升级失败不致命：旧 pip 仍可能完成依赖安装，真正的安装错误由下一行报告
   if ! "$PY" -m pip --isolated install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then

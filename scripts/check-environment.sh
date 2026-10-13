@@ -176,7 +176,17 @@ if arecord -l >/dev/null 2>&1; then
   if [[ "${CARD_COUNT:-0}" -gt 0 ]]; then
     ok "检测到 ${CARD_COUNT} 块 ALSA 采集卡"
   else
-    warn "未检测到 ALSA 硬件采集卡" "当前麦克风输入未经验证，USB/蓝牙设备可能未连接" "连接麦克风后运行 arecord -l；只用键盘可忽略"
+    # arecord -l 只列 ALSA 硬件卡；PipeWire 虚拟麦克风（如虚拟声卡模块、
+    # 软件回环）不会出现在这里，但系统默认源录音完全可用——先查默认源再告警。
+    DEFAULT_SOURCE=""
+    if command -v pactl >/dev/null 2>&1; then
+      DEFAULT_SOURCE="$(pactl info 2>/dev/null | sed -n 's/^Default Source:[[:space:]]*//p')"
+    fi
+    if [[ -n "$DEFAULT_SOURCE" && "$DEFAULT_SOURCE" != *dummy* && "$DEFAULT_SOURCE" != "auto_null" ]]; then
+      echo "  [INFO] 无 ALSA 硬件卡，但系统默认输入源可用：$DEFAULT_SOURCE（虚拟麦克风不在 arecord -l 中列出，属正常）"
+    else
+      warn "未检测到 ALSA 硬件采集卡，也未查到可用的系统默认输入源" "当前麦克风输入未经验证，USB/蓝牙设备可能未连接" "连接麦克风后运行 arecord -l 或 pactl list sources short；只用键盘可忽略"
+    fi
   fi
 fi
 DEVICE="${VOICE_IME_ARECORD_DEVICE:-}"

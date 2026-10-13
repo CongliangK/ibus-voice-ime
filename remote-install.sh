@@ -217,6 +217,13 @@ else
 fi
 
 [[ -f "$DIR/setup.sh" ]] || fail '仓库缺少 setup.sh，请检查仓库地址与分支。'
+# 为克隆设置的 https_proxy 会留在本 shell 并被安装器（pip/模型下载）继承；
+# 代理进程随后关闭时，pip 会报出误导性的 "No matching distribution found"。
+# 这里提醒一句，避免"克隆时代理可用、装依赖时代理已关"的残留坑。
+if [[ -n "${https_proxy:-}${http_proxy:-}${HTTPS_PROXY:-}${HTTP_PROXY:-}" ]]; then
+  printf '提示：当前 shell 设置了代理（%s）。安装器会继承它；若稍后关闭代理进程，\n' "${https_proxy:-${http_proxy:-${HTTPS_PROXY:-${HTTP_PROXY:-}}}}"
+  printf '请先 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY 再继续安装。\n'
+fi
 cd -- "$DIR"
 # /dev/tty 通常始终存在；须同时探测能否打开，避免真正无人值守时退出。
 # 放在同一复合命令中：bash 必须先从脚本管道读完 exec，再切换 stdin，
