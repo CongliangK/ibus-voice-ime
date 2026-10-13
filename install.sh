@@ -56,10 +56,23 @@ export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 
 # 配置初始化/迁移、environment.d 写入和 daemon 重启前清理会话失效路径。
 # 不清空有效救援值，也不触碰既有 RIME 自愈或渠道文件/manager 清理逻辑。
-eval "$("$ROOT_DIR/scripts/env-sanitize.sh" \
-  VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+PATH_ENV_KEYS=(VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
   VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
-  VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)"
+  VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH)
+SANITIZE_UNSET="$("$ROOT_DIR/scripts/env-sanitize.sh" "${PATH_ENV_KEYS[@]}")"
+if [[ -n "$SANITIZE_UNSET" ]]; then
+  eval "$SANITIZE_UNSET"
+  # 只 unset 本进程等于没修：environment.d 在登录时注入会话，而 systemd 用户
+  # 管理器环境会被每个新终端与引擎服务立刻继承——旧安装留下的陈旧路径键会
+  # 一直压过新安装（doctor 永久 FAIL）。两处都要清。
+  STALE_SESSION_KEYS=()
+  while IFS= read -r line; do
+    [[ "$line" == unset\ * ]] && STALE_SESSION_KEYS+=("${line#unset }")
+  done <<< "$SANITIZE_UNSET"
+  if (( ${#STALE_SESSION_KEYS[@]} > 0 )); then
+    systemctl --user unset-environment "${STALE_SESSION_KEYS[@]}" 2>/dev/null || true
+  fi
+fi
 
 # ------------------------------------------------- 统一 JSON 配置 ----------
 # a) 用户 config.json 不存在时生成骨架（已存在不动）。init 只读 HOME/写一个
@@ -83,14 +96,38 @@ if [[ -f "$ENV_FILE" ]] && grep -qE "$CHANNEL_ENV_RE" "$ENV_FILE"; then
   printf '%s\n' "$CHANNEL_LINES" > "$MIGRATE_TMP"
   # stdout（=清理后的文件内容）重定向到文件，不污染安装控制台；
   # 逐行去向（已迁移/路径型保留/密钥类不迁/无对应键）由 stderr 报告。
-  # 路径型渠道键（模型/解释器路径）迁移器拒迁：写回 env 文件，保住
-  # run-engine.sh 的 env 层陈旧路径自愈。
+  # 路径型渠道键（模型/解释器路径）迁移器拒迁：仅当目标真实存在时写回 env
+  # 文件（保住 run-engine.sh 的 env 层陈旧路径自愈）；指向已消失路径的行必须
+  # 剔除——它会在登录时进入会话环境、压过 config.json 与新安装，导致 doctor
+  # 永远报旧克隆的 FAIL（使用者实测的「重装 N 次都修不好」死循环）。
   PATH_KEEP_RE='^(VOICE_IME_QWEN_ASR_MODEL_PATH|VOICE_IME_QWEN_ASR_PYTHON|VOICE_IME_MIMO_ASR_MODEL_PATH|VOICE_IME_MIMO_ASR_PYTHON)='
   if "$PYTHON" -m ibus_voice_ime.config migrate-env-file "$MIGRATE_TMP" > "$MIGRATE_KEPT"; then
     MIGRATE_PATH_LINES="$(grep -E "$PATH_KEEP_RE" "$MIGRATE_KEPT" || true)"
     DROPPED_COUNT="$(grep -vcE "$PATH_KEEP_RE" "$MIGRATE_KEPT" || true)"
     DROPPED_COUNT="${DROPPED_COUNT:-0}"
     CHANNEL_LINES=""   # 迁移成功：env 文件里的渠道行随后丢弃（路径型保留行除外）
+    if [[ -n "$MIGRATE_PATH_LINES" ]]; then
+      STALE_FILE_KEYS="$("$ROOT_DIR/scripts/env-sanitize.sh" --from-file "$MIGRATE_KEPT" \
+        "${PATH_ENV_KEYS[@]}" 2>/dev/null | while IFS= read -r unset_line; do
+          [[ "$unset_line" == unset\ * ]] && printf '%s\n' "${unset_line#unset }"
+        done)"
+      if [[ -n "$STALE_FILE_KEYS" ]]; then
+        KEPT_PATH_LINES=""
+        while IFS= read -r path_line; do
+          [[ -n "$path_line" ]] || continue
+          path_key="${path_line%%=*}"
+          case $'\n'"$STALE_FILE_KEYS"$'\n' in
+            *$'\n'"$path_key"$'\n'*) continue ;;
+          esac
+          KEPT_PATH_LINES+="$path_line"$'\n'
+        done <<< "$MIGRATE_PATH_LINES"
+        MIGRATE_PATH_LINES="${KEPT_PATH_LINES%$'\n'}"
+        STALE_FILE_COUNT="$(printf '%s\n' "$STALE_FILE_KEYS" | grep -c . || true)"
+        echo "已从 environment.d 移除 $STALE_FILE_COUNT 行指向已消失路径的路径型渠道行（旧克隆/旧 venv 残留），并从 systemd 用户环境同步清除"
+        # 用户管理器环境同步清除：否则新开终端/引擎服务仍会继承旧路径。
+        systemctl --user unset-environment $STALE_FILE_KEYS 2>/dev/null || true
+      fi
+    fi
     CURRENT_BACKEND="$("$PYTHON" -m ibus_voice_ime.config get asr.backend 2>/dev/null || echo qwen3-asr)"
     echo "迁移后：渠道配置已写入 config.json，当前后端：$CURRENT_BACKEND"
     if [[ "$DROPPED_COUNT" -gt 0 ]]; then

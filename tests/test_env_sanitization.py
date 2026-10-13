@@ -153,6 +153,48 @@ class EnvSanitizeHelperTest(EnvSanitizeSandbox):
         self.assertEqual(result.stdout, "unset " + PATH_KEYS[0] + "\n")
         self.assertNotIn("VOLC", result.stderr)
 
+    def test_env_sanitize_from_file_reports_stale_and_keeps_existing(self):
+        # 使用者实测场景：environment.d 里留着旧克隆的解释器/模型路径。
+        survivor = self.root / "rescue/python"
+        survivor.parent.mkdir(parents=True, exist_ok=True)
+        survivor.touch()
+        env_file = self.root / "env-file.conf"
+        env_file.write_text(
+            f"{PATH_KEYS[0]}={self.root}/deleted-old-ime/.venv-qwen-asr/bin/python\n"
+            f"{PATH_KEYS[1]}={survivor}\n"
+            "VOICE_IME_RIME_LIBRARY=/opt/rime/lib.so\n",
+            encoding="utf-8")
+        result = subprocess.run(["bash", str(HELPER), "--from-file", str(env_file), *PATH_KEYS],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"unset {PATH_KEYS[0]}\n")
+        self.assertIn("环境文件", result.stderr)
+        self.assertNotIn(PATH_KEYS[1], result.stdout)
+
+    def test_env_sanitize_from_file_uses_file_not_process_env_and_last_wins(self):
+        # 判定只看文件（进程环境不得干扰），同一键取最后一次出现（systemd 覆盖语义）。
+        survivor = self.root / "rescue/dir"
+        survivor.mkdir(parents=True, exist_ok=True)
+        env_file = self.root / "env-file.conf"
+        env_file.write_text(f"{PATH_KEYS[0]}={survivor}\n{PATH_KEYS[0]}={self.root}/stale\n",
+                            encoding="utf-8")
+        result = subprocess.run(["bash", str(HELPER), "--from-file", str(env_file), PATH_KEYS[0]],
+                                env={**self.env, PATH_KEYS[0]: str(survivor)},
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, result.stdout), (0, f"unset {PATH_KEYS[0]}\n"))
+
+    def test_env_sanitize_from_file_never_executes_values(self):
+        marker = self.root / "must not execute"
+        env_file = self.root / "env-file.conf"
+        env_file.write_text(
+            f"{PATH_KEYS[0]}={self.root}/旧 安装/$(touch '{marker}')`;echo danger;python\n",
+            encoding="utf-8")
+        result = subprocess.run(["bash", str(HELPER), "--from-file", str(env_file), PATH_KEYS[0]],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"unset {PATH_KEYS[0]}\n")
+        self.assertFalse(marker.exists())
+
 
 class EnvSanitizeEntrypointTest(EnvSanitizeSandbox):
     def setUp(self):
@@ -223,6 +265,27 @@ class EnvSanitizeEntrypointTest(EnvSanitizeSandbox):
         result = self.run_bash(self.root / "install.sh", extra_env={PATH_KEYS[0]: str(python)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.received()[PATH_KEYS[0]], str(python))
+
+    def test_install_drops_stale_environment_d_path_lines(self):
+        # 使用者实测死循环：旧克隆路径写在 environment.d 里，删目录/重装都修不好，
+        # 因为 install 会把「路径型」渠道行原样写回，而它在会话环境里压过一切。
+        python = self.script("custom 中文/python", "#!/bin/sh\nexit 0\n")
+        self.env_file.parent.mkdir(parents=True)
+        self.env_file.write_text(
+            "VOICE_IME_QWEN_ASR=1\n"
+            f"VOICE_IME_QWEN_ASR_PYTHON={self.root}/deleted-old-ime/.venv-qwen-asr/bin/python\n"
+            f"VOICE_IME_QWEN_ASR_MODEL_PATH={self.root}/deleted-old-ime/vendor/models/qwen3-asr/Qwen3-ASR-1.7B\n"
+            f"VOICE_IME_MIMO_ASR_PYTHON={python}\n"
+            "VOICE_IME_RIME_LIBRARY=/opt/rime/lib.so\n",
+            encoding="utf-8")
+        result = self.run_bash(self.root / "install.sh")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        content = self.env_file.read_text(encoding="utf-8")
+        self.assertNotIn("VOICE_IME_QWEN_ASR_PYTHON", content)
+        self.assertNotIn("VOICE_IME_QWEN_ASR_MODEL_PATH", content)
+        # 仍有效的显式自定义路径必须保留（不得误清用户救援值）。
+        self.assertIn(f"VOICE_IME_MIMO_ASR_PYTHON={python}", content)
+        self.assertIn("指向已消失路径的路径型渠道行", result.stdout)
 
     def test_helper_consumer_semantics_spaces_and_tilde_user_survive(self):
         # 与真实消费者（strip + expanduser）对齐：前后空格的有效路径、

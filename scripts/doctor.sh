@@ -217,8 +217,30 @@ PY
   else
     ok "渠道 enabled 标志与 asr.backend 一致"
   fi
-  if [[ -r "$ENV_FILE" ]] && grep -qE '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD|VOICE_IME_VOLC_|VOICE_IME_SILICONFLOW)' "$ENV_FILE"; then
-    warn "environment.d 仍含渠道配置行" "旧环境行会压过 config.json 中的语音选择" "运行 ./install.sh 迁移旧配置后复查"
+  if [[ -r "$ENV_FILE" ]]; then
+    CHANNEL_ENV_LINES="$(grep -E '^(VOICE_IME_ASR_BACKEND|VOICE_IME_QWEN_ASR|VOICE_IME_MIMO_ASR|VOICE_IME_MIMO_CLOUD|VOICE_IME_VOLC_|VOICE_IME_SILICONFLOW)' "$ENV_FILE" || true)"
+    if [[ -n "$CHANNEL_ENV_LINES" ]]; then
+      printf '  environment.d 渠道行（%s）：\n' "$ENV_FILE"
+      while IFS= read -r channel_line; do
+        printf '    %s\n' "$channel_line"
+      done <<< "$CHANNEL_ENV_LINES"
+      # 路径型行指向已消失的路径时，它就是「重装也修不好」的根源：这些键在
+      # 会话环境里压过 config.json 与新安装（使用者实测的死循环）。switch 脚本
+      # 与新 install.sh 都会清除，而旧 install.sh 会把它原样写回。
+      STALE_CHANNEL_KEYS="$("$ROOT_DIR/scripts/env-sanitize.sh" --from-file "$ENV_FILE" \
+        VOICE_IME_QWEN_ASR_PYTHON VOICE_IME_QWEN_ASR_MODEL_PATH VOICE_IME_QWEN_ASR_MODELS_DIR \
+        VOICE_IME_MIMO_ASR_PYTHON VOICE_IME_MIMO_ASR_MODELS_DIR \
+        VOICE_IME_MIMO_ASR_MODEL_PATH VOICE_IME_MIMO_ASR_TOKENIZER_PATH 2>/dev/null | while IFS= read -r unset_line; do
+          [[ "$unset_line" == unset\ * ]] && printf '%s\n' "${unset_line#unset }"
+        done)"
+      if [[ -n "$STALE_CHANNEL_KEYS" ]]; then
+        warn "environment.d 含指向已消失路径的路径型渠道行" \
+          "这些键会进入会话环境并压过 config.json/新安装：$(printf '%s ' $STALE_CHANNEL_KEYS)（旧克隆/旧 venv 残留，重装不会覆盖它们）" \
+          "运行 ./install.sh 自动清除（同时清 systemd 用户环境）；也可手动删除 $ENV_FILE 中对应行并执行 systemctl --user unset-environment $(printf '%s ' $STALE_CHANNEL_KEYS)；清完请重开终端或重新登录"
+      else
+        warn "environment.d 仍含渠道配置行" "旧环境行会压过 config.json 中的语音选择" "运行 ./install.sh 迁移旧配置后复查；路径仍有效的行属用户显式指定，会保留"
+      fi
+    fi
   fi
 }
 
@@ -534,8 +556,18 @@ check_asr_backend() {
         # 之外且不存在时，多半是旧克隆写进 config.json 的绝对路径残留——删掉
         # 旧克隆目录并不会清掉它，在本仓库重装 venv 也修不好，需改配置本身。
         if [[ "$qwen_python" == /* && "$qwen_python" != "$ROOT_DIR"/* ]]; then
-          printf '         该路径不在当前仓库（%s）内，且已不存在：它来自旧克隆写入的配置残留，而不是本仓库缺文件。\n' "$ROOT_DIR"
-          printf '         修复：编辑 ~/.config/ibus-voice-ime/config.json 删除 asr.qwen3.python 键（模型同理删 asr.qwen3.model_path），或运行 ./scripts/switch-qwen-asr.sh 1.7b 重写为本仓库路径\n'
+          printf '         该路径不在当前仓库（%s）内，且已不存在：这是旧克隆留下的显式覆盖，而不是本仓库缺文件。\n' "$ROOT_DIR"
+          # 生效值优先级：环境变量 > config.json。路径型环境键由旧 install 写进
+          # environment.d / systemd 用户环境后，删目录、重装、甚至 unset 单个终端
+          # 都不会清掉它——必须指出是哪一层在覆盖，否则排查会一直在 config.json 打转。
+          if [[ -n "${VOICE_IME_QWEN_ASR_PYTHON:-}" ]]; then
+            printf '         来源：环境变量 VOICE_IME_QWEN_ASR_PYTHON（继承自 environment.d 或 systemd 用户环境，优先于 config.json）\n'
+            printf '         排查：grep -rn "VOICE_IME_QWEN" ~/.config/environment.d/ ; systemctl --user show-environment | grep -i qwen\n'
+            printf '         修复：运行 ./install.sh（自动清除指向已消失路径的行）后重开终端或重新登录；或手动删除 environment.d 中的对应行并执行 systemctl --user unset-environment VOICE_IME_QWEN_ASR_PYTHON\n'
+          else
+            printf '         来源：用户配置 ~/.config/ibus-voice-ime/config.json 的 asr.qwen3.python 键\n'
+            printf '         修复：删除该键，或运行 ./scripts/switch-qwen-asr.sh 1.7b 重写为本仓库路径\n'
+          fi
         fi
         have_venv=0
       fi
@@ -548,7 +580,12 @@ check_asr_backend() {
       else
         fail "Qwen3-ASR 模型缺失（$model_dir）"
         if [[ "$model_dir" == /* && "$model_dir" != "$ROOT_DIR"/* && ! -d "$model_dir" ]]; then
-          printf '         该路径同样来自旧克隆的 config.json 残留（asr.qwen3.model_path）；删除该键或运行 ./scripts/switch-qwen-asr.sh 1.7b 后，模型会从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+          if [[ -n "${VOICE_IME_QWEN_ASR_MODEL_PATH:-}" ]]; then
+            printf '         来源：环境变量 VOICE_IME_QWEN_ASR_MODEL_PATH（environment.d / systemd 用户环境残留，压过 config.json 与共享缓存）\n'
+            printf '         修复：运行 ./install.sh 自动清除该行后重开终端/重新登录；模型本体仍可从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+          else
+            printf '         来源：config.json 的 asr.qwen3.model_path 键；删除该键或运行 ./scripts/switch-qwen-asr.sh 1.7b 后，模型会从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+          fi
         fi
         have_model=0
       fi

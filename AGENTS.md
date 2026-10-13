@@ -313,7 +313,7 @@ PYTHONPATH=src python3 -m ibus_voice_ime.config set llm.prompts.system '你是�
 PYTHONPATH=src python3 -m ibus_voice_ime.config set recording.max_seconds 120     # toggle 模式最长录音 2 分钟
 ```
 
-API Key 等密钥仍走环境变量 / BWS 运行时注入，不写入 config.json。老用户迁移：environment.d 里的渠道行仍生效但会压过 config.json——重跑 `./install.sh` 自动迁移；switch 脚本每次运行也会自动清理这些旧渠道行。
+API Key 等密钥仍走环境变量 / BWS 运行时注入，不写入 config.json。老用户迁移：environment.d 里的渠道行仍生效但会压过 config.json——重跑 `./install.sh` 自动迁移；switch 脚本每次运行也会自动清理这些旧渠道行。**路径型渠道行（`VOICE_IME_QWEN_ASR_PYTHON`、`VOICE_IME_MIMO_ASR_*_PATH` 等）只在目标路径真实存在时保留**：指向已消失路径（旧克隆、删掉的 venv）的行是「重装也修不好」的根源——它随登录进入会话环境，优先级高于 config.json 与仓库默认，删目录、重装、在单个终端 `unset` 都清不掉。install.sh 现在写回前用 [env-sanitize.sh](scripts/env-sanitize.sh)（`--from-file` 模式，与运行期自愈同一套存在性语义）剔除这类行，并 `systemctl --user unset-environment` 同步清 systemd 用户环境；[doctor](scripts/doctor.sh) 的 environment.d 检查会列出具体行、判定哪些是陈旧路径型行，并在 Qwen 解释器/模型 FAIL 下点名生效值来自哪一层（环境变量 vs config.json）及对应修复命令，不再只给一句「运行 ./install.sh」。
 
 ### VAD / 静音自动停止（fixed 模式可选）
 
