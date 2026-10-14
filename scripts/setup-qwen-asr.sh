@@ -172,6 +172,9 @@ echo "pip 包源：$PIP_INDEX_URL（VOICE_IME_PIP_INDEX_URL=default 使用官方
 # place. The EXIT trap cannot help there, so the rename is journaled and the
 # next run restores the original before doing anything else.
 STATE_FILE="$ROOT_DIR/.qwen-asr-setup.state"
+# 归零环境可能继承的同名值：finish() 兜底清理只应作用于本次运行 mktemp 的文件
+# （前缀守卫验证命名空间，这里归零验证所有权——两者缺一不可）。
+PIP_STDERR_FILE=""
 recover_interrupted() {
   [[ ! -L "$STATE_FILE" ]] || { echo "拒绝使用符号链接安装状态文件：$STATE_FILE" >&2; exit 1; }
   [[ -f "$STATE_FILE" ]] || return 0
@@ -281,6 +284,12 @@ finish() {
   if [[ ${#PART_DIRS[@]} -gt 0 ]]; then
     rm -rf -- "${PART_DIRS[@]}"
   fi
+  # pip stderr 捕获临时文件：Ctrl-C/异常退出经 EXIT trap 兜底清理
+  # （SIGKILL/断电无法触发 trap，残留文件名固定为 /tmp/qwen-asr-pip-stderr.*，
+  #  可安全手工删除；前缀守卫防止误删环境继承的无关路径）。
+  case "${PIP_STDERR_FILE:-}" in
+    /tmp/qwen-asr-pip-stderr.*) rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true ;;
+  esac
   rm -f "$STATE_FILE"
   exit "$rc"
 }
@@ -394,10 +403,17 @@ if [[ $REUSE -eq 0 ]]; then
   if ! "$PY" -m pip --isolated install --upgrade pip "${PIP_INDEX_ARGS[@]}"; then
     echo "⚠ pip 自升级失败（网络？），继续使用现有 pip 安装依赖……" >&2
   fi
-  if ! "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" "${PIP_INDEX_ARGS[@]}"; then
-    echo "依赖安装失败：检查上方 pip 错误、网络/代理和目标解释器。旧环境如有备份会恢复。" >&2
+  # 捕获 pip stderr 供失败分类诊断（成功路径行为不变：stderr 原样透传到终端）
+  PIP_STDERR_FILE="$(mktemp /tmp/qwen-asr-pip-stderr.XXXXXX)"
+  if ! "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" "${PIP_INDEX_ARGS[@]}" 2>"$PIP_STDERR_FILE"; then
+    cat "$PIP_STDERR_FILE" >&2
+    bash "$ROOT_DIR/scripts/net-probe.sh" --analyze "$PIP_STDERR_FILE" --index-url "$PIP_INDEX_URL" >&2 || true
+    rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
+    echo "依赖安装失败：检查上方 pip 错误与网络诊断（scripts/net-probe.sh 可独立运行复测）。旧环境如有备份会恢复。" >&2
     exit 1
   fi
+  cat "$PIP_STDERR_FILE" >&2
+  rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
 fi
 "$PY" -m pip --isolated check
 "$BOOTSTRAP" "$CHECK" --python "$PY" --stage static
