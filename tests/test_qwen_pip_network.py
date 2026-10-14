@@ -701,6 +701,25 @@ class NetProbeNetworkTest(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
+    @staticmethod
+    def start_mock_proxy(status):
+        # 回环 HTTP 代理：对任何请求回固定状态码（4xx 劫持 / 5xx 网关错误）。
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'x'
+                self.send_response(status)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_HEAD = do_GET
+
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='net-probe-net-test-')
         self.addCleanup(self.tmp.cleanup)
@@ -808,6 +827,96 @@ class NetProbeNetworkTest(unittest.TestCase):
         self.assertIn('▶ 分类：代理类 —— 内容劫持（实证）', out)
         self.assertIn('内容级', out)
         self.assertNotIn('代理不可达/连接失败', out)
+
+    def test_s13_via_proxy_5xx_gateway_error_not_content_hijack(self):
+        # RT2 P2-A 回归：经代理 5xx（502）且直连可见目标版本 → 「代理网关错误/
+        # 上游不可达（实证）」——代理侧故障，不是内容级吞掉；不得出现
+        # 「内容劫持」字样，修复建议指向代理服务。
+        index = self.start_index(
+            f'<a href="../../packages/qwen_asr-{V}-py3-none-any.whl#sha256=abc">'
+            f'qwen_asr-{V}-py3-none-any.whl</a>')
+        self.addCleanup(index.shutdown)
+        proxy = self.start_mock_proxy(502)
+        self.addCleanup(proxy.shutdown)
+        err = self.write_stderr(
+            f'ERROR: Could not find a version that satisfies the requirement '
+            f'qwen-asr=={V} (from versions: none)\n'
+            f'ERROR: No matching distribution found for qwen-asr=={V}')
+        result = self.run_probe('--analyze', err,
+                                '--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V, '--stage', 'deps',
+                                http_proxy=f'http://127.0.0.1:{proxy.server_port}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('▶ 分类：代理类 —— 代理网关错误/上游不可达（实证）', out)
+        self.assertIn('HTTP 502', out)
+        self.assertIn('代理侧故障', out)
+        self.assertIn('不是“内容级”吞掉', out)
+        self.assertNotIn('内容劫持', out)
+        # 修复建议指向代理服务，且换镜像无效的结论保持。
+        self.assertIn('检查代理服务及其上游', out)
+        self.assertIn('换镜像无法解决', out)
+        self.assertIn("--noproxy '*'", out)
+        self.assertIn('-x "$http_proxy"', out)
+
+    def test_s13b_standalone_via_proxy_5xx_gateway_error(self):
+        # P2-A standalone 同口径：502 经代理、直连可见 → 代理网关错误结论。
+        index = self.start_index(
+            f'<a href="../../packages/qwen_asr-{V}-py3-none-any.whl#sha256=abc">'
+            f'qwen_asr-{V}-py3-none-any.whl</a>')
+        self.addCleanup(index.shutdown)
+        proxy = self.start_mock_proxy(503)
+        self.addCleanup(proxy.shutdown)
+        result = self.run_probe('--package', 'qwen-asr', '--version', V,
+                                VOICE_IME_PIP_INDEX_URL=f'http://127.0.0.1:{index.server_port}/simple',
+                                http_proxy=f'http://127.0.0.1:{proxy.server_port}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('代理网关错误/上游不可达', out)
+        self.assertIn('HTTP 503', out)
+        self.assertIn('不是内容级吞掉', out)
+        self.assertNotIn('内容劫持', out)
+
+    def test_s14_garbage_direct_with_dead_proxy_reports_proxy_facts(self):
+        # RT2 P2-B 回归（场景一：有代理变量）：直连垃圾页 + 经代理探测连接失败
+        # （all_proxy=socks5://死端口）→ 文案如实并列两侧事实（配置的代理协议与
+        # 来源变量、经代理探测结果），不再自相矛盾地断言「当前无代理变量」。
+        index = self.start_index('<html>captive portal login</html>')
+        self.addCleanup(index.shutdown)
+        err = self.write_stderr(
+            f'ERROR: Could not find a version that satisfies the requirement '
+            f'qwen-asr=={V} (from versions: none)\n'
+            f'ERROR: No matching distribution found for qwen-asr=={V}')
+        result = self.run_probe('--analyze', err,
+                                '--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V, '--stage', 'deps',
+                                all_proxy='socks5://127.0.0.1:1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('▶ 分类：代理类 —— 内容异常', out)
+        self.assertIn('配置的代理（协议 socks5，来源 $all_proxy）', out)
+        self.assertIn('经代理探测得 HTTP 000 / network-error', out)
+        self.assertIn('可能是透明劫持，也可能是代理故障', out)
+        self.assertIn('直连/经代理两条命令', out)
+        self.assertNotIn('当前无代理变量', out)
+
+    def test_s15_garbage_direct_without_proxy_keeps_original_wording(self):
+        # RT2 P2-B 场景二（纯无代理）：直连垃圾页、8 个代理变量均未设置 →
+        # 维持原文案（当前无代理变量——疑似透明劫持/网关拦截/captive portal）。
+        index = self.start_index('<html>captive portal login</html>')
+        self.addCleanup(index.shutdown)
+        err = self.write_stderr(
+            f'ERROR: Could not find a version that satisfies the requirement '
+            f'qwen-asr=={V} (from versions: none)\n'
+            f'ERROR: No matching distribution found for qwen-asr=={V}')
+        result = self.run_probe('--analyze', err,
+                                '--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V, '--stage', 'deps')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('▶ 分类：代理类 —— 内容异常', out)
+        self.assertIn('当前无代理变量——疑似透明劫持/网关拦截/captive portal', out)
+        self.assertIn('换网络或加可信代理后重跑', out)
 
     def test_s10_netprobe_documents_pip_conf_isolation(self):
         # 代理来源是 pip.conf/PIP_PROXY 而非环境变量：net-probe 必须说明这些

@@ -367,17 +367,29 @@ EOF
       probe_index_page "$index_url"
       local verdict="" certainty="实证"
       if [[ -n "$PROBE_VIA_CODE" ]]; then
-        # 经代理探测失败分两层归因（红队 2026-10-14 P2：连接层失败不是内容劫持）：
-        # 连接层（HTTP 000/network-error/tls-error/超时）= 代理不可达/连接失败——请求
-        # 根本没拿到内容；内容层（403/5xx 等 HTTP 状态码、200 垃圾页、404/缺版本页）
-        # = 代理在内容级吞掉/改写响应。两层都要求直连可见目标版本才构成实证。
+        # 经代理探测失败分三层归因（红队 2026-10-14 P2/P2-A：连接层失败与
+        # 代理网关 5xx 都不是内容劫持）：连接层（HTTP 000/network-error/
+        # tls-error/超时）= 代理不可达/连接失败——请求根本没拿到内容；5xx
+        # （500/502/503/504…）= 代理网关错误/上游不可达——代理侧故障，拿到了
+        # 代理自身的错误状态码，同样不是内容级吞掉；内容层（403/401 等 4xx、
+        # 200 垃圾页、404/缺版本页）= 代理在内容级吞掉/改写响应（403 是经典
+        # 劫持形态）。各层都要求直连可见目标版本才构成实证。
         case "$PROBE_VIA_KIND" in
           network-error|tls-error)
             case "$PROBE_DIRECT_KIND" in
               page-has-version|page-valid) verdict="proxy-conn" ;;
               *) : ;;
             esac ;;
-          http-error|garbage|not-found|page-missing-version)
+          http-error)
+            case "$PROBE_DIRECT_KIND" in
+              page-has-version|page-valid)
+                case "$PROBE_VIA_CODE" in
+                  5*) verdict="proxy-gateway" ;;
+                  *)  verdict="hijack" ;;
+                esac ;;
+              *) : ;;
+            esac ;;
+          garbage|not-found|page-missing-version)
             case "$PROBE_DIRECT_KIND" in
               page-has-version|page-valid)
                 verdict="hijack" ;;
@@ -426,6 +438,19 @@ EOF
 EOF
           print_compare_commands "$index_url"
           ;;
+        proxy-gateway)
+          cat <<EOF
+  ▶ 分类：代理类 —— 代理网关错误/上游不可达（实证）：直连能拿到含目标版本的索引页，
+    经代理（\$$EFFECTIVE_PROXY_VAR）却得到 HTTP ${PROBE_VIA_CODE:-000} / $PROBE_VIA_KIND——
+    这是代理网关自己返回的 5xx 状态码，属代理侧故障（代理进程或其上游服务异常），
+    不是“内容级”吞掉索引请求，也不是镜像缺包；换镜像无法解决。
+  [6] 最小修复建议：
+      1) 检查代理服务及其上游是否正常（见 [3] 的来源变量与取值；5xx 网关错误通常出在代理侧）；
+      2) 不需要代理时彻底清掉再重跑：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY；
+      3) 确需代理则换可用的：./scripts/setup-qwen-asr.sh --proxy http://<host>:<port>。
+EOF
+          print_compare_commands "$index_url"
+          ;;
         not-found)
           cat <<EOF
   ▶ 分类：包或版本不可用 —— 包不存在（实证）：直连与经代理均 404，索引上没有
@@ -469,12 +494,26 @@ EOF
           print_compare_commands "$index_url"
           ;;
         garbage-no-proxy)
-          cat <<EOF
+          if [[ -n "$EFFECTIVE_PROXY_URL" ]]; then
+            # 红队 2026-10-14 P2-B：存在代理变量时不得断言「当前无代理变量」——
+            # 如实并列直连内容异常与经代理探测结果（可能是透明劫持，也可能是
+            # 代理故障），让用户用直连/经代理两条命令分别对比定位。
+            cat <<EOF
+  ▶ 分类：代理类 —— 内容异常（实证：直连即得 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
+    非索引内容；且配置的代理（协议 $(url_scheme "$EFFECTIVE_PROXY_URL")，来源 \$$EFFECTIVE_PROXY_VAR）
+    经代理探测${PROBE_VIA_CODE:+得 HTTP $PROBE_VIA_CODE / }$PROBE_VIA_KIND）。
+    可能是透明劫持，也可能是代理故障——建议用下方直连/经代理两条命令分别对比确认。
+  [6] 最小修复建议：
+      分别核对代理服务与网络出口（公共 WiFi 认证页？公司网关？）；换网络或换可信代理后重跑。
+EOF
+          else
+            cat <<EOF
   ▶ 分类：代理类 —— 内容异常（实证：直连即得 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
     非索引内容；当前无代理变量——疑似透明劫持/网关拦截/captive portal）。
   [6] 最小修复建议：
       核对网络出口（公共 WiFi 认证页？公司网关？）；换网络或加可信代理后重跑。
 EOF
+          fi
           print_compare_commands "$index_url"
           ;;
         *)
@@ -519,13 +558,22 @@ standalone_probe() {
   resolve_effective_proxy
   local verdict=""
   if [[ -n "$PROBE_VIA_CODE" ]]; then
-    # 与 analyze 模式同口径：连接层失败（000/网络/TLS）≠ 内容劫持，分层归因。
+    # 与 analyze 模式同口径：连接层失败（000/网络/TLS）与代理网关 5xx 都 ≠ 内容劫持，
+    # 分层归因（5xx=代理侧故障；4xx/200 垃圾页=内容级吞掉）。
     case "$PROBE_VIA_KIND" in
       network-error|tls-error)
         case "$PROBE_DIRECT_KIND" in
           page-has-version|page-valid) verdict="proxy-conn" ;;
         esac ;;
-      http-error|garbage)
+      http-error)
+        case "$PROBE_DIRECT_KIND" in
+          page-has-version|page-valid)
+            case "$PROBE_VIA_CODE" in
+              5*) verdict="proxy-gateway" ;;
+              *)  verdict="hijack" ;;
+            esac ;;
+        esac ;;
+      garbage)
         case "$PROBE_DIRECT_KIND" in
           page-has-version|page-valid) verdict="hijack" ;;
         esac ;;
@@ -548,6 +596,7 @@ standalone_probe() {
     not-found) echo "结论（实证）：404——索引上没有 $PROBE_PACKAGE；换官方源核实。" ;;
     hijack)   echo "结论（实证）：代理内容劫持——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND。修代理或 unset 代理变量，换镜像无效。" ;;
     proxy-conn) echo "结论（实证）：代理不可达/连接失败——直连可见目标版本、经代理连接层失败（HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND），未拿到任何内容。确认代理进程/端口或 unset 代理变量，换镜像无效。" ;;
+    proxy-gateway) echo "结论（实证）：代理网关错误/上游不可达——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND（5xx 网关状态码）。这是代理侧故障，不是内容级吞掉；检查代理服务及其上游，换镜像无效。" ;;
     garbage)  echo "结论（实证）：索引响应不是 simple 页（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——劫持/网关拦截或镜像异常。" ;;
     *)        echo "结论（实证）：探测失败（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——网络不可达或 TLS 异常。" ;;
   esac

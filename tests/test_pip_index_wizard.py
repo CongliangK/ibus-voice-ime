@@ -123,6 +123,31 @@ class PipWizardSandboxTest(unittest.TestCase):
         self.assertEqual(self.env_file.read_text(), "VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\nKEEP=1\n")
         self.assertEqual(list(self.env_file.parent.glob("ibus-voice-ime.conf.bak.*")), [])
 
+    def test_result_carries_resolved_url_for_custom_state_only(self):
+        # RT2 P1：向导结果在 custom 态携带解析出的原始 URL（进程环境优先、
+        # 否则 environment.d 持久行）；official/tsinghua 态该字段为空串。
+        self.env["VOICE_IME_PIP_INDEX_URL"] = "https://my.internal.mirror/simple"
+        self.assertEqual(self.wizard("--defaults").returncode, 0)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["pip_index"], "custom")
+        self.assertEqual(result["pip_index_url"], "https://my.internal.mirror/simple")
+        # environment.d-only（进程环境无变量）同样能解析出 URL。
+        self.env.pop("VOICE_IME_PIP_INDEX_URL")
+        self.seed_env_file("VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\n")
+        self.assertEqual(self.wizard("--defaults").returncode, 0)
+        self.assertEqual(json.loads(self.result.read_text())["pip_index_url"],
+                         "https://persisted.example/simple")
+        # 显式改选官方（管道输 2）：URL 字段为空。
+        self.wizard(text="\n\n\n2\n" + "\n" * 4)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["pip_index"], "official")
+        self.assertEqual(result["pip_index_url"], "")
+        # 显式改选清华（管道输 1）：URL 字段同样为空。
+        self.wizard(text="\n\n\n1\n" + "\n" * 4)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["pip_index"], "tsinghua")
+        self.assertEqual(result["pip_index_url"], "")
+
     def test_apply_custom_selection_keeps_official_persisted_line(self):
         # 本次运行 export 了自定义 URL（custom 态），environment.d 仍是官方哨兵行：
         # 回车保持 custom → apply 不动持久行（按次高级用法，登录会话语义不被改写）。
@@ -418,6 +443,67 @@ sys.exit(int(os.environ.get(keys[name], '0')))
         self.assertTrue(all(pip == url for pip in self.pip_events("install.sh")))
         # custom 属按次高级用法：apply 与 install 均不持久化（不写任何行）。
         self.assertFalse((self.home / ".config/environment.d/ibus-voice-ime.conf").exists())
+
+    def test_redteam_environmentd_only_custom_url_reaches_whole_chain(self):
+        # RT2 P1 红队复现：environment.d 持久自定义 URL、进程环境不设该变量，
+        # 跑 ./setup.sh --yes —— 修复前 custom 分支空操作，INIT/INSTALL/
+        # SETUP-QWEN 子进程实测收不到任何值（折回清华默认）；修复后向导结果
+        # 携带解析出的原始 URL，setup 注入当次子进程链（与 official 哨兵注入
+        # 对称），持久化行原样不动（custom 仍不写不清、不备份）。
+        url = "https://persisted.example/simple"
+        envd = self.home / ".config/environment.d/ibus-voice-ime.conf"
+        envd.parent.mkdir(parents=True, exist_ok=True)
+        envd.write_text(f"VOICE_IME_PIP_INDEX_URL={url}\nKEEP=1\n")
+        result = self.run_setup("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[当前/默认：custom]", result.stderr)
+        self.assertIn(f"自定义包源 URL（{url}）", result.stderr)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), [url, url])
+        self.assertTrue(self.pip_events("install.sh"))
+        self.assertTrue(all(pip == url for pip in self.pip_events("install.sh")))
+        self.assertTrue(all(event["pip"] == url for event in self.events()
+                            if event["name"] in ("init.sh", "setup-rime-ice.sh",
+                                                 "fetch-rnnoise-model.sh")))
+        # custom 持久化语义不变：不写不清持久行，也不产生备份。
+        self.assertEqual(envd.read_text(), f"VOICE_IME_PIP_INDEX_URL={url}\nKEEP=1\n")
+        self.assertEqual(list(envd.parent.glob("ibus-voice-ime.conf.bak.*")), [])
+
+    def test_env_custom_url_not_shadowed_by_environmentd_value(self):
+        # 进程环境已有自定义 URL 时不做任何注入/改写（env 优先于 environment.d
+        # 兜底）：本次 export 的值原样透传，绝不被解析出的持久行 URL 覆盖。
+        session_url = "https://session-export.example/simple"
+        envd = self.home / ".config/environment.d/ibus-voice-ime.conf"
+        envd.parent.mkdir(parents=True, exist_ok=True)
+        envd.write_text("VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\n")
+        result = self.run_setup("--yes", VOICE_IME_PIP_INDEX_URL=session_url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), [session_url, session_url])
+        self.assertTrue(all(pip == session_url for pip in self.pip_events("install.sh")))
+        self.assertEqual(envd.read_text(),
+                         "VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\n")
+
+    def test_dry_run_plan_shows_custom_url_from_environmentd_and_env(self):
+        # --dry-run 计划行展示当次安装将生效的包源覆盖：custom 无论来自
+        # environment.d 兜底注入还是进程环境都展示 URL（官方哨兵格式不变，
+        # 默认清华不展示）。
+        url = "https://persisted.example/simple"
+        envd = self.home / ".config/environment.d/ibus-voice-ime.conf"
+        envd.parent.mkdir(parents=True, exist_ok=True)
+        envd.write_text(f"VOICE_IME_PIP_INDEX_URL={url}\n")
+        result = self.run_setup("--dry-run", "--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"pip 包源 自定义（{url}）", result.stdout)
+        self.assertEqual(self.events(), [])
+        envd.unlink()
+        result = self.run_setup("--dry-run", "--yes", VOICE_IME_PIP_INDEX_URL=url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"pip 包源 自定义（{url}）", result.stdout)
+        # 超长 URL 截断（前 61 字符 + 省略号）但仍可辨识，完整值不进计划行。
+        long_url = "https://" + "mirror" * 16 + ".example.com/simple"
+        result = self.run_setup("--dry-run", "--yes", VOICE_IME_PIP_INDEX_URL=long_url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f"pip 包源 自定义（{long_url[:61]}…）", result.stdout)
+        self.assertNotIn(long_url, result.stdout)
 
     def test_defaults_with_environmentd_official_full_run_stays_official(self):
         # --defaults + 仅 environment.d 持久官方哨兵行（进程环境无变量）：

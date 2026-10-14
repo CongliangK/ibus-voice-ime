@@ -32,8 +32,9 @@ INIT_LOG=""
 WIZARD_RESULT="" WIZARD_OWNED_RESULT="" HOTKEYS_CHANGED="未改动（跳过向导）" VOICE_CHANGED=0
 LLM_SUMMARY="未改动（跳过向导）"
 # pip 包源向导值：official/tsinghua/custom（回车保持用户显式设置的自定义 URL）/
-# absent（题目未出现，如云端/仅键盘方案）。
-PIP_INDEX="absent"
+# absent（题目未出现，如云端/仅键盘方案）。custom 态另带向导解析出的原始 URL
+# （仅 environment.d 持久行有值、进程环境没有时用于注入当次子进程链）。
+PIP_INDEX="absent" PIP_INDEX_URL=""
 VOICE_PLAN=local-qwen
 QWEN_SIZES="${VOICE_IME_QWEN_ASR_SIZES-0.6B 1.7B}"
 QWEN_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
@@ -216,6 +217,12 @@ def preview():
     # 设置的自定义 URL，回车/无人值守保持）。
     if 'pip_index' in r and r['pip_index'] not in ('tsinghua', 'official', 'custom'):
         raise ValueError('pip_index 字段非法：pip 包源不合法')
+    # custom 态可携带解析出的原始 URL（official/tsinghua 为空串或键缺省）；
+    # 环境变量值不能含换行——下方按行解析 VALUES，注入目标也是环境变量。
+    if 'pip_index_url' in r:
+        url = r['pip_index_url']
+        if url is None or type(url) is not str or any(ch in url for ch in '\n\r'):
+            raise ValueError('pip_index_url 字段非法：必须为不含换行的字符串')
     assets = field(r, 'assets', dict)
     for name in ('rime_ice', 'zhwiki', 'moegirl', 'denoise'):
         field(assets, name, bool, 'assets.')
@@ -274,6 +281,7 @@ def preview():
     print('1' if changed else '0')
     print(llm_summary)
     print(r['pip_index'] if 'pip_index' in r else 'absent')
+    print(r.get('pip_index_url') or '')
     for name, flag in (('rime_ice', '--no-rime-ice'), ('zhwiki', '--no-zhwiki'),
                        ('moegirl', '--no-moegirl'), ('denoise', '--no-denoise')):
         if not assets[name]: print(flag)
@@ -295,19 +303,27 @@ PY
   # VOICE_IME_PIP_INDEX_URL=default 给 init.sh/语音验收/体检整条子进程链
   # （setup-qwen-asr.sh 尊重显式设置、绝不自动切回镜像）；tsinghua=显式选默认，
   # 清掉继承的旧覆盖（environment.d 持久行由 apply-wizard-config.py 清理）；
-  # custom=回车/无人值守保持用户显式设置的自定义 URL——完全不动该变量，
-  # 原样透传给 init.sh/setup-qwen-asr.sh（自定义包源属按次高级用法，向导与
-  # apply 均不代管：不注入、不 unset、不动持久化行）；
+  # custom=回车/无人值守保持用户显式设置的自定义 URL——进程环境已有该变量时
+  # 完全不动、原样透传给 init.sh/setup-qwen-asr.sh；变量只存在于 environment.d
+  # （当前值取自持久行兜底、进程环境没有）时按向导解析出的原始 URL 注入当次
+  # 子进程链（与 official 哨兵注入对称，向导「回车保持该值原样用于本次安装」的
+  # 承诺因此成立）。持久化语义不变：custom 仍属按次高级用法，不写不清持久化行；
   # absent=题目未出现（云端/仅键盘），沿用现状不动环境（含用户自行 export 的值）。
   PIP_INDEX="${VALUES[6]}"
+  PIP_INDEX_URL="${VALUES[7]:-}"
   case "$PIP_INDEX" in
     official) export VOICE_IME_PIP_INDEX_URL=default ;;
     tsinghua) unset VOICE_IME_PIP_INDEX_URL ;;
-    custom) ;;
+    custom)
+      # environment.d-only 的自定义 URL：注入本次子进程链；用户本次 export 的
+      # 值优先，绝不被解析出的持久行 URL 影子覆盖。
+      if [[ -z "${VOICE_IME_PIP_INDEX_URL:-}" && -n "$PIP_INDEX_URL" ]]; then
+        export VOICE_IME_PIP_INDEX_URL="$PIP_INDEX_URL"
+      fi ;;
     absent) ;;
     *) echo "错误：向导结果的 pip 包源不合法：$PIP_INDEX" >&2; exit 2 ;;
   esac
-  for ((i=7; i<${#VALUES[@]}; i++)); do INIT_ARGS+=("${VALUES[i]}"); done
+  for ((i=8; i<${#VALUES[@]}; i++)); do INIT_ARGS+=("${VALUES[i]}"); done
   case "$VOICE_PLAN" in
     local-qwen) export VOICE_IME_QWEN_ASR_SIZES="$QWEN_SIZES" VOICE_IME_QWEN_ASR_MODEL="$QWEN_MODEL" ;;
     keyboard-only) INIT_ARGS+=(--no-voice); CLOUD="" ;;
@@ -359,11 +375,16 @@ else
 fi
 echo "== 执行计划 =="
 if [[ "$VERIFY_ONLY" -eq 0 ]]; then
-  # 包源仅在存在覆盖时展示（官方 PyPI 或用户自行 export 的值）；默认清华与现状一致不赘述。
+  # 包源仅在存在覆盖时展示（官方 PyPI 哨兵或本次将生效的自定义 URL——无论
+  # 来自进程环境还是 environment.d 兜底注入）；默认清华与现状一致不赘述。
+  # URL 过长时截断（保留前缀可辨识），完整值在向导题面/environment.d 可查。
   case "${VOICE_IME_PIP_INDEX_URL:-}" in
     "") PIP_INDEX_NOTE="" ;;
     default) PIP_INDEX_NOTE="；pip 包源 官方 PyPI（VOICE_IME_PIP_INDEX_URL=default）" ;;
-    *) PIP_INDEX_NOTE="；pip 包源 ${VOICE_IME_PIP_INDEX_URL}" ;;
+    *)
+      PIP_INDEX_SHOWN="${VOICE_IME_PIP_INDEX_URL}"
+      if (( ${#PIP_INDEX_SHOWN} > 64 )); then PIP_INDEX_SHOWN="${PIP_INDEX_SHOWN:0:61}…"; fi
+      PIP_INDEX_NOTE="；pip 包源 自定义（${PIP_INDEX_SHOWN}）" ;;
   esac
   echo "实际选择：语音方案 $VOICE_PLAN；Qwen 下载分档 $QWEN_SIZES；默认模型 $QWEN_MODEL；热键 $HOTKEYS_CHANGED；云端 LLM 后处理 $LLM_SUMMARY$PIP_INDEX_NOTE。"
 fi

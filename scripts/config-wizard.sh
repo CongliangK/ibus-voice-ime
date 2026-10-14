@@ -256,10 +256,10 @@ if [[ -z "${VOICE_IME_WIZARD_RESULT:-}" ]]; then
 fi
 RESULT_OUTPUT="$("$PYTHON" - "$ROOT_DIR" "${VOICE_IME_WIZARD_RESULT:-$GENERATED_RESULT}" "$VOICE_PLAN" "$QWEN_DOWNLOAD" "$QWEN_MODEL" \
   "$VOICE_HOTKEY" "$RAW_HOTKEY" "$PASTE_HOTKEY" "$POSTPROCESS" \
-  "$RIME" "$ZHWIKI" "$MOEGIRL" "$DENOISE" "$RECONFIGURE" "$PIP_INDEX" <<'PY'
+  "$RIME" "$ZHWIKI" "$MOEGIRL" "$DENOISE" "$RECONFIGURE" "$PIP_INDEX" "$PIP_INDEX_URL" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
-root, path, plan, download, model, voice, raw, paste, postprocess, rime, zhwiki, moegirl, denoise, reconfigure, pip_index = sys.argv[1:]
+root, path, plan, download, model, voice, raw, paste, postprocess, rime, zhwiki, moegirl, denoise, reconfigure, pip_index, pip_index_url = sys.argv[1:]
 sys.path.insert(0, str(Path(root) / 'src'))
 from ibus_voice_ime import config
 result = {
@@ -273,8 +273,12 @@ result = {
 }
 # pip 包源只在实际下载 Python 依赖（本地 Qwen 方案）时提问；未提问不写该键，
 # 应用器据此「不动既有持久化」，避免云端/仅键盘安装误清用户的包源选择。
+# custom 态额外携带解析出的原始 URL（进程环境优先、否则 environment.d 持久行）：
+# URL 可能只存在于 environment.d 而进程环境没有，setup.sh 据此注入当次子进程链
+# （与 official 哨兵注入对称）；official/tsinghua 态该字段为空。
 if plan == 'local-qwen':
     result['pip_index'] = pip_index
+    result['pip_index_url'] = pip_index_url if pip_index == 'custom' else ''
 if path:
     target = Path(path).expanduser().absolute()
     config_path = config.user_config_path()
