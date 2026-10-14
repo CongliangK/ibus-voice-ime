@@ -332,7 +332,9 @@ ensure_pip_socks_support() {
   echo "  受控自举：用 curl（原生 SOCKS）从当前索引 $simple_url 解析 PySocks 纯 Python wheel，"
   echo "  以 --no-index 装入项目 venv（不动系统/全局）……"
   local tmpdir page wheel_url wheel_file
-  tmpdir="$(mktemp "${TMPDIR:-/tmp}/qwen-asr-pysocks.XXXXXX")" || { socks_fix_advice; return 0; }
+  # -d 必不可少：simple.html/wheel 都写入该路径之下，缺 -d 时 mktemp 建的是
+  # 普通文件，curl -o "$tmpdir/…" 恒以 curl(23) 失败，自举永远走不通（P1，回归测试 test_s8）。
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/qwen-asr-pysocks.XXXXXX")" || { socks_fix_advice; return 0; }
   page="$tmpdir/simple.html"
   if ! curl -fsSL --max-time 60 -x "$EFFECTIVE_PROXY_URL" -o "$page" "$simple_url"; then
     echo "  ✗ 拉取 PySocks simple 页失败（$simple_url，经 socks 代理）。" >&2

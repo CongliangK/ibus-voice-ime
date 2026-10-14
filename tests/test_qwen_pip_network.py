@@ -469,13 +469,10 @@ if a == ['-V']: print('Python 3.{minor}.0')
             self.assertNotIn(banned, combined)
 
     # ================================================================ scenario 8
-    # 产品 BUG（P1，阻断自举）：scripts/setup-qwen-asr.sh 的 ensure_pip_socks_support
-    # 里 `mktemp "${TMPDIR:-/tmp}/qwen-asr-pysocks.XXXXXX"` 缺 `-d`——mktemp 建的是
-    # 普通*文件*，随后 curl -o "$tmpdir/simple.html" 向“文件/子路径”写 → 恒以
-    # curl(23) 失败，PySocks 受控自举在任何环境（含代理完全正常）下都走不通。
-    # 本测试断言修复后的完整契约（已对仅补 `mktemp -d` 的副本全量验证通过）；
-    # 产品修复前以 expectedFailure 记录，修复后翻成 XPASS 提醒摘除本标记。
-    @unittest.expectedFailure
+    # 历史 BUG（P1，已修复）：ensure_pip_socks_support 的 mktemp 曾缺 `-d`
+    # （建普通文件非目录，curl -o 恒 curl(23) 失败，自举在任何环境走不通）。
+    # 本测试断言修复后的完整自举契约：SOCKS5 代理 + venv 缺 PySocks → 诊断 +
+    # curl 经 socks 从当前索引取 PySocks wheel，--no-index 装进 venv，随后正常安装。
     def test_s8_socks5_missing_pysocks_bootstrap_completes_via_loopback_socks(self):
         # SOCKS5 代理 + venv 缺 PySocks：诊断 + 受控自举端到端成功——curl 走
         # （回环 socks5 relay 扮演的）socks 代理从当前索引取 PySocks wheel，
