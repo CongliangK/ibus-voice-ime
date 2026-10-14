@@ -119,9 +119,15 @@ VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 
 下载源互不替代：
 
-- **pip 依赖包**：默认清华；`VOICE_IME_PIP_INDEX_URL=default` 明确使用 `https://pypi.org/simple`，忽略用户 pip.conf 和额外索引；可按次传入自己的包源 URL。
+- **pip 依赖包**：默认清华；`VOICE_IME_PIP_INDEX_URL=default` 明确使用 `https://pypi.org/simple`，可按次传入自己的包源 URL。pip 子进程一律 `--isolated` + `PIP_CONFIG_FILE=/dev/null`：不读用户 pip.conf，也不读 `PIP_INDEX_URL`/`PIP_PROXY` 等 `PIP_*` 环境变量（索引实际生效靠传给 pip 的 `--index-url` 参数）。
 - **CPython**：uv 的官方 GitHub python-build-standalone 发布；可设置 `UV_PYTHON_INSTALL_MIRROR` 为兼容的 HTTPS 镜像根地址。清华 pip 源不提供解释器。
 - **uv 自举**：PyPI 固定版本元数据与 wheel，通过发布 SHA256、解压大小及 `uv --version` 校验；元数据源可用 `VOICE_IME_UV_METADATA_URL` 指定可信兼容 HTTPS JSON 源。SHA256 是来源一致性校验，不是独立签名认证。
+
+**pip 依赖包的可见性探测与受控回退**（2026-10-14 根因修复）：安装前用 venv pip（`--isolated index versions`，不支持时降级 urllib 拉 simple 页原始响应）对 requirements 中 qwen-asr 的钉定版本做元数据级可见性探测，探测环境与安装子进程完全相同，结论分类（版本可见 / 页面有效缺版本 / 404 包不存在 / HTTP 错误 / 垃圾页 / TLS / SOCKS / 连接失败超时）附确定性标注（实证/推断），只诊断不阻断。安装失败时按「stderr 签名 + 主动探测」决定是否**受控回退官方源重试一次**，三条件缺一不可：①本次索引是程序默认（`VOICE_IME_PIP_INDEX_URL` 未设置——用户显式指定包源时绝不静默切换，只打印建议命令）；②失败签名是「版本不可用」（stderr 列出旧版本 = 真镜像滞后专属签名，或 `versions: none` 且探测确认缺版本/404）；③官方 `https://pypi.org/simple` 探测确认目标版本可见。探测为劫持/网络/SOCKS/TLS 类时不回退——那是代理问题，换源无效。`VOICE_IME_PIP_INDEX_FALLBACK=0|off` 可禁用（默认 auto）；不放松版本约束、不忽略 pip 非零退出码。模型权重下载源（modelscope）不受此影响。
+
+**代理归一与 SOCKS 自举**：安装器枚举并打印 pip 实际继承的 8 个代理变量（http/https/all/no × 大小写），并按 pip 的 select_proxy 语义（scheme 专属变量优先，缺省回退 `all_proxy`；凭据脱敏为 `***@`）报告有效代理的协议与来源变量。`--proxy URL` 会校验 scheme（http/https/socks5/socks5h）并把全部 6 个代理变量归一为该值；不传 `--proxy` 时只检测报告、不修改用户环境变量。检测到有效代理为 socks* 且 venv 缺 PySocks 时（pip 会在建立连接前抛 `Missing dependencies for SOCKS support`，与代理进程死活无关，「关掉代理程序」无效）：用 curl（原生 SOCKS）从当前 pip 索引解析下载 PySocks 纯 Python wheel，`pip install --no-index` 装进项目 venv（不动系统/全局），全程打印动作；失败给最小修复建议（改 `--proxy http://…` 或 unset socks 变量后重跑），不死循环不静默。`VOICE_IME_PIP_SOCKS_BOOTSTRAP=0` 可关闭自举（默认开启）。网络预检与 pip 同栈（不再用裸 curl 下结论），代理 TCP 探测覆盖 `all_proxy` 来源，结果只作警告——pip 退出码才是权威。
+
+**net-probe.sh 诊断**（`scripts/net-probe.sh`，可独立运行）：把捕获的 pip 失败 stderr 按判别表分类为 `SOCKS 支持缺失` / `代理类`（不可达/协议不匹配/内容劫持）/ `网络连接类` / `TLS 证书类` / `包或版本不可用` / `兼容性类` / `依赖解析类` / `环境损坏类` / `中断类` / `其他`，输出六要素（失败阶段 / 实际索引 / 代理协议与来源（脱敏）/ pip 关键错误 / 结论+确定性 / 最小修复建议+复现命令）。用法：`scripts/net-probe.sh --analyze <stderr文件> [--index-url URL] [--package PKG] [--version VER] [--stage selfcheck|deps]`——setup-qwen-asr.sh 会自动捕获 pip 自升级与依赖安装的 stderr 并分别以 stage=selfcheck/deps 调用；独立模式 `scripts/net-probe.sh [--package PKG] [--version VER]`，缺省从 requirements-qwen-asr.txt 解析 qwen-asr 钉定版本（不硬编码版本号）。关键语义：`from versions: none` 在「包不存在(404)」与「代理内容级劫持（403/200 垃圾页/空 200）」下逐字同形——analyze 模式带 `--index-url` 时主动探测「直连 vs 经代理」两条对比区分并标注确定性，绝不直接断言「版本缺失/索引可达」，验证命令必给直连与经代理两条（被劫持 shell 里单条 curl 会同样失败）；`all_proxy/ALL_PROXY` 有值时如实报告为有效代理，不输出「未检测到代理变量=pip 直连」的假阴性（curl 原生支持 SOCKS 而 pip 需 PySocks，curl 探测通过 ≠ pip 可用）。
 
 自动缓存均在仓库（`.python`、`.tools`、`.cache/uv`），拒绝这些目录的符号链接。损坏的缓存 uv 会明确失败：检查并移走项目内损坏的二进制再重试，不会静默执行坏缓存或回退系统 Python。uv 自举总下载时限 180s、CPython 安装 600s；失败不会提前替换旧 venv。
 
@@ -130,7 +136,8 @@ VOICE_IME_QWEN_ASR_VERIFY_TIMEOUT=300 ./scripts/setup-qwen-asr.sh --verify-only
 安装阶段依次检查：目标解释器和 `Python.h` 的实际编译 → pip 依赖一致性 → CUDA 张量运算和 Triton 驱动辅助模块编译/加载 → 模型配置及全部权重分片 → 短音频推理。短音频为静音，只验证执行链路，不验证识别准确率。GPU 显存不足时可使用现有 0.6B 自动降档，输出显示实际验收模型。
 
 - 应用依赖基线在 [requirements-qwen-asr.txt](requirements-qwen-asr.txt)；不是跨平台 CUDA 锁文件。torch/Triton 仍需匹配驱动，由运行验收兜底。已有解释器和基线匹配时不盲目升级包；实际版本记录在 venv 的 `installed-requirements.txt` 中。
-- 重建失败时恢复原 venv，失败环境和旧环境备份保留供排查，不删除模型或用户配置。使用文件锁阻止并发安装；拒绝修改指向其他项目的 venv 符号链接。安装中的 venv 重命名会写入 journal（`.qwen-asr-setup.state`）：SIGKILL/断电中断后，下次安装自动恢复原环境并把半成品移入 `.failed-crash-*` 留档。
+- venv 恢复分三档（2026-10-14 起）：完全满足基线 → 直接复用；解释器匹配、结构完好（python/pip 可运行）且差距仅为缺包 → **增量补装**（原 venv 内 `pip install -r`，不再整体重建，失败保留现状退出、网络恢复后重跑同一命令续装）；解释器不匹配/结构损坏/版本冲突 → 原「备份→重建→失败恢复」原子路径。留档轮转：`.venv-qwen-asr.failed-*`、`.failed-crash-*`、`.bak-*` 各只保留最新 1 份（清理旧档时打印路径，防止 GB 级半成品/备份无限累积）。
+- 重建失败时恢复原 venv，失败环境和旧环境备份保留供排查（各保留最新 1 份，见上条轮转），不删除模型或用户配置。使用文件锁阻止并发安装；拒绝修改指向其他项目的 venv 符号链接。安装中的 venv 重命名会写入 journal（`.qwen-asr-setup.state`）：SIGKILL/断电中断后，下次安装自动恢复原环境并把半成品移入 `.failed-crash-*` 留档。
 - `--force` 只允许无 GPU 时准备调试环境：不做 GPU 推理验收、不启用后端、不宣称语音就绪。
 - doctor 检查实际 sidecar 解释器、编译条件、CUDA 运算、Triton 和模型分片；不会默认加载整个模型。完整推理验收使用 `--verify-only`。[doctor](scripts/doctor.sh) 的 `fix` 对缺头文件/旧 venv 调用同一个新 setup（每次修复只调用一次），保留当前渠道及显式覆盖，修复成功可能重启 IBus，也可能修复其他资产；仅修复 Qwen 且不动桌面请用上面的 `VOICE_IME_ENABLE_QWEN_ASR=0` 命令。
 - **验收 receipt 降噪**：smoke 验收或 `--verify-only` 成功后，安装器把当时的解释器、`requirements-qwen-asr.txt` 的 sha256 和模型文件清单（名称/大小/mtime）写入 `.venv-qwen-asr/verify-receipt.json`（附加产物，写失败不影响验收结果）。doctor 在 GPU 正常路径上做快速 stat 对比：三项均与当前实际一致时，原「模型目录存在但不能证明推理可用」WARN 降为一条 `[INFO]`（不计 WARN，附最近验收时间与强制复验命令）；receipt 缺失、依赖文件变化、解释器或模型文件有变动时恢复原 WARN。
