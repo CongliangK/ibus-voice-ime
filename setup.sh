@@ -31,6 +31,8 @@ PROXY_ARGS=() INIT_ARGS=() WIZARD_ARGS=()
 INIT_LOG=""
 WIZARD_RESULT="" WIZARD_OWNED_RESULT="" HOTKEYS_CHANGED="未改动（跳过向导）" VOICE_CHANGED=0
 LLM_SUMMARY="未改动（跳过向导）"
+# pip 包源向导值：official/tsinghua/absent（题目未出现，如云端/仅键盘方案）。
+PIP_INDEX="absent"
 VOICE_PLAN=local-qwen
 QWEN_SIZES="${VOICE_IME_QWEN_ASR_SIZES-0.6B 1.7B}"
 QWEN_MODEL="${VOICE_IME_QWEN_ASR_MODEL:-1.7b}"
@@ -208,6 +210,9 @@ def preview():
             raise ValueError(f'hotkeys.{name} 字段非法：热键不合法')
     if 'postprocess' not in r or (r['postprocess'] is not None and type(r['postprocess']) is not bool):
         raise ValueError('postprocess 字段非法：必须为布尔值或 null')
+    # pip 包源：仅本地 Qwen 方案出现该题（键可缺省=云端/仅键盘方案未提问）。
+    if 'pip_index' in r and r['pip_index'] not in ('tsinghua', 'official'):
+        raise ValueError('pip_index 字段非法：pip 包源不合法')
     assets = field(r, 'assets', dict)
     for name in ('rime_ice', 'zhwiki', 'moegirl', 'denoise'):
         field(assets, name, bool, 'assets.')
@@ -265,6 +270,7 @@ def preview():
     print('有改动' if hotkeys_changed else '未改动')
     print('1' if changed else '0')
     print(llm_summary)
+    print(r['pip_index'] if 'pip_index' in r else 'absent')
     for name, flag in (('rime_ice', '--no-rime-ice'), ('zhwiki', '--no-zhwiki'),
                        ('moegirl', '--no-moegirl'), ('denoise', '--no-denoise')):
         if not assets[name]: print(flag)
@@ -277,12 +283,24 @@ except (OSError, ValueError, KeyError, TypeError) as exc:
 PY
 )"
   mapfile -t VALUES <<< "$SELECTION"
-  [[ ${#VALUES[@]} -ge 6 ]] || { echo "错误：无法解析向导选择。" >&2; exit 1; }
+  [[ ${#VALUES[@]} -ge 7 ]] || { echo "错误：无法解析向导选择。" >&2; exit 1; }
   VOICE_PLAN="${VALUES[0]}" QWEN_SIZES="${VALUES[1]}" QWEN_MODEL="${VALUES[2]}"
   HOTKEYS_CHANGED="${VALUES[3]}" VOICE_CHANGED="${VALUES[4]}"
   # 云端 LLM 只读 llm.json；遗留 switch env 被 run-engine.sh 钉死为 0，不再导出误导值。
   LLM_SUMMARY="${VALUES[5]}"
-  for ((i=6; i<${#VALUES[@]}; i++)); do INIT_ARGS+=("${VALUES[i]}"); done
+  # pip 包源（仅本地 Qwen 方案出现该题）：official=显式选官方 PyPI，export
+  # VOICE_IME_PIP_INDEX_URL=default 给 init.sh/语音验收/体检整条子进程链
+  # （setup-qwen-asr.sh 尊重显式设置、绝不自动切回镜像）；tsinghua=显式选默认，
+  # 清掉继承的旧覆盖（environment.d 持久行由 apply-wizard-config.py 清理）；
+  # absent=题目未出现（云端/仅键盘），沿用现状不动环境（含用户自行 export 的值）。
+  PIP_INDEX="${VALUES[6]}"
+  case "$PIP_INDEX" in
+    official) export VOICE_IME_PIP_INDEX_URL=default ;;
+    tsinghua) unset VOICE_IME_PIP_INDEX_URL ;;
+    absent) ;;
+    *) echo "错误：向导结果的 pip 包源不合法：$PIP_INDEX" >&2; exit 2 ;;
+  esac
+  for ((i=7; i<${#VALUES[@]}; i++)); do INIT_ARGS+=("${VALUES[i]}"); done
   case "$VOICE_PLAN" in
     local-qwen) export VOICE_IME_QWEN_ASR_SIZES="$QWEN_SIZES" VOICE_IME_QWEN_ASR_MODEL="$QWEN_MODEL" ;;
     keyboard-only) INIT_ARGS+=(--no-voice); CLOUD="" ;;
@@ -334,7 +352,13 @@ else
 fi
 echo "== 执行计划 =="
 if [[ "$VERIFY_ONLY" -eq 0 ]]; then
-  echo "实际选择：语音方案 $VOICE_PLAN；Qwen 下载分档 $QWEN_SIZES；默认模型 $QWEN_MODEL；热键 $HOTKEYS_CHANGED；云端 LLM 后处理 $LLM_SUMMARY。"
+  # 包源仅在存在覆盖时展示（官方 PyPI 或用户自行 export 的值）；默认清华与现状一致不赘述。
+  case "${VOICE_IME_PIP_INDEX_URL:-}" in
+    "") PIP_INDEX_NOTE="" ;;
+    default) PIP_INDEX_NOTE="；pip 包源 官方 PyPI（VOICE_IME_PIP_INDEX_URL=default）" ;;
+    *) PIP_INDEX_NOTE="；pip 包源 ${VOICE_IME_PIP_INDEX_URL}" ;;
+  esac
+  echo "实际选择：语音方案 $VOICE_PLAN；Qwen 下载分档 $QWEN_SIZES；默认模型 $QWEN_MODEL；热键 $HOTKEYS_CHANGED；云端 LLM 后处理 $LLM_SUMMARY$PIP_INDEX_NOTE。"
 fi
 i=1; for p in "${PLAN[@]}"; do printf '  %d) %s\n' "$i" "$p"; i=$((i+1)); done
 if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -393,7 +417,9 @@ if [[ "$RECONFIGURE" -eq 1 ]]; then
     step "轻量重注册输入法与热键（install.sh，不下载）"
     "$ROOT_DIR/install.sh"
   fi
-  echo "重配置已生效：语音方案 $VOICE_PLAN；默认 Qwen 模型 $QWEN_MODEL；热键 $HOTKEYS_CHANGED；云端 LLM 后处理 $LLM_SUMMARY。未初始化或下载任何资产。"
+  RECONFIGURE_PIP_NOTE=""
+  [[ "$PIP_INDEX" != official ]] || RECONFIGURE_PIP_NOTE="；pip 包源 官方 PyPI（已持久化）"
+  echo "重配置已生效：语音方案 $VOICE_PLAN；默认 Qwen 模型 $QWEN_MODEL；热键 $HOTKEYS_CHANGED；云端 LLM 后处理 $LLM_SUMMARY$RECONFIGURE_PIP_NOTE。未初始化或下载任何资产。"
   echo "提示：重配置不会准备新后端资产或保存 API Key；切换到尚未准备的后端后，请按向导指引补齐运行条件。"
   print_start_card
   exit 0

@@ -52,15 +52,19 @@ import json, sys
 v = json.loads(sys.argv[1])
 for value in (v['voice_plan'], v['qwen_model'], v['hotkeys']['voice'],
               v['hotkeys']['raw'], v['hotkeys']['paste'],
-              'null' if v['postprocess'] is None else ('y' if v['postprocess'] else 'n')):
+              'null' if v['postprocess'] is None else ('y' if v['postprocess'] else 'n'),
+              v.get('pip_index', 'tsinghua')):
     print(value)
 PY
 )
-[[ ${#VALUES[@]} -eq 6 ]] || { echo '错误：无法读取向导默认配置' >&2; exit 1; }
+[[ ${#VALUES[@]} -eq 7 ]] || { echo '错误：无法读取向导默认配置' >&2; exit 1; }
 VOICE_PLAN="${VALUES[0]}" QWEN_MODEL="${VALUES[1]}"
 QWEN_DOWNLOAD="$QWEN_MODEL"
 VOICE_HOTKEY="${VALUES[2]}" RAW_HOTKEY="${VALUES[3]}" PASTE_HOTKEY="${VALUES[4]}"
 POSTPROCESS="${VALUES[5]}"
+# pip 包源当前值：official=官方 PyPI（对应哨兵 VOICE_IME_PIP_INDEX_URL=default），
+# tsinghua=清华镜像（默认，不设置任何环境覆盖）。
+PIP_INDEX="${VALUES[6]}"
 RIME=y ZHWIKI=y MOEGIRL=y DENOISE=y
 ANSWER=""
 # setup 与向导均捕获 stdout。菜单绘制用 stderr 对应的终端，索引仍写回
@@ -92,6 +96,8 @@ ask_choice() {
       both) label='双档（1.7B + 0.6B）' ;;
       y) label='启用（y）' ;;
       n) label='关闭（n）' ;;
+      tsinghua) label='清华镜像（默认）' ;;
+      official) label='官方 PyPI（pypi.org）' ;;
       *) label="$selected" ;;
     esac
     labels+=("$label")
@@ -172,6 +178,16 @@ if [[ "$VOICE_PLAN" == local-qwen ]]; then
     echo '默认模型必须在本次下载集合中，请重新选择。' >&2
     [[ "$DEFAULTS" -ne 1 ]] || exit 1
   done
+  # pip 包源（Python 依赖下载）：有用户的代理会内容级劫持镜像请求导致安装失败，
+  # 因此提供显式绕开镜像的官方 PyPI 选项；默认仍是清华镜像（与现状一致）。
+  if [[ -n "${VOICE_IME_PIP_INDEX_URL:-}" && "${VOICE_IME_PIP_INDEX_URL:-}" != default ]]; then
+    printf '注：环境已显式设置自定义包源 URL（%s）；本向导只提供镜像/官方两项，选择任一项都会作为本次安装的包源。\n' "$VOICE_IME_PIP_INDEX_URL" >&2
+  fi
+  ask_choice 'pip 包源（Python 依赖下载）' "$PIP_INDEX" tsinghua official
+  PIP_INDEX="$ANSWER"
+  if [[ "$PIP_INDEX" == official ]]; then
+    printf '已选官方 PyPI：绕开镜像直用 pypi.org，通常需要代理——建议配合 --proxy http://127.0.0.1:7890 运行安装，或先 export http_proxy/https_proxy 代理变量。\n' >&2
+  fi
 fi
 ask_hotkey '语音热键（例如 Ctrl+Alt+V）' "$VOICE_HOTKEY"; VOICE_HOTKEY="$ANSWER"
 ask_hotkey '原文热键（例如 Ctrl+Alt+B）' "$RAW_HOTKEY"; RAW_HOTKEY="$ANSWER"
@@ -232,10 +248,10 @@ if [[ -z "${VOICE_IME_WIZARD_RESULT:-}" ]]; then
 fi
 RESULT_OUTPUT="$("$PYTHON" - "$ROOT_DIR" "${VOICE_IME_WIZARD_RESULT:-$GENERATED_RESULT}" "$VOICE_PLAN" "$QWEN_DOWNLOAD" "$QWEN_MODEL" \
   "$VOICE_HOTKEY" "$RAW_HOTKEY" "$PASTE_HOTKEY" "$POSTPROCESS" \
-  "$RIME" "$ZHWIKI" "$MOEGIRL" "$DENOISE" "$RECONFIGURE" <<'PY'
+  "$RIME" "$ZHWIKI" "$MOEGIRL" "$DENOISE" "$RECONFIGURE" "$PIP_INDEX" <<'PY'
 import json, os, sys, tempfile
 from pathlib import Path
-root, path, plan, download, model, voice, raw, paste, postprocess, rime, zhwiki, moegirl, denoise, reconfigure = sys.argv[1:]
+root, path, plan, download, model, voice, raw, paste, postprocess, rime, zhwiki, moegirl, denoise, reconfigure, pip_index = sys.argv[1:]
 sys.path.insert(0, str(Path(root) / 'src'))
 from ibus_voice_ime import config
 result = {
@@ -247,6 +263,10 @@ result = {
     'assets': {'rime_ice': rime == 'y', 'zhwiki': zhwiki == 'y', 'moegirl': moegirl == 'y', 'denoise': denoise == 'y'},
     'reconfigure': reconfigure == '1',
 }
+# pip 包源只在实际下载 Python 依赖（本地 Qwen 方案）时提问；未提问不写该键，
+# 应用器据此「不动既有持久化」，避免云端/仅键盘安装误清用户的包源选择。
+if plan == 'local-qwen':
+    result['pip_index'] = pip_index
 if path:
     target = Path(path).expanduser().absolute()
     config_path = config.user_config_path()

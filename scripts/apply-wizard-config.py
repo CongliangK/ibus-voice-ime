@@ -126,6 +126,78 @@ def clear_env_hotkeys() -> int:
         raise
 
 
+ENV_PIP_INDEX_KEY = "VOICE_IME_PIP_INDEX_URL"
+ENV_PIP_INDEX_LINE = f"{ENV_PIP_INDEX_KEY}=default"
+ENV_PIP_INDEX_RE = re.compile(r"^VOICE_IME_PIP_INDEX_URL=")
+
+
+def environmentd_path() -> Path:
+    return Path.home() / ".config/environment.d/ibus-voice-ime.conf"
+
+
+def read_environmentd_pip_index() -> str:
+    """读 environment.d 的持久包源值（systemd 语义：同名行后者覆盖前者）。"""
+    try:
+        lines = environmentd_path().read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if ENV_PIP_INDEX_RE.match(line):
+            return line.split("=", 1)[1]
+    return ""
+
+
+def current_pip_index() -> str:
+    """当前 pip 包源：进程环境优先（本次运行覆盖/登录会话已注入），否则读持久行。
+
+    仅识别官方源哨兵 ``default``；未设置或自定义 URL 均按清华镜像默认展示
+    （向导只提供镜像/官方两项，自定义 URL 属按次高级用法）。
+    """
+    value = os.environ.get(ENV_PIP_INDEX_KEY, "") or read_environmentd_pip_index()
+    return "official" if value == "default" else "tsinghua"
+
+
+def persist_pip_index(selection: str | None) -> dict:
+    """向导 pip 包源选择的持久化（environment.d 通道；config.json 无消费者不写键）。
+
+    - ``official``：确保 ``VOICE_IME_PIP_INDEX_URL=default`` 行存在（旧自定义值替换）；
+    - ``tsinghua``：移除该行——用户改回默认时不留垃圾配置；
+    - ``None``（题目未出现，云端/仅键盘方案）：不动既有持久化。
+    """
+    report = {"selection": selection, "written": False, "cleared": False}
+    if selection is None:
+        return report
+    path = environmentd_path()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True) if path.exists() else []
+    except OSError as exc:
+        raise ValueError(f"environment.d 无法读取：{exc}；pip 包源未持久化") from exc
+    kept = [line for line in lines if not ENV_PIP_INDEX_RE.match(line)]
+    if len(kept) == len(lines):
+        existing = ""
+    else:
+        # systemd 语义取最后一行；此处只为判断「是否已是目标值」。
+        existing = [line for line in lines if ENV_PIP_INDEX_RE.match(line)][-1].rstrip("\n")
+    if selection == "tsinghua":
+        if not existing:
+            return report
+        backup = backup_file(path)
+        atomic_write(path, "".join(kept))
+        print(f"pip 包源已恢复默认（清华镜像）：清除 environment.d 覆盖行；原文件备份：{backup}", file=sys.stderr)
+        return {**report, "cleared": True}
+    # selection == "official"
+    if existing == ENV_PIP_INDEX_LINE and len(kept) + 1 == len(lines):
+        return report  # 已是目标状态，不重复写盘/备份。
+    content = "".join(line if line.endswith("\n") else line + "\n" for line in kept) + ENV_PIP_INDEX_LINE + "\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup = backup_file(path) if path.exists() else None
+    atomic_write(path, content)
+    print(f"pip 包源已持久化：environment.d 写入 {ENV_PIP_INDEX_LINE}（官方 PyPI；清华镜像为默认不写行）", file=sys.stderr)
+    if backup:
+        print(f"原文件备份：{backup}", file=sys.stderr)
+    return {**report, "written": True}
+
+
 def wizard_defaults() -> dict:
     path = config.user_config_path()
     if path.exists():
@@ -147,6 +219,7 @@ def wizard_defaults() -> dict:
         },
         "postprocess": llm.get("enabled", True) if llm is not None else None,
         "assets": dict.fromkeys(("rime_ice", "zhwiki", "moegirl", "denoise"), True),
+        "pip_index": current_pip_index(),
     }
 
 
@@ -154,6 +227,11 @@ def make_updates(result: dict) -> dict:
     plan = result.get("voice_plan")
     if plan not in {*PLANS, "keyboard-only"}:
         raise ValueError("语音方案不合法")
+    # pip 包源不进 config.json（无消费者）；这里只做白名单校验，
+    # 持久化走 environment.d（见 persist_pip_index）。
+    pip_index = result.get("pip_index")
+    if pip_index is not None and pip_index not in ("tsinghua", "official"):
+        raise ValueError("pip 包源不合法（tsinghua/official）")
     updates = {}
     if plan != "keyboard-only":
         backend, selected = PLANS[plan]
@@ -219,6 +297,8 @@ def apply(result: dict) -> dict:
     validate_updates(updates)
     # 清理失败时停止，不能写入配置后静默宣称新热键已生效。
     env_hotkeys_cleared = clear_env_hotkeys() if changed else 0
+    # pip 包源持久化（official 写行 / tsinghua 清行 / None 不动）；写失败同样停止。
+    pip_persisted = persist_pip_index(result.get("pip_index"))
     backup = backup_file(path) if path.exists() else None
     if llm_changed:
         llm_path = llm_cloud_config.config_path()
@@ -234,13 +314,18 @@ def apply(result: dict) -> dict:
     if backup:
         print(f"原配置备份：{backup}", file=sys.stderr)
     llm_summary = "未配置云端 LLM" if result["postprocess"] is None else ("开" if result["postprocess"] else "关")
-    print(f"生效摘要：语音方案 {result['voice_plan']}；Qwen {result['qwen_model']}；云端 LLM 后处理 {llm_summary}", file=sys.stderr)
+    pip_summary = {"tsinghua": "清华镜像（默认）", "official": "官方 PyPI（pypi.org）"}.get(result.get("pip_index"))
+    print(f"生效摘要：语音方案 {result['voice_plan']}；Qwen {result['qwen_model']}；云端 LLM 后处理 {llm_summary}"
+          + (f"；pip 包源 {pip_summary}" if pip_summary else ""), file=sys.stderr)
     labels = {"voice": "语音", "raw": "原文", "paste": "粘贴"}
     for name, key in HOTKEY_PATHS.items():
         print(f"{labels[name]}热键：{updates[key]}", file=sys.stderr)
     return {"config_path": str(path), "backup_path": str(backup) if backup else None,
             "hotkeys_changed": changed, "llm_changed": llm_changed,
-            "env_hotkeys_cleared": env_hotkeys_cleared}
+            "env_hotkeys_cleared": env_hotkeys_cleared,
+            "pip_index": result.get("pip_index"),
+            "pip_index_written": pip_persisted["written"],
+            "pip_index_cleared": pip_persisted["cleared"]}
 
 
 def main() -> int:

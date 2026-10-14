@@ -102,8 +102,9 @@ sanitize_field() {
 RIME_RETRY="$(retry_command "$ROOT_DIR/scripts/setup-rime-ice.sh" "${PROXY_ARG[@]}" "${RIME_EXTRA_ARGS[@]}")"
 RNNOISE_RETRY="$(retry_command "$ROOT_DIR/scripts/fetch-rnnoise-model.sh" "${PROXY_ARG[@]}")"
 QWEN_RETRY="$(retry_command "$ROOT_DIR/scripts/setup-qwen-asr.sh" "${PROXY_ARG[@]}")"
-# 向导选择是本次进程环境；单独续装时也保留下载集合与默认模型。
-for name in VOICE_IME_QWEN_ASR_MODEL VOICE_IME_QWEN_ASR_SIZES; do
+# 向导选择是本次进程环境；单独续装时也保留下载集合、默认模型与 pip 包源覆盖
+# （VOICE_IME_PIP_INDEX_URL=default=官方 PyPI；自定义包源 URL 同样按原值保留）。
+for name in VOICE_IME_QWEN_ASR_MODEL VOICE_IME_QWEN_ASR_SIZES VOICE_IME_PIP_INDEX_URL; do
   if [[ -v "$name" ]]; then QWEN_RETRY="$name=$(shell_quote "${!name}") $QWEN_RETRY"; fi
 done
 record_problem() {

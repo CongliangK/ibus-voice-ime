@@ -149,6 +149,17 @@ if [[ -f "$ENV_FILE" ]]; then
   # 保留非渠道、非路径块的既有行（注释/诊断键/用户自加行）。
   KEEP_LINES="$(grep -vE "$CHANNEL_ENV_RE|$PATH_ENV_RE" "$ENV_FILE" || true)"
 fi
+# pip 包源持久化（向导「官方 PyPI」选择）：仅官方源哨兵值 default 落行；清华
+# =默认不写任何行，改选默认的清理由 apply-wizard-config.py 完成；自定义 URL
+# 不代管（按次语义）。本次运行选了官方源时，文件中的旧值行（含自定义 URL）
+# 替换为哨兵行，避免双行/旧值残留。
+PIP_INDEX_PERSIST=""
+if [[ "${VOICE_IME_PIP_INDEX_URL:-}" == "default" ]]; then
+  PIP_INDEX_PERSIST="VOICE_IME_PIP_INDEX_URL=default"
+  if [[ -n "$KEEP_LINES" ]]; then
+    KEEP_LINES="$(grep -v '^VOICE_IME_PIP_INDEX_URL=' <<<"$KEEP_LINES" || true)"
+  fi
+fi
 cat > "$ENV_FILE.new" <<EOF_ENV
 IBUS_COMPONENT_PATH=$IBUS_COMPONENT_PATH_VALUE
 VOICE_IME_RIME_LIBRARY=$ROOT_DIR/vendor/rime/lib/librime.so.1
@@ -165,6 +176,9 @@ if [[ -n "$CHANNEL_LINES" ]]; then
 elif [[ -n "$MIGRATE_PATH_LINES" ]]; then
   # 迁移成功：只写回路径型保留行（拒迁，维持 env 层自愈）。
   printf '%s\n' "$MIGRATE_PATH_LINES" >> "$ENV_FILE.new"
+fi
+if [[ -n "$PIP_INDEX_PERSIST" ]]; then
+  printf '%s\n' "$PIP_INDEX_PERSIST" >> "$ENV_FILE.new"
 fi
 mv "$ENV_FILE.new" "$ENV_FILE"
 chmod 600 "$ENV_FILE" 2>/dev/null || true

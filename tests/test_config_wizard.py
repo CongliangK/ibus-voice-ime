@@ -132,10 +132,14 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertEqual(first["qwen_model"], "1.7b")
         self.assertEqual(first["hotkeys"], {"voice": "Ctrl+Alt+V", "raw": "Ctrl+Alt+B", "paste": "Ctrl+Alt+P"})
         self.assertIsNone(first["postprocess"])
+        # 本地 Qwen 方案默认出现 pip 包源题，回车/默认均为清华镜像。
+        self.assertIn("pip 包源（Python 依赖下载） [当前/默认：tsinghua]：采用默认", defaults.stderr)
+        self.assertEqual(first["pip_index"], "tsinghua")
 
     def test_piped_zero_at_assets_clears_all_assets(self):
         # 管道交互里资产多选输 0 = 一个都不装（红队：此前空集不可达）。
-        ran = self.wizard(text="\n" * 6 + "0\n")
+        # 本地 Qwen 方案新增 pip 包源题（第 4 题），前导回车相应 +1。
+        ran = self.wizard(text="\n" * 7 + "0\n")
         self.assertEqual(ran.returncode, 0, ran.stderr)
         result = json.loads(self.result.read_text())
         self.assertEqual(result["assets"],
@@ -186,8 +190,8 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertEqual(Path(report["backup_path"]).stat().st_mode & 0o777, 0o600)
 
     def test_invalid_hotkey_reprompts_and_gtk_syntax_normalizes(self):
-        # 方案/下载/默认模型三个回车，坏热键之后改为 GTK 写法，再接受其余值。
-        ran = self.wizard(text="\n\n\nCtrl+Garbage\n<Control><Shift>v\n" + "\n" * 7)
+        # 方案/下载/默认模型/pip 包源四个回车，坏热键之后改为 GTK 写法，再接受其余值。
+        ran = self.wizard(text="\n\n\n\nCtrl+Garbage\n<Control><Shift>v\n" + "\n" * 7)
         self.assertEqual(ran.returncode, 0, ran.stderr)
         self.assertIn("输入不合法", ran.stderr)
         self.assertEqual(json.loads(self.result.read_text())["hotkeys"]["voice"], "Ctrl+Shift+V")
@@ -204,7 +208,7 @@ class ConfigWizardTest(unittest.TestCase):
     def test_partial_garbage_hotkey_is_rejected_per_token(self):
         # 引擎会静默丢弃解析失败的 token；向导必须逐 token 严格，
         # 不得在丢掉 garbage 后侥幸放行 v（红队 2026-10-11 发现）。
-        ran = self.wizard(text="\n\n\ngarbage v\nCtrl+Alt+V\n" + "\n" * 7)
+        ran = self.wizard(text="\n\n\n\ngarbage v\nCtrl+Alt+V\n" + "\n" * 7)
         self.assertEqual(ran.returncode, 0, ran.stderr)
         self.assertIn("输入不合法", ran.stderr)
         self.assertEqual(json.loads(self.result.read_text())["hotkeys"]["voice"], "Ctrl+Alt+V")
@@ -219,6 +223,7 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertNotIn("本地 Qwen 下载", ran.stderr)
         self.assertNotIn("安装 zhwiki", ran.stderr)
         self.assertNotIn("安装 RNNoise", ran.stderr)
+        self.assertNotIn("pip 包源", ran.stderr)
 
     def test_invalid_existing_json_is_never_overwritten(self):
         self.assertEqual(self.wizard("--defaults").returncode, 0)
@@ -444,7 +449,7 @@ class ConfigWizardTest(unittest.TestCase):
 
     def test_numbered_download_both_model_and_llm_toggle(self):
         self.write_llm(enabled=True)
-        ran = self.wizard(text="\n3\n2\n\n\n\n2\n\n")
+        ran = self.wizard(text="\n3\n2\n\n\n\n\n2\n\n")
         self.assertEqual(ran.returncode, 0, ran.stderr)
         result = json.loads(self.result.read_text())
         self.assertEqual(result["qwen_sizes"], ["0.6B", "1.7B"])
@@ -462,7 +467,7 @@ class ConfigWizardTest(unittest.TestCase):
         self.assertNotIn("安装 RNNoise", ran.stderr)
 
     def test_numbered_model_outside_download_set_reprompts(self):
-        ran = self.wizard(text="\n2\n1\n2\n" + "\n" * 4)
+        ran = self.wizard(text="\n2\n1\n2\n" + "\n" * 5)
         self.assertEqual(ran.returncode, 0, ran.stderr)
         self.assertIn("默认模型必须在本次下载集合中", ran.stderr)
         result = json.loads(self.result.read_text())
