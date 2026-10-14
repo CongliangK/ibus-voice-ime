@@ -79,6 +79,18 @@ if a[:1] == ['-'] and len(a) == 3 and a[2] == '-':
     # REUSE/增量补装判据探针（stdin 程序）：按注入退出码模拟三态
     # （0=全满足 / 3=仅缺包 / 其他=冲突），避免依赖宿主解释器真实元数据。
     sys.exit(int(os.environ.get('FAKE_REUSE_RC', '0')))
+if a[:1] == ['-'] and len(a) == 4:
+    # P2-2 urllib 降级探测（stdin 程序 + URL/包/版本 4 个位置参数）：测试禁止
+    # 外网，缺省按注入自报分类（visible=目标版本可见）；FAKE_URL_PROBE_REAL=1
+    # 时真实执行 stdin 的 urllib 探测（用例只指向 127.0.0.1 回环索引）。
+    if os.environ.get('FAKE_URL_PROBE_REAL') == '1':
+        sys.argv = ['-'] + a[1:]   # 对齐 `python - url pkg ver` 的 argv 语义
+        exec(compile(sys.stdin.read(), '<url-probe>', 'exec'), {{'sys': sys, '__name__': '__main__'}})
+        sys.exit(0)
+    print('KIND=' + os.environ.get('FAKE_URL_PROBE_KIND', 'visible'))
+    print('CODE=' + os.environ.get('FAKE_URL_PROBE_CODE', '200'))
+    print('NOTE=' + os.environ.get('FAKE_URL_PROBE_NOTE', 'fixture fallback probe'))
+    sys.exit(0)
 if '-c' in a:
     code = a[a.index('-c') + 1]
     if 'json.dumps' in code:

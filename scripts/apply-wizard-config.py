@@ -148,24 +148,38 @@ def read_environmentd_pip_index() -> str:
 
 
 def current_pip_index() -> str:
-    """当前 pip 包源：进程环境优先（本次运行覆盖/登录会话已注入），否则读持久行。
+    """当前 pip 包源三态：进程环境优先（本次运行覆盖/登录会话已注入），否则读持久行。
 
-    仅识别官方源哨兵 ``default``；未设置或自定义 URL 均按清华镜像默认展示
-    （向导只提供镜像/官方两项，自定义 URL 属按次高级用法）。
+    - ``default`` 哨兵 → ``official``（官方 PyPI）；
+    - 未设置/空 → ``tsinghua``（清华镜像，程序默认）；
+    - 其他任何 URL → ``custom``——用户显式设置的自定义包源，绝不折叠成
+      清华镜像（红队 2026-10-14 P0：折叠后在无人值守路径被 unset，静默
+      丢弃用户显式选择）。
     """
     value = os.environ.get(ENV_PIP_INDEX_KEY, "") or read_environmentd_pip_index()
-    return "official" if value == "default" else "tsinghua"
+    if value == "default":
+        return "official"
+    if value:
+        return "custom"
+    return "tsinghua"
+
+
+def current_pip_index_url() -> str:
+    """custom 态展示用的原始值（进程环境优先，否则 environment.d 持久行）。"""
+    return os.environ.get(ENV_PIP_INDEX_KEY, "") or read_environmentd_pip_index()
 
 
 def persist_pip_index(selection: str | None) -> dict:
     """向导 pip 包源选择的持久化（environment.d 通道；config.json 无消费者不写键）。
 
     - ``official``：确保 ``VOICE_IME_PIP_INDEX_URL=default`` 行存在（旧自定义值替换）；
-    - ``tsinghua``：移除该行——用户改回默认时不留垃圾配置；
+    - ``tsinghua``：移除该行——用户显式改回默认时不留垃圾配置；
+    - ``custom``（回车/无人值守保持当前自定义 URL）：不动既有持久化——自定义
+      URL 属按次高级用法，向导不代管（不持久化、不清除；install.sh 同样不代管）；
     - ``None``（题目未出现，云端/仅键盘方案）：不动既有持久化。
     """
     report = {"selection": selection, "written": False, "cleared": False}
-    if selection is None:
+    if selection is None or selection == "custom":
         return report
     path = environmentd_path()
     try:
@@ -208,7 +222,8 @@ def wizard_defaults() -> dict:
     if model not in {"0.6b", "1.7b"}:
         model = "1.7b"
     llm = read_llm()
-    return {
+    pip_index = current_pip_index()
+    defaults = {
         "voice_plan": plan,
         "qwen_sizes": [model[:-1] + "B"],
         "qwen_model": model,
@@ -219,8 +234,12 @@ def wizard_defaults() -> dict:
         },
         "postprocess": llm.get("enabled", True) if llm is not None else None,
         "assets": dict.fromkeys(("rime_ice", "zhwiki", "moegirl", "denoise"), True),
-        "pip_index": current_pip_index(),
+        "pip_index": pip_index,
     }
+    if pip_index == "custom":
+        # custom 态在向导题面展示原始 URL（进程环境优先，否则持久行）。
+        defaults["pip_index_url"] = current_pip_index_url()
+    return defaults
 
 
 def make_updates(result: dict) -> dict:
@@ -230,8 +249,8 @@ def make_updates(result: dict) -> dict:
     # pip 包源不进 config.json（无消费者）；这里只做白名单校验，
     # 持久化走 environment.d（见 persist_pip_index）。
     pip_index = result.get("pip_index")
-    if pip_index is not None and pip_index not in ("tsinghua", "official"):
-        raise ValueError("pip 包源不合法（tsinghua/official）")
+    if pip_index is not None and pip_index not in ("tsinghua", "official", "custom"):
+        raise ValueError("pip 包源不合法（tsinghua/official/custom）")
     updates = {}
     if plan != "keyboard-only":
         backend, selected = PLANS[plan]
@@ -297,7 +316,7 @@ def apply(result: dict) -> dict:
     validate_updates(updates)
     # 清理失败时停止，不能写入配置后静默宣称新热键已生效。
     env_hotkeys_cleared = clear_env_hotkeys() if changed else 0
-    # pip 包源持久化（official 写行 / tsinghua 清行 / None 不动）；写失败同样停止。
+    # pip 包源持久化（official 写行 / tsinghua 清行 / custom 与 None 不动）；写失败同样停止。
     pip_persisted = persist_pip_index(result.get("pip_index"))
     backup = backup_file(path) if path.exists() else None
     if llm_changed:
@@ -314,7 +333,8 @@ def apply(result: dict) -> dict:
     if backup:
         print(f"原配置备份：{backup}", file=sys.stderr)
     llm_summary = "未配置云端 LLM" if result["postprocess"] is None else ("开" if result["postprocess"] else "关")
-    pip_summary = {"tsinghua": "清华镜像（默认）", "official": "官方 PyPI（pypi.org）"}.get(result.get("pip_index"))
+    pip_summary = {"tsinghua": "清华镜像（默认）", "official": "官方 PyPI（pypi.org）",
+                   "custom": "自定义 URL（保持当前值，向导不代管）"}.get(result.get("pip_index"))
     print(f"生效摘要：语音方案 {result['voice_plan']}；Qwen {result['qwen_model']}；云端 LLM 后处理 {llm_summary}"
           + (f"；pip 包源 {pip_summary}" if pip_summary else ""), file=sys.stderr)
     labels = {"voice": "语音", "raw": "原文", "paste": "粘贴"}

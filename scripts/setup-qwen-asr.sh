@@ -399,7 +399,7 @@ probe_result_label() {
 }
 
 probe_index_visibility() {  # <index_url>
-  local index_url="$1" out="" rc=0
+  local index_url="$1" out="" rc=0 pip_no_versions=0
   PROBE_RESULT="unparseable"; PROBE_CERTAINTY="推断"; PROBE_NOTE=""
   # --retries 1 + timeout：探测要快，安装仍有自己的 --timeout 30 --retries 2。
   out="$("$PY" -m pip --isolated index versions "$QWEN_ASR_PKG" --index-url "$index_url" --timeout 15 --retries 1 2>&1)" || rc=$?
@@ -416,8 +416,9 @@ probe_index_visibility() {  # <index_url>
       fi
       return 0
     fi
-    PROBE_NOTE="pip index versions 返回 0 但未输出版本列表"
-    return 0
+    # rc==0 但未解析出版本列表（空输出/旧 pip 不支持等）：按承诺降级 urllib 拉
+    # simple 页分类，不停留在「无法归类（推断）」（红队 2026-10-14 P2）。
+    pip_no_versions=1
   fi
   # pip 侧已给出明确签名：直接归因（实证），不再叠加 urllib。
   if printf '%s' "$out" | grep -q 'Missing dependencies for SOCKS support'; then
@@ -429,9 +430,9 @@ probe_index_visibility() {  # <index_url>
   if printf '%s' "$out" | grep -qE 'Retrying|ProxyError|NewConnectionError|timed out|Could not fetch'; then
     PROBE_RESULT="conn-error"; PROBE_CERTAINTY="实证"; return 0
   fi
-  # 版本类失败或 pip index 子命令不存在（旧 pip）：urllib 拉 simple 页原始响应。
-  # urllib 与 pip 同样 trust_env（getproxies 会带上 all_proxy），分类只描述
-  # “页面原始响应长什么样”，不冒充 pip 的解析结论。
+  # 版本类失败、pip index 子命令不存在（旧 pip）或 rc==0 无版本列表：urllib 拉
+  # simple 页原始响应。urllib 与 pip 同样 trust_env（getproxies 会带上 all_proxy），
+  # 分类只描述“页面原始响应长什么样”，不冒充 pip 的解析结论。
   local probe_out="" kind="" code="" note=""
   probe_out="$("$PY" - "$index_url" "$QWEN_ASR_PKG" "$QWEN_ASR_VERSION" <<'PY'
 import re, sys, urllib.error, urllib.request
@@ -478,9 +479,11 @@ PY
   note="$(printf '%s\n' "$probe_out" | sed -n 's/^NOTE=//p' | head -n1)"
   case "$kind" in
     visible|page-missing-version|not-found|http-error|garbage|tls-error|socks-error|conn-error)
-      PROBE_RESULT="$kind"; PROBE_CERTAINTY="实证"; PROBE_NOTE="HTTP ${code:-?} ${note}" ;;
+      PROBE_RESULT="$kind"; PROBE_CERTAINTY="实证"; PROBE_NOTE="HTTP ${code:-?} ${note}"
+      [[ $pip_no_versions -eq 0 ]] || PROBE_NOTE="pip index versions 返回 0 但未输出版本列表，已降级 urllib 探测；$PROBE_NOTE" ;;
     *)
-      PROBE_RESULT="unparseable"; PROBE_NOTE="urllib 探测无法归类 ${note}" ;;
+      PROBE_RESULT="unparseable"; PROBE_NOTE="urllib 探测无法归类 ${note}"
+      [[ $pip_no_versions -eq 0 ]] || PROBE_NOTE="pip index versions 返回 0 但未输出版本列表；$PROBE_NOTE" ;;
   esac
   return 0
 }

@@ -8,10 +8,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import shutil
 import subprocess
 import sys
 import tempfile
+import termios
+import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +80,80 @@ class PipWizardSandboxTest(unittest.TestCase):
         ran = self.wizard("--defaults")
         self.assertEqual(ran.returncode, 0, ran.stderr)
         self.assertEqual(json.loads(self.result.read_text())["pip_index"], "official")
+
+    def test_custom_url_defaults_keeps_custom_state_visible(self):
+        # P0 回归：用户显式 export 自定义包源 URL 时，--defaults（= --yes/回车）必须
+        # 识别为 custom 态并在题面可见呈现，绝不折叠成清华镜像。
+        self.env["VOICE_IME_PIP_INDEX_URL"] = "https://my.internal.mirror/simple"
+        ran = self.wizard("--defaults")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertIn("[当前/默认：custom]", ran.stderr)
+        self.assertIn("自定义包源 URL（https://my.internal.mirror/simple）", ran.stderr)
+        self.assertIn("保持当前自定义 URL", ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["pip_index"], "custom")
+
+    def test_custom_url_piped_enter_keeps_custom_and_numbering_stable(self):
+        # 管道交互（编号列表降级）：回车=保持 custom；两项菜单编号不变——
+        # 1=清华镜像、2=官方 PyPI（与非 custom 态一致），3=保持自定义。
+        self.env["VOICE_IME_PIP_INDEX_URL"] = "https://my.internal.mirror/simple"
+        ran = self.wizard(text="\n\n\n\n" + "\n" * 4)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        result = json.loads(self.result.read_text())
+        self.assertEqual(result["pip_index"], "custom")
+        self.assertIn("3) 保持当前自定义 URL", ran.stderr)
+        # 显式选 2 = 官方 PyPI（编号不变）
+        ran = self.wizard(text="\n\n\n2\n" + "\n" * 4)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["pip_index"], "official")
+
+    def test_custom_from_environmentd_only_is_custom_state(self):
+        # 进程环境无变量、environment.d 持久行是自定义 URL：同样识别为 custom 态；
+        # apply 对 custom 选择「不动既有持久化」（不写不清、不备份）。
+        self.seed_env_file("VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\nKEEP=1\n")
+        ran = self.wizard("--defaults")
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["pip_index"], "custom")
+        self.assertIn("https://persisted.example/simple", ran.stderr)
+        applied = self.apply()
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        report = json.loads(applied.stdout)
+        self.assertEqual(report["pip_index"], "custom")
+        self.assertFalse(report["pip_index_written"])
+        self.assertFalse(report["pip_index_cleared"])
+        self.assertEqual(self.env_file.read_text(), "VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\nKEEP=1\n")
+        self.assertEqual(list(self.env_file.parent.glob("ibus-voice-ime.conf.bak.*")), [])
+
+    def test_apply_custom_selection_keeps_official_persisted_line(self):
+        # 本次运行 export 了自定义 URL（custom 态），environment.d 仍是官方哨兵行：
+        # 回车保持 custom → apply 不动持久行（按次高级用法，登录会话语义不被改写）。
+        before = self.seed_env_file("VOICE_IME_PIP_INDEX_URL=default\nKEEP=1\n")
+        self.env["VOICE_IME_PIP_INDEX_URL"] = "https://one-shot.example/simple"
+        self.assertEqual(self.wizard("--defaults").returncode, 0)
+        self.env.pop("VOICE_IME_PIP_INDEX_URL")
+        applied = self.apply()
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        report = json.loads(applied.stdout)
+        self.assertEqual(report["pip_index"], "custom")
+        self.assertFalse(report["pip_index_written"])
+        self.assertFalse(report["pip_index_cleared"])
+        self.assertEqual(self.env_file.read_text(), before)
+
+    def test_apply_explicit_tsinghua_over_custom_clears_line_with_backup(self):
+        # 交互显式选清华（管道输 1）：用户选择覆盖环境——清除自定义持久行并备份。
+        before = self.seed_env_file("VOICE_IME_PIP_INDEX_URL=https://persisted.example/simple\nKEEP=1\n")
+        self.env["VOICE_IME_PIP_INDEX_URL"] = "https://my.internal.mirror/simple"
+        ran = self.wizard(text="\n\n\n1\n" + "\n" * 4)
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+        self.assertEqual(json.loads(self.result.read_text())["pip_index"], "tsinghua")
+        applied = self.apply()
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        report = json.loads(applied.stdout)
+        self.assertEqual(report["pip_index"], "tsinghua")
+        self.assertTrue(report["pip_index_cleared"])
+        self.assertEqual(self.env_file.read_text(), "KEEP=1\n")
+        backups = list(self.env_file.parent.glob("ibus-voice-ime.conf.bak.*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_text(), before)
 
     def test_custom_url_env_prints_note_and_numbered_tsinghua_wins(self):
         self.env["VOICE_IME_PIP_INDEX_URL"] = "https://mirrors.example.test/simple"
@@ -223,6 +301,52 @@ sys.exit(int(os.environ.get(keys[name], '0')))
                               env=dict(self.env, **extra), stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60)
 
+    def run_setup_tty(self, steps, **extra):
+        """PTY 驱动 setup.sh 交互向导（tui-select 走 raw 终端菜单，按步喂键）。
+
+        steps 为 (提示子串, 按键字节) 序列；最后一组按键后附加 y+CR 应答
+        setup.sh 的「继续执行？」终端确认（提示走 stdout 管道，无法按提示等待）。
+        """
+        master, slave = pty.openpty()
+        process = None
+        try:
+            try:
+                termios.tcsetwinsize(slave, (24, 120))
+            except AttributeError:  # Python 3.10 无 tcsetwinsize
+                import fcntl, struct
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 120, 0, 0))
+            process = subprocess.Popen(["bash", str(self.root / "setup.sh")], cwd=str(self.root),
+                                       env=dict(self.env, **extra), stdin=slave,
+                                       stdout=subprocess.PIPE, stderr=slave)
+            decoration = b""
+            for prompt, keys in steps:
+                pending = b""
+                deadline = time.monotonic() + 20
+                while prompt.encode() not in pending:
+                    remaining = deadline - time.monotonic()
+                    self.assertGreater(remaining, 0, decoration.decode(errors="replace"))
+                    ready, _, _ = select.select([master], [], [], remaining)
+                    self.assertTrue(ready, "未出现预期提示：" + prompt)
+                    chunk = os.read(master, 4096)
+                    self.assertTrue(chunk, "setup 在输入完成前退出")
+                    pending += chunk
+                    decoration += chunk
+                os.write(master, keys)
+            os.write(master, b"y\n")   # 终端确认：\n 直通行终止（\r 在 raw 遗留队列里不换行）
+            stdout, _ = process.communicate(timeout=45)
+            while select.select([master], [], [], 0)[0]:
+                decoration += os.read(master, 4096)
+            return process.returncode, stdout.decode(errors="replace"), decoration.decode(errors="replace")
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
+            os.close(master)
+            os.close(slave)
+
+    def pip_events(self, name):
+        return [event["pip"] for event in self.events() if event["name"] == name]
+
     def events(self):
         if not self.log.exists():
             return []
@@ -277,6 +401,87 @@ sys.exit(int(os.environ.get(keys[name], '0')))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("[当前/默认：official]", result.stderr)
         self.assertIn("pip 包源 官方 PyPI（VOICE_IME_PIP_INDEX_URL=default）", result.stdout)
+
+    def test_redteam_yes_custom_url_passthrough_whole_chain(self):
+        # P0 红队复现：VOICE_IME_PIP_INDEX_URL=自定义 URL + ./setup.sh --yes ——
+        # 修复前向导把 custom 折叠成 tsinghua 并 unset 变量，安装链子进程实测
+        # 收到 None 落回清华默认；修复后 custom 态原样透传整条子进程链。
+        url = "https://my.internal.mirror/simple"
+        result = self.run_setup("--yes", VOICE_IME_PIP_INDEX_URL=url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # 向导题面呈现 custom 当前值（--yes = 回车保持）
+        self.assertIn("[当前/默认：custom]", result.stderr)
+        self.assertIn(f"自定义包源 URL（{url}）", result.stderr)
+        self.assertIn("保持当前自定义 URL", result.stderr)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), [url, url])
+        self.assertTrue(self.pip_events("install.sh"))
+        self.assertTrue(all(pip == url for pip in self.pip_events("install.sh")))
+        # custom 属按次高级用法：apply 与 install 均不持久化（不写任何行）。
+        self.assertFalse((self.home / ".config/environment.d/ibus-voice-ime.conf").exists())
+
+    def test_defaults_with_environmentd_official_full_run_stays_official(self):
+        # --defaults + 仅 environment.d 持久官方哨兵行（进程环境无变量）：
+        # 仍 official——向导从持久行取当前值，setup export default 贯穿子进程链，
+        # 持久行保持原样（已是目标状态不重复写盘）。
+        envd = self.home / ".config/environment.d/ibus-voice-ime.conf"
+        envd.parent.mkdir(parents=True, exist_ok=True)
+        envd.write_text("VOICE_IME_PIP_INDEX_URL=default\nKEEP=1\n")
+        result = self.run_setup("--yes")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("[当前/默认：official]", result.stderr)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), ["default", "default"])
+        self.assertTrue(all(pip == "default" for pip in self.pip_events("install.sh")))
+        self.assertEqual(envd.read_text(), "VOICE_IME_PIP_INDEX_URL=default\nKEEP=1\n")
+
+    def test_keyboard_only_absent_path_leaves_custom_env_untouched(self):
+        # absent 路径不变：仅键盘方案不出现 pip 包源题（键缺省），setup 完全不动
+        # 该变量——用户自行 export 的自定义 URL 原样透传给 install.sh 子进程。
+        url = "https://my.internal.mirror/simple"
+        result = self.run_setup("--keyboard-only", "--yes", VOICE_IME_PIP_INDEX_URL=url)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("pip 包源（Python 依赖下载）", result.stderr)
+        self.assertTrue(self.pip_events("install.sh"))
+        self.assertTrue(all(pip == url for pip in self.pip_events("install.sh")))
+        # install 对自定义 URL 不代管：不写入任何持久化行。
+        envd = self.home / ".config/environment.d/ibus-voice-ime.conf"
+        if envd.exists():
+            self.assertNotIn("VOICE_IME_PIP_INDEX_URL", envd.read_text())
+
+    def test_tty_explicit_tsinghua_overrides_custom_env_unsets_variable(self):
+        # 交互（PTY raw 菜单）显式选「清华镜像」：用户选择覆盖环境——setup 侧
+        # unset VOICE_IME_PIP_INDEX_URL，安装链子进程不再见到自定义 URL。
+        url = "https://my.internal.mirror/simple"
+        steps = [("语音方案", b"\r"),
+                 ("本地 Qwen 下载", b"\r"),
+                 ("默认 Qwen 模型", b"\r"),
+                 ("pip 包源（Python 依赖下载）", b"1"),      # 数字直选 1=清华镜像
+                 ("语音热键（例如", b"3"),                    # 3=保持当前/默认
+                 ("原文热键（例如", b"3"),
+                 ("粘贴热键（例如", b"3"),
+                 ("词库与降噪资产", b"\r")]
+        rc, stdout, decoration = self.run_setup_tty(steps, VOICE_IME_PIP_INDEX_URL=url)
+        self.assertEqual(rc, 0, stdout + decoration)
+        self.assertIn("已选：清华镜像（默认）", decoration)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), [None, None])
+        self.assertTrue(self.pip_events("install.sh"))
+        self.assertTrue(all(pip is None for pip in self.pip_events("install.sh")))
+
+    def test_tty_enter_keeps_custom_url_passthrough(self):
+        # 交互（PTY raw 菜单）回车取默认 = 保持 custom：自定义 URL 原样透传安装链。
+        url = "https://my.internal.mirror/simple"
+        steps = [("语音方案", b"\r"),
+                 ("本地 Qwen 下载", b"\r"),
+                 ("默认 Qwen 模型", b"\r"),
+                 ("pip 包源（Python 依赖下载）", b"\r"),     # 回车=默认项（保持自定义）
+                 ("语音热键（例如", b"3"),
+                 ("原文热键（例如", b"3"),
+                 ("粘贴热键（例如", b"3"),
+                 ("词库与降噪资产", b"\r")]
+        rc, stdout, decoration = self.run_setup_tty(steps, VOICE_IME_PIP_INDEX_URL=url)
+        self.assertEqual(rc, 0, stdout + decoration)
+        self.assertIn("已选：保持当前自定义 URL", decoration)
+        self.assertEqual(self.pip_events("setup-qwen-asr.sh"), [url, url])
+        self.assertTrue(all(pip == url for pip in self.pip_events("install.sh")))
 
 
 class InstallPipIndexEnvdTest(unittest.TestCase):

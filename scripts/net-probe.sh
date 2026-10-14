@@ -367,8 +367,17 @@ EOF
       probe_index_page "$index_url"
       local verdict="" certainty="实证"
       if [[ -n "$PROBE_VIA_CODE" ]]; then
+        # 经代理探测失败分两层归因（红队 2026-10-14 P2：连接层失败不是内容劫持）：
+        # 连接层（HTTP 000/network-error/tls-error/超时）= 代理不可达/连接失败——请求
+        # 根本没拿到内容；内容层（403/5xx 等 HTTP 状态码、200 垃圾页、404/缺版本页）
+        # = 代理在内容级吞掉/改写响应。两层都要求直连可见目标版本才构成实证。
         case "$PROBE_VIA_KIND" in
-          http-error|garbage|network-error|tls-error|not-found|page-missing-version)
+          network-error|tls-error)
+            case "$PROBE_DIRECT_KIND" in
+              page-has-version|page-valid) verdict="proxy-conn" ;;
+              *) : ;;
+            esac ;;
+          http-error|garbage|not-found|page-missing-version)
             case "$PROBE_DIRECT_KIND" in
               page-has-version|page-valid)
                 verdict="hijack" ;;
@@ -400,6 +409,20 @@ EOF
       1) 修代理规则放行包源域名，或彻底 unset 代理变量后重跑同一命令；
       2) 国内镜像通常无需代理：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY；
       3) 确需代理则换 HTTP 代理：./scripts/setup-qwen-asr.sh --proxy http://<host>:<port>。
+EOF
+          print_compare_commands "$index_url"
+          ;;
+        proxy-conn)
+          cat <<EOF
+  ▶ 分类：代理类 —— 代理不可达/连接失败（实证）：直连能拿到含目标版本的索引页，
+    经代理（\$$EFFECTIVE_PROXY_VAR）却在连接层失败（HTTP ${PROBE_VIA_CODE:-000} / $PROBE_VIA_KIND）——
+    代理进程未监听、地址端口不可达或隧道异常断流，请求根本没拿到任何内容，
+    pip 因此静默得到零候选（from versions: none）。这是连接层失败，不是内容级
+    吞掉，也不是镜像缺包；换镜像无法解决。
+  [6] 最小修复建议：
+      1) 确认代理进程在运行且端口正确（见 [3] 的来源变量与取值）；
+      2) 不需要代理时彻底清掉再重跑：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY；
+      3) 确需代理则换可用的：./scripts/setup-qwen-asr.sh --proxy http://<host>:<port>。
 EOF
           print_compare_commands "$index_url"
           ;;
@@ -496,8 +519,13 @@ standalone_probe() {
   resolve_effective_proxy
   local verdict=""
   if [[ -n "$PROBE_VIA_CODE" ]]; then
+    # 与 analyze 模式同口径：连接层失败（000/网络/TLS）≠ 内容劫持，分层归因。
     case "$PROBE_VIA_KIND" in
-      http-error|garbage|network-error|tls-error)
+      network-error|tls-error)
+        case "$PROBE_DIRECT_KIND" in
+          page-has-version|page-valid) verdict="proxy-conn" ;;
+        esac ;;
+      http-error|garbage)
         case "$PROBE_DIRECT_KIND" in
           page-has-version|page-valid) verdict="hijack" ;;
         esac ;;
@@ -519,6 +547,7 @@ standalone_probe() {
     page-missing-version) echo "结论（实证）：索引页有效但不含 $PROBE_VERSION——镜像同步滞后；可 VOICE_IME_PIP_INDEX_URL=default 换官方源。" ;;
     not-found) echo "结论（实证）：404——索引上没有 $PROBE_PACKAGE；换官方源核实。" ;;
     hijack)   echo "结论（实证）：代理内容劫持——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND。修代理或 unset 代理变量，换镜像无效。" ;;
+    proxy-conn) echo "结论（实证）：代理不可达/连接失败——直连可见目标版本、经代理连接层失败（HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND），未拿到任何内容。确认代理进程/端口或 unset 代理变量，换镜像无效。" ;;
     garbage)  echo "结论（实证）：索引响应不是 simple 页（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——劫持/网关拦截或镜像异常。" ;;
     *)        echo "结论（实证）：探测失败（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——网络不可达或 TLS 异常。" ;;
   esac

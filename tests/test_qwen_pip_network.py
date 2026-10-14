@@ -106,6 +106,18 @@ root = pathlib.Path(os.environ['FAKE_ROOT'])
 a = sys.argv[1:]
 if a[:1] == ['-'] and len(a) == 3 and a[2] == '-':
     sys.exit(int(os.environ.get('FAKE_REUSE_RC', '0')))
+if a[:1] == ['-'] and len(a) == 4:
+    # P2-2 urllib 降级探测（stdin 程序 + URL/包/版本 4 个位置参数）：测试禁止
+    # 外网，缺省按注入自报分类（visible=目标版本可见）；FAKE_URL_PROBE_REAL=1
+    # 时真实执行 stdin 的 urllib 探测（用例只指向 127.0.0.1 回环索引）。
+    if os.environ.get('FAKE_URL_PROBE_REAL') == '1':
+        sys.argv = ['-'] + a[1:]   # 对齐 `python - url pkg ver` 的 argv 语义
+        exec(compile(sys.stdin.read(), '<url-probe>', 'exec'), {{'sys': sys, '__name__': '__main__'}})
+        sys.exit(0)
+    print('KIND=' + os.environ.get('FAKE_URL_PROBE_KIND', 'visible'))
+    print('CODE=' + os.environ.get('FAKE_URL_PROBE_CODE', '200'))
+    print('NOTE=' + os.environ.get('FAKE_URL_PROBE_NOTE', 'fixture fallback probe'))
+    sys.exit(0)
 if '-c' in a:
     code = a[a.index('-c') + 1]
     if 'json.dumps' in code:
@@ -573,6 +585,68 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertIn('8 个代理相关变量均未设置', combined)
         self.assertNotIn('无法连接该代理', combined)
 
+    # =============================================================== scenario 11
+    def test_s11_pip_index_rc0_empty_output_falls_back_to_urllib(self):
+        # P2-2 回归：fake pip `index versions` rc==0 且空输出 → 必须按承诺降级
+        # urllib 拉 simple 页分类（此前停留在「无法归类（推断）」）。回环 fake
+        # 索引页含钉定版本；FAKE_URL_PROBE_REAL=1 让 fake venv python 真实执行
+        # 安装器传入的 urllib 探测程序（仅指向 127.0.0.1，零外网）。
+        page = (f'<a href="../../packages/qwen_asr-{V}-py3-none-any.whl#sha256=abc">'
+                f'qwen_asr-{V}-py3-none-any.whl</a>')
+
+        class IndexHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/simple/qwen-asr/':
+                    body = page.encode()
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404, 'not found')
+
+            def log_message(self, *args):
+                pass
+        index = ThreadingHTTPServer(('127.0.0.1', 0), IndexHandler)
+        threading.Thread(target=index.serve_forever, daemon=True).start()
+        self.addCleanup(index.shutdown)
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL=f'http://127.0.0.1:{index.server_port}/simple',
+                                FAKE_URL_PROBE_REAL='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        combined = result.stdout + result.stderr
+        self.assertIn(f'目标版本 {V} 在索引可见', combined)
+        self.assertIn('已降级 urllib', combined)
+        self.assertIn('确定性：实证', combined)
+        self.assertNotIn('无法归类', combined)
+        installs = self.install_events()
+        self.assertEqual(len(installs), 1, installs)
+
+    # =============================================================== scenario 12
+    def test_s12_pip_index_rc0_empty_urllib_garbage_page_classified(self):
+        # P2-2 的降级分类覆盖：urllib 拉到的 simple 页是垃圾页（200 非 simple
+        # 内容）→ 降级后结论为「索引页返回非 simple 内容」（实证），不再无法归类。
+        class GarbageHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'<html>captive portal login</html>'
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        index = ThreadingHTTPServer(('127.0.0.1', 0), GarbageHandler)
+        threading.Thread(target=index.serve_forever, daemon=True).start()
+        self.addCleanup(index.shutdown)
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL=f'http://127.0.0.1:{index.server_port}/simple',
+                                FAKE_URL_PROBE_REAL='1')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        combined = result.stdout + result.stderr
+        self.assertIn('索引页返回非 simple 内容', combined)
+        self.assertIn('已降级 urllib', combined)
+        self.assertIn('确定性：实证', combined)
+        self.assertIn('仅是预检诊断，不阻断安装', combined)
+
     # =============================================================== scenario 13
     def test_s13_interrupted_install_resumes_idempotently_without_rebuild(self):
         # 中途取消/失败（fake pip 首次安装被中断）后再次安装：幂等续装成功，
@@ -671,6 +745,69 @@ class NetProbeNetworkTest(unittest.TestCase):
         self.assertIn('页面有效但缺目标版本', out)
         self.assertIn('实证', out)
         self.assertIn('VOICE_IME_PIP_INDEX_URL=default', out)
+
+    def test_s11_dead_proxy_connection_failure_never_claimed_content_hijack(self):
+        # P2-1 回归：经代理探测在「连接层」失败（all_proxy=socks5://死端口 →
+        # HTTP 000/network-error）而直连可见目标版本——必须归因为「代理不可达/
+        # 连接失败」（仍属代理类），不得断言「内容劫持」（内容级吞掉）；双复现
+        # 命令（直连 + 经代理）结构与措辞风格保持。
+        index = self.start_index(
+            f'<a href="../../packages/qwen_asr-{V}-py3-none-any.whl#sha256=abc">'
+            f'qwen_asr-{V}-py3-none-any.whl</a>')
+        self.addCleanup(index.shutdown)
+        err = self.write_stderr(
+            f'ERROR: Could not find a version that satisfies the requirement '
+            f'qwen-asr=={V} (from versions: none)\n'
+            f'ERROR: No matching distribution found for qwen-asr=={V}')
+        result = self.run_probe('--analyze', err,
+                                '--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V, '--stage', 'deps',
+                                all_proxy='socks5://127.0.0.1:1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('▶ 分类：代理类 —— 代理不可达/连接失败', out)
+        self.assertIn('连接层失败', out)
+        self.assertIn('不是内容级', out)
+        self.assertIn('换镜像无法解决', out)
+        self.assertNotIn('内容劫持', out)
+        # 直连 vs 经代理两条对比复现命令缺一不可（来源变量指向 all_proxy）。
+        self.assertIn("--noproxy '*'", out)
+        self.assertIn('-x "$all_proxy"', out)
+
+    def test_s12_content_level_403_via_proxy_still_hijack(self):
+        # P2-1 反向锚点：内容层异常（经代理 403、直连可见目标版本）仍判
+        # 「内容劫持（实证）」——分层归因不得把真劫持弱化成连接失败。
+        index = self.start_index(
+            f'<a href="../../packages/qwen_asr-{V}-py3-none-any.whl#sha256=abc">'
+            f'qwen_asr-{V}-py3-none-any.whl</a>')
+        self.addCleanup(index.shutdown)
+
+        class Proxy403(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'Forbidden'
+                self.send_response(403)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        proxy = ThreadingHTTPServer(('127.0.0.1', 0), Proxy403)
+        threading.Thread(target=proxy.serve_forever, daemon=True).start()
+        self.addCleanup(proxy.shutdown)
+        err = self.write_stderr(
+            f'ERROR: Could not find a version that satisfies the requirement '
+            f'qwen-asr=={V} (from versions: none)\n'
+            f'ERROR: No matching distribution found for qwen-asr=={V}')
+        result = self.run_probe('--analyze', err,
+                                '--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V, '--stage', 'deps',
+                                http_proxy=f'http://127.0.0.1:{proxy.server_port}')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        out = result.stdout
+        self.assertIn('▶ 分类：代理类 —— 内容劫持（实证）', out)
+        self.assertIn('内容级', out)
+        self.assertNotIn('代理不可达/连接失败', out)
 
     def test_s10_netprobe_documents_pip_conf_isolation(self):
         # 代理来源是 pip.conf/PIP_PROXY 而非环境变量：net-probe 必须说明这些

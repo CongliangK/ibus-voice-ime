@@ -31,7 +31,8 @@ PROXY_ARGS=() INIT_ARGS=() WIZARD_ARGS=()
 INIT_LOG=""
 WIZARD_RESULT="" WIZARD_OWNED_RESULT="" HOTKEYS_CHANGED="未改动（跳过向导）" VOICE_CHANGED=0
 LLM_SUMMARY="未改动（跳过向导）"
-# pip 包源向导值：official/tsinghua/absent（题目未出现，如云端/仅键盘方案）。
+# pip 包源向导值：official/tsinghua/custom（回车保持用户显式设置的自定义 URL）/
+# absent（题目未出现，如云端/仅键盘方案）。
 PIP_INDEX="absent"
 VOICE_PLAN=local-qwen
 QWEN_SIZES="${VOICE_IME_QWEN_ASR_SIZES-0.6B 1.7B}"
@@ -211,7 +212,9 @@ def preview():
     if 'postprocess' not in r or (r['postprocess'] is not None and type(r['postprocess']) is not bool):
         raise ValueError('postprocess 字段非法：必须为布尔值或 null')
     # pip 包源：仅本地 Qwen 方案出现该题（键可缺省=云端/仅键盘方案未提问）。
-    if 'pip_index' in r and r['pip_index'] not in ('tsinghua', 'official'):
+    # 三态当前值：official（default 哨兵）/ tsinghua（默认）/ custom（用户显式
+    # 设置的自定义 URL，回车/无人值守保持）。
+    if 'pip_index' in r and r['pip_index'] not in ('tsinghua', 'official', 'custom'):
         raise ValueError('pip_index 字段非法：pip 包源不合法')
     assets = field(r, 'assets', dict)
     for name in ('rime_ice', 'zhwiki', 'moegirl', 'denoise'):
@@ -292,11 +295,15 @@ PY
   # VOICE_IME_PIP_INDEX_URL=default 给 init.sh/语音验收/体检整条子进程链
   # （setup-qwen-asr.sh 尊重显式设置、绝不自动切回镜像）；tsinghua=显式选默认，
   # 清掉继承的旧覆盖（environment.d 持久行由 apply-wizard-config.py 清理）；
+  # custom=回车/无人值守保持用户显式设置的自定义 URL——完全不动该变量，
+  # 原样透传给 init.sh/setup-qwen-asr.sh（自定义包源属按次高级用法，向导与
+  # apply 均不代管：不注入、不 unset、不动持久化行）；
   # absent=题目未出现（云端/仅键盘），沿用现状不动环境（含用户自行 export 的值）。
   PIP_INDEX="${VALUES[6]}"
   case "$PIP_INDEX" in
     official) export VOICE_IME_PIP_INDEX_URL=default ;;
     tsinghua) unset VOICE_IME_PIP_INDEX_URL ;;
+    custom) ;;
     absent) ;;
     *) echo "错误：向导结果的 pip 包源不合法：$PIP_INDEX" >&2; exit 2 ;;
   esac

@@ -53,18 +53,19 @@ v = json.loads(sys.argv[1])
 for value in (v['voice_plan'], v['qwen_model'], v['hotkeys']['voice'],
               v['hotkeys']['raw'], v['hotkeys']['paste'],
               'null' if v['postprocess'] is None else ('y' if v['postprocess'] else 'n'),
-              v.get('pip_index', 'tsinghua')):
+              v.get('pip_index', 'tsinghua'), v.get('pip_index_url', '')):
     print(value)
 PY
 )
-[[ ${#VALUES[@]} -eq 7 ]] || { echo '错误：无法读取向导默认配置' >&2; exit 1; }
+[[ ${#VALUES[@]} -eq 8 ]] || { echo '错误：无法读取向导默认配置' >&2; exit 1; }
 VOICE_PLAN="${VALUES[0]}" QWEN_MODEL="${VALUES[1]}"
 QWEN_DOWNLOAD="$QWEN_MODEL"
 VOICE_HOTKEY="${VALUES[2]}" RAW_HOTKEY="${VALUES[3]}" PASTE_HOTKEY="${VALUES[4]}"
 POSTPROCESS="${VALUES[5]}"
-# pip 包源当前值：official=官方 PyPI（对应哨兵 VOICE_IME_PIP_INDEX_URL=default），
-# tsinghua=清华镜像（默认，不设置任何环境覆盖）。
-PIP_INDEX="${VALUES[6]}"
+# pip 包源当前值三态：official=官方 PyPI（哨兵 VOICE_IME_PIP_INDEX_URL=default），
+# tsinghua=清华镜像（默认，未设置任何覆盖），custom=用户显式设置的自定义 URL
+# （进程环境优先、environment.d 持久行兜底；pip_index_url 为 custom 态展示用原始值）。
+PIP_INDEX="${VALUES[6]}" PIP_INDEX_URL="${VALUES[7]}"
 RIME=y ZHWIKI=y MOEGIRL=y DENOISE=y
 ANSWER=""
 # setup 与向导均捕获 stdout。菜单绘制用 stderr 对应的终端，索引仍写回
@@ -98,6 +99,7 @@ ask_choice() {
       n) label='关闭（n）' ;;
       tsinghua) label='清华镜像（默认）' ;;
       official) label='官方 PyPI（pypi.org）' ;;
+      custom) label="保持当前自定义 URL（${PIP_INDEX_URL:-当前环境自定义值}，回车保持）" ;;
       *) label="$selected" ;;
     esac
     labels+=("$label")
@@ -180,10 +182,16 @@ if [[ "$VOICE_PLAN" == local-qwen ]]; then
   done
   # pip 包源（Python 依赖下载）：有用户的代理会内容级劫持镜像请求导致安装失败，
   # 因此提供显式绕开镜像的官方 PyPI 选项；默认仍是清华镜像（与现状一致）。
-  if [[ -n "${VOICE_IME_PIP_INDEX_URL:-}" && "${VOICE_IME_PIP_INDEX_URL:-}" != default ]]; then
-    printf '注：环境已显式设置自定义包源 URL（%s）；本向导只提供镜像/官方两项，选择任一项都会作为本次安装的包源。\n' "$VOICE_IME_PIP_INDEX_URL" >&2
+  # custom 态（用户已显式设置自定义 URL，进程环境或 environment.d 持久行）作为
+  # 可见的第三种「当前值」呈现：菜单追加「保持当前自定义 URL」为回车默认项
+  # （原样透传给安装链，不折叠成清华），两项显式改选（清华/官方）不变——
+  # 显式改选按用户选择覆盖环境（tsinghua 清持久行 + setup 侧 unset）。
+  if [[ "$PIP_INDEX" == custom ]]; then
+    printf '注：当前已显式设置自定义包源 URL（%s）；回车/默认保持该值原样用于本次安装，显式选清华镜像或官方 PyPI 将覆盖它（含清除持久化行）。\n' "${PIP_INDEX_URL:-当前环境自定义值}" >&2
+    ask_choice 'pip 包源（Python 依赖下载）' custom tsinghua official custom
+  else
+    ask_choice 'pip 包源（Python 依赖下载）' "$PIP_INDEX" tsinghua official
   fi
-  ask_choice 'pip 包源（Python 依赖下载）' "$PIP_INDEX" tsinghua official
   PIP_INDEX="$ANSWER"
   if [[ "$PIP_INDEX" == official ]]; then
     printf '已选官方 PyPI：绕开镜像直用 pypi.org，通常需要代理——建议配合 --proxy http://127.0.0.1:7890 运行安装，或先 export http_proxy/https_proxy 代理变量。\n' >&2
