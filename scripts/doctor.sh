@@ -515,6 +515,248 @@ except Exception:
 PY
 }
 
+# ---------------------------- Qwen 配置解析链路快照（两个 FAIL 分支共用）--
+# 真实事故背景：environment.d 残留指向已删除旧克隆的 VOICE_IME_QWEN_ASR_* 路径
+# 键会压过 config.json 与仓库默认，用户/维护者为定位「哪一层在覆盖」花费数
+# 小时。此快照在 FAIL 时把三层事实一次打全：每层原值（空显示「（未设置）」）、
+# 目标存在性（test -e）与生效层归属（与 FAIL 消息里 runtime 实际解析出的路径
+# 逐层比对）。存在性/比较口径与 runtime 消费者一致：QWEN_ASR_PYTHON /
+# MODEL_PATH 先去首尾空白再展开前导 ~（qwen_asr_runtime.py _python()/
+# model_id() 是 strip() 后 expanduser()），MODELS_DIR 无 strip 语义维持原样；
+# 显示行始终保留原值。只读探测：grep
+# environment.d、systemctl --user show-environment、$PYTHON 只读解析 JSON；
+# 不写文件、不联网。set -uo pipefail 下所有探测失败只降级为「（无法读取）」
+# 或「否」，绝不中断体检，也不改动退出码与 FAILED_ITEMS。
+#   $1 = python | model（打印哪条链路）
+#   $2 = runtime 实际解析结果（即 $qwen_python / $model_dir；空 = 解析失败，
+#        此时跳过生效层标注与结论行）
+
+# 只读读取用户 config.json（VOICE_IME_CONFIG > XDG 默认，与 config.py 同址）
+# 的一个叶子键：$1 = 点分路径。stdout 打印键值 = 已设置；空输出 = 未设置；
+# exit 3 = 文件缺失/不可读/JSON 无效。刻意不 import config 模块——要展示
+# 的是「文件里写了什么」，而非 runtime 自愈后的有效值。
+_doctor_qwen_config_leaf() {
+  "$PYTHON" - "$1" 2>/dev/null <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+
+raw = os.environ.get("VOICE_IME_CONFIG", "").strip()
+if raw:
+    path = Path(raw).expanduser()
+else:
+    xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".config"
+    path = base / "ibus-voice-ime" / "config.json"
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    sys.exit(3)
+node = data
+for part in sys.argv[1].split("."):
+    if not isinstance(node, dict) or part not in node:
+        sys.exit(0)
+    node = node[part]
+if node is None:
+    sys.exit(0)
+if isinstance(node, bool):
+    node = "1" if node else "0"
+elif not isinstance(node, str):
+    node = str(node)
+print(str(node).strip())
+PYEOF
+}
+
+# 只读探测一个键在持久环境里的落点：environment.d（grep -lE 锚定
+# ^[[:space:]]*(export[[:space:]]+)?KEY= 赋值形态，于
+# ~/.config/environment.d/*.conf）与 systemd 用户环境（systemctl --user
+# show-environment）。引擎进程继承的是这两处，doctor 所在终端可能不同——
+# 即使当前终端没有该键，这里也要给出事实。输出一行「envd 事实<TAB>sysd
+# 事实」；任何失败静默为「否」，不中断。
+_doctor_qwen_env_probe() {
+  local key="$1" hit f files="" envd="否" sysd="否"
+  # 锚定到「行首可选空白 + 可选 export + 键 =」的赋值形态：未锚定的子串匹配
+  # 会把注释或 typo 键（如 VOICE_IME_QWEN_ASR_PYTHONN=）误报成「含此键」。
+  # 键均为合法标识符（无空格/ERE 元字符），内插进正则安全。
+  hit="$(grep -lE -- "^[[:space:]]*(export[[:space:]]+)?${key}=" "$HOME"/.config/environment.d/*.conf 2>/dev/null || true)"
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    files="${files:+$files、}$(basename "$f")"
+  done <<< "$hit"
+  [[ -n "$files" ]] && envd="是（$files）"
+  if systemctl --user show-environment 2>/dev/null | grep -q -- "^$key="; then
+    sysd="是"
+  fi
+  printf '%s\t%s\n' "$envd" "$sysd"
+}
+
+# 去除首尾空白：与 runtime 消费者对 VOICE_IME_QWEN_ASR_PYTHON /
+# VOICE_IME_QWEN_ASR_MODEL_PATH 的 str.strip() 同语义（bash [[:space:]]
+# 近似，与 env-sanitize.sh 的 bash 回退同款；实际残留场景是 ASCII 空格/
+# tab）。MODELS_DIR 等其余键的消费者不 strip，不得对它们使用。
+_doctor_qwen_strip_ws() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
+# 打印「[环境变量] 键 = 值」事实行及其持久环境落点括注。$3 非空 = 生效层。
+# 值原样打印（空显示「（未设置）」，不带 ✓/✗——不存在的路径才谈存在性）；
+# 存在性判定用 runtime 口径：上述两个 strip 键先去首尾空白再展开前导 ~
+# （strip 在 ~ 展开之前，与 _python()/model_id() 的顺序一致），否则值带
+# 尾随空白时会误报「✗ 不存在」——路径本身存在，只是空白不属于文件名。
+_doctor_qwen_chain_env_line() {
+  local key="$1" val="$2" eff="$3"
+  local probe_val="$val"
+  case "$key" in
+    VOICE_IME_QWEN_ASR_PYTHON|VOICE_IME_QWEN_ASR_MODEL_PATH)
+      probe_val="$(_doctor_qwen_strip_ws "$val")"
+      ;;
+  esac
+  local expanded="${probe_val/#\~/$HOME}" mark="" suffix=""
+  if [[ -n "$val" ]]; then
+    if [[ -z "$probe_val" ]]; then
+      mark="  （值仅含空白，运行时视为未设置）"
+    elif [[ -e "$expanded" ]]; then
+      mark="  ✓ 存在"
+      [[ "$probe_val" != "$val" ]] && mark="  ✓ 存在（值含首尾空白，运行时按去除空白后生效）"
+    else
+      mark="  ✗ 不存在"
+    fi
+  fi
+  [[ -n "$eff" ]] && suffix=" ← 生效层"
+  printf '           [环境变量] %s = %s%s%s\n' "$key" "${val:-（未设置）}" "$mark" "$suffix"
+  local envd="否" sysd="否"
+  IFS=$'\t' read -r envd sysd < <(_doctor_qwen_env_probe "$key") || true
+  [[ -z "${envd:-}" ]] && envd="否"
+  [[ -z "${sysd:-}" ]] && sysd="否"
+  if [[ -n "$val" ]]; then
+    printf '                      （environment.d 含此键：%s；systemd 用户环境含此键：%s——探测命令：grep -rn %s ~/.config/environment.d/ ; systemctl --user show-environment | grep -i qwen）\n' "$envd" "$sysd" "$key"
+  else
+    printf '                      （environment.d 含此键：%s；systemd 用户环境含此键：%s）\n' "$envd" "$sysd"
+  fi
+}
+
+_doctor_qwen_resolution_brief() {
+  local kind="$1" effective="${2:-}"
+  local env_key1 env_key2="" cfg_key default_path eff_layer="" alias_note="" alias_val="" cfg_alias_val=""
+  if [[ "$kind" == "python" ]]; then
+    env_key1="VOICE_IME_QWEN_ASR_PYTHON"
+    cfg_key="asr.qwen3.python"
+    default_path="$ROOT_DIR/.venv-qwen-asr/bin/python"
+  else
+    env_key1="VOICE_IME_QWEN_ASR_MODEL_PATH"
+    env_key2="VOICE_IME_QWEN_ASR_MODELS_DIR"
+    cfg_key="asr.qwen3.model_path"
+    # 分档口径与上方模型 FAIL 分支一致：MODEL 键（env > config）先定基调，
+    # 再以生效路径里的分档痕迹覆盖——生效路径才是事实。
+    alias_val="${VOICE_IME_QWEN_ASR_MODEL:-}"
+    if [[ -z "$alias_val" ]]; then
+      cfg_alias_val="$(_doctor_qwen_config_leaf asr.qwen3.model)" || cfg_alias_val=""
+      alias_val="$cfg_alias_val"
+    fi
+    alias_val="${alias_val:-1.7b}"
+    local qwen_size="1.7B"
+    case "$alias_val" in
+      *0.6*|*0_6*) qwen_size="0.6B" ;;
+      *1.7*) qwen_size="1.7B" ;;
+    esac
+    case "$effective" in
+      *0.6*|*0_6*) qwen_size="0.6B" ;;
+      *1.7*) qwen_size="1.7B" ;;
+    esac
+    default_path="$ROOT_DIR/vendor/models/qwen3-asr/Qwen3-ASR-$qwen_size"
+    if [[ -n "${VOICE_IME_QWEN_ASR_MODEL:-}" || -n "$cfg_alias_val" ]]; then
+      alias_note="（分档键生效值：$alias_val）"
+    fi
+  fi
+  # config.json 层：$PYTHON 不可用/文件不可读时显示「（无法读取）」，不崩溃。
+  local cfg_val="" cfg_rc=4
+  if command -v "$PYTHON" >/dev/null 2>&1; then
+    cfg_val="$(_doctor_qwen_config_leaf "$cfg_key")" && cfg_rc=0 || cfg_rc=$?
+  fi
+  local env_val1="${!env_key1:-}" env_val2=""
+  [[ -n "$env_key2" ]] && env_val2="${!env_key2:-}"
+  # 生效层归属（与 qwen_asr_runtime._python()/model_id() 的解析语义一致）：
+  # 环境层 strip 后原样生效、不做存在性检查（陈旧 env 路径会劫持）——env_key1
+  # 恒为两个 strip 键之一，比较先去首尾空白再展开 ~（与 runtime 同序），否则
+  # 值带尾随空白时会被错标到 config/默认层，与 runtime 真值（env 层劫持）相反；
+  # config 层的路径键带陈旧路径自愈——目标不存在时运行时按未配置回落，不会
+  # 成为生效层（_doctor_qwen_config_leaf 输出已 strip，比较口径一致）；模型
+  # 在默认层找不到本地目录时会回退为模型 ID（非绝对路径），仍归默认层。
+  if [[ -n "$effective" ]]; then
+    local env_probe1
+    env_probe1="$(_doctor_qwen_strip_ws "$env_val1")"
+    local exp1="${env_probe1/#\~/$HOME}" cfg_exp="${cfg_val/#\~/$HOME}"
+    if [[ -n "$env_probe1" && "${exp1%/}" == "${effective%/}" ]]; then
+      eff_layer="env"
+    elif [[ $cfg_rc -eq 0 && -n "$cfg_val" && -e "$cfg_exp" && "${cfg_exp%/}" == "${effective%/}" ]]; then
+      eff_layer="config"
+    elif [[ "$kind" == "python" && "$effective" == "$default_path" ]]; then
+      eff_layer="default"
+    elif [[ "$kind" == "model" && ( "$effective" == "$default_path" || "$effective" == "$ROOT_DIR"/vendor/models/qwen3-asr/* || "$effective" != /* ) ]]; then
+      eff_layer="default"
+    fi
+  fi
+  printf '         配置解析链路（优先级：环境变量 > config.json > 仓库默认）：\n'
+  local eff_env1=""
+  [[ "$eff_layer" == "env" ]] && eff_env1="1"
+  _doctor_qwen_chain_env_line "$env_key1" "$env_val1" "$eff_env1"
+  if [[ -n "$env_key2" ]]; then
+    # MODELS_DIR 只影响 setup 的 vendor 布局，runtime 的 model_id() 不读它，
+    # 因此永远不会是生效层——但残留时同样会误导排查，照打事实。
+    _doctor_qwen_chain_env_line "$env_key2" "$env_val2" ""
+  fi
+  local cfg_disp="（无法读取）" cfg_mark="" cfg_suffix=""
+  if [[ $cfg_rc -eq 0 ]]; then
+    if [[ -n "$cfg_val" ]]; then
+      cfg_disp="$cfg_val"
+      local cfg_exp2="${cfg_val/#\~/$HOME}"
+      if [[ -e "$cfg_exp2" ]]; then cfg_mark="  ✓ 存在"; else cfg_mark="  ✗ 不存在"; fi
+    else
+      cfg_disp="（未设置）"
+    fi
+  fi
+  [[ "$eff_layer" == "config" ]] && cfg_suffix=" ← 生效层"
+  printf '           [config.json] %s = %s%s%s\n' "$cfg_key" "$cfg_disp" "$cfg_mark" "$cfg_suffix"
+  if [[ $cfg_rc -eq 0 && -n "$cfg_val" && "$cfg_mark" == "  ✗ 不存在" && "$eff_layer" != "config" ]]; then
+    printf '                      （该路径不存在：运行时按「陈旧路径自愈」视为未配置并回落下一层——config 层的路径键不会像环境变量一样劫持生效值）\n'
+  fi
+  local def_mark="  ✗ 不存在"
+  [[ -e "$default_path" ]] && def_mark="  ✓ 存在"
+  local def_suffix=""
+  [[ "$eff_layer" == "default" ]] && def_suffix=" ← 生效层"
+  printf '           [仓库默认] %s%s%s%s\n' "$default_path" "$def_mark" "$def_suffix" "$alias_note"
+  # 结论行只在拿到 runtime 解析事实（$2 非空）且能归属到某一层时输出；解析
+  # 失败时只呈现三层事实，不下结论。
+  if [[ -n "$effective" && -n "$eff_layer" ]]; then
+    local layer_desc eff_state tail
+    case "$eff_layer" in
+      env) layer_desc="环境变量层" ;;
+      config) layer_desc="config.json 层" ;;
+      *) layer_desc="仓库默认层" ;;
+    esac
+    eff_state="目标不存在"
+    if [[ -e "$effective" ]]; then
+      if [[ "$kind" == "python" ]]; then
+        eff_state="目标存在但不可执行"
+      else
+        eff_state="目标存在但不是模型目录"
+      fi
+    fi
+    tail="生效值来自${layer_desc}且${eff_state}"
+    if [[ "$eff_layer" == "default" ]]; then
+      if [[ "$kind" == "model" && "$effective" != /* ]]; then
+        tail="生效值来自仓库默认层，默认 vendor 目录不存在（运行时回退为模型 ID ${effective}）"
+      fi
+    elif [[ -e "$default_path" ]]; then
+      tail="${tail}；默认层反而是就绪的"
+    else
+      tail="${tail}；默认层同样缺失"
+    fi
+    printf '           → 结论：%s。修复见上方指引\n' "$tail"
+  fi
+}
+
 # ------------------------------------------------------------ 语音后端 --
 check_asr_backend() {
   header "语音后端（当前：$(current_asr_backend)）"
@@ -569,6 +811,9 @@ check_asr_backend() {
             printf '         修复：删除该键，或运行 ./scripts/switch-qwen-asr.sh 1.7b 重写为本仓库路径\n'
           fi
         fi
+        # 三层事实快照（env > config.json > 仓库默认）：消灭「哪一层在覆盖」的
+        # 猜测；只读探测，不改动退出码与 FAILED_ITEMS。
+        _doctor_qwen_resolution_brief python "$qwen_python"
         have_venv=0
       fi
       local model_dir
@@ -579,14 +824,177 @@ check_asr_backend() {
         ok "Qwen3-ASR 模型就绪（$model_dir）"
       else
         fail "Qwen3-ASR 模型缺失（$model_dir）"
-        if [[ "$model_dir" == /* && "$model_dir" != "$ROOT_DIR"/* && ! -d "$model_dir" ]]; then
+        # FAIL 分流：先区分「旧路径劫持」与「模型确实没就绪」，后者再细分
+        # 「未下载 / 下载中断 / 断链」，直接回答用户最困惑的「模型到底下载了
+        # 没有」。探测只用只读手段（ls/test/readlink/python3 只读解析 JSON），
+        # 不下载、不写文件、不联网。
+        if [[ "$model_dir" == /* && "$model_dir" != "$ROOT_DIR"/* ]]; then
+          # 分流 1：生效路径在仓库外且不存在 → 旧克隆/旧安装的显式覆盖残留。
+          # 删目录、重装本仓库都修不好，必须指出是哪一层在覆盖。
+          printf '         该路径不在当前仓库（%s）内，且不是存在的模型目录（多为已删除的旧克隆）：这是旧克隆/旧安装留下的显式覆盖，重装本仓库修不好。\n' "$ROOT_DIR"
           if [[ -n "${VOICE_IME_QWEN_ASR_MODEL_PATH:-}" ]]; then
-            printf '         来源：环境变量 VOICE_IME_QWEN_ASR_MODEL_PATH（environment.d / systemd 用户环境残留，压过 config.json 与共享缓存）\n'
-            printf '         修复：运行 ./install.sh 自动清除该行后重开终端/重新登录；模型本体仍可从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+            printf '         来源：环境变量 VOICE_IME_QWEN_ASR_MODEL_PATH（继承自 environment.d 或 systemd 用户环境，优先于 config.json 与仓库默认）\n'
+            printf '         排查：grep -rn "VOICE_IME_QWEN_ASR_MODEL" ~/.config/environment.d/ 2>/dev/null ; systemctl --user show-environment | grep -i qwen || true\n'
+            printf '         修复：运行 ./install.sh（自动清除指向已消失路径的行）后重新登录；或手动删除 environment.d 中的对应行并执行 systemctl --user unset-environment VOICE_IME_QWEN_ASR_MODEL_PATH\n'
+          elif [[ -n "${VOICE_IME_QWEN_ASR_MODELS_DIR:-}" && "$model_dir" == "${VOICE_IME_QWEN_ASR_MODELS_DIR%/}"/* ]]; then
+            printf '         来源：环境变量 VOICE_IME_QWEN_ASR_MODELS_DIR（目录级覆盖，environment.d / systemd 用户环境残留，压过 config.json 与仓库默认）\n'
+            printf '         排查：grep -rn "VOICE_IME_QWEN_ASR_MODELS_DIR" ~/.config/environment.d/ 2>/dev/null ; systemctl --user show-environment | grep -i qwen || true\n'
+            printf '         修复：运行 ./install.sh（自动清除指向已消失路径的行）后重新登录；或手动删除 environment.d 中的对应行并执行 systemctl --user unset-environment VOICE_IME_QWEN_ASR_MODELS_DIR\n'
           else
-            printf '         来源：config.json 的 asr.qwen3.model_path 键；删除该键或运行 ./scripts/switch-qwen-asr.sh 1.7b 后，模型会从共享缓存（~/.cache/ibus-voice-ime/models）重建链接，无需重新下载\n'
+            printf '         来源：用户配置 ~/.config/ibus-voice-ime/config.json 的 asr.qwen3.model_path 键\n'
+            printf '         排查：grep -n "model_path" ~/.config/ibus-voice-ime/config.json || true\n'
+            printf '         修复：删除该键，或运行 ./scripts/switch-qwen-asr.sh 1.7b 重写为本仓库路径。是否需要重新下载以共享缓存实况为准：运行 ./scripts/setup-qwen-asr.sh，缓存完整的分档只重建链接、不重复下载\n'
+          fi
+        else
+          # 分流 2/3：生效路径就是本仓库默认 vendor 路径（或 vendor 缺失时回退
+          # 为模型 ID）→ 检查共享缓存对应分档，直接报告「下载了没有」的事实。
+          local qwen_size="1.7B" qwen_cache qwen_entry qwen_vendor qwen_gb="4.4GB"
+          case "${VOICE_IME_QWEN_ASR_MODEL:-1.7b}" in
+            *0.6*|*0_6*) qwen_size="0.6B" ;;
+            *1.7*) qwen_size="1.7B" ;;
+          esac
+          case "$model_dir" in
+            *0.6*|*0_6*) qwen_size="0.6B" ;;
+            *1.7*) qwen_size="1.7B" ;;
+          esac
+          [[ "$qwen_size" == "0.6B" ]] && qwen_gb="1.8GB"
+          qwen_cache="${VOICE_IME_MODEL_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/ibus-voice-ime/models}"
+          qwen_entry="$qwen_cache/Qwen3-ASR-$qwen_size"
+          qwen_vendor="$ROOT_DIR/vendor/models/qwen3-asr/Qwen3-ASR-$qwen_size"
+          # 共享缓存实况报告（断链/未下载/分档存在三分支共用，只读探测）：
+          #   ① 缓存根或分档内有 .part-* 残留临时目录 → 「上次下载中断」。下载
+          #      先落缓存根的 .part-* 临时目录、成功后才定稿为分档目录，所以
+          #      分档不存在时也必须探测缓存根残留，否则中断会被误判成「从未下载」。
+          #   ② 分档不存在且无残留 → 「从未下载」，给完整下载指引。
+          #   ③ 分档存在 → 三态完整性：
+          #      complete     = 解析 index.json 的 weight_map，逐个验证引用的分片
+          #                    名真实存在且非空（与 qwen_preflight.validate_model
+          #                    同口径）——数量相等但文件名对不上不算完整，只有
+          #                    complete 才承诺「重建链接，不重新下载」；
+          #      incomplete   = 明确缺文件（config.json / index 引用的某个分片名
+          #                    缺失或为空 / 目录里一个 *.safetensors 都没有）；
+          #      unverifiable = index.json 缺失/不可解析或 python3 不可用 → 保守
+          #                    报「无法核实完整性，重跑 setup 会校验/补齐」，不宣称齐全。
+          _doctor_qwen_cache_brief() {
+            local cache="$1" entry="$2" size="$3" gb="$4"
+            local part=""
+            part="$(ls -d "$cache"/.part-* 2>/dev/null | head -n 1 || true)"
+            [[ -n "$part" ]] || part="$(ls -d "$entry"/.part-* 2>/dev/null | head -n 1 || true)"
+            if [[ -n "$part" ]]; then
+              if [[ -e "$entry" ]]; then
+                printf '         上次下载中断：缓存 %s 内有残留临时目录（%s）。重跑 cd %s && ./scripts/setup-qwen-asr.sh 可续装/补齐，已完成的分片不重复下载\n' "$cache" "$part" "$ROOT_DIR"
+              else
+                printf '         上次下载中断：缓存 %s 内只有残留临时目录（%s），尚无最终 Qwen3-ASR-%s 分档。重跑 cd %s && ./scripts/setup-qwen-asr.sh 可续装\n' "$cache" "$part" "$size" "$ROOT_DIR"
+              fi
+              return 0
+            fi
+            if [[ ! -e "$entry" ]]; then
+              printf '         模型从未下载（或缓存被删）：共享缓存 %s 中没有 Qwen3-ASR-%s 分档，也无 .part-* 残留临时目录\n' "$cache" "$size"
+              printf '         修复：cd %s && ./scripts/setup-qwen-asr.sh（完整下载约 %s；已有缓存的其他分档不受影响）\n' "$ROOT_DIR" "$gb"
+              return 0
+            fi
+            local verdict="" state detail
+            verdict="$("$PYTHON" - "$entry" 2>/dev/null <<'PYEOF' || true
+import json, sys
+from pathlib import Path
+
+entry = Path(sys.argv[1])
+
+def emit(state, detail):
+    print(state + "\t" + detail)
+
+config = entry / "config.json"
+if not config.is_file():
+    emit("incomplete", "缺 config.json")
+    raise SystemExit(0)
+try:
+    json.loads(config.read_text())
+except Exception:
+    emit("incomplete", "config.json 存在但不可解析")
+    raise SystemExit(0)
+
+def has_any_shard():
+    for candidate in entry.glob("*.safetensors"):
+        if candidate.is_file():
+            return True
+    return False
+
+index = entry / "model.safetensors.index.json"
+shards = None
+if index.is_file():
+    try:
+        data = json.loads(index.read_text())
+        weights = data.get("weight_map") if isinstance(data, dict) else None
+        if (isinstance(weights, dict) and weights
+                and all(isinstance(v, str) for v in weights.values())):
+            shards = sorted(set(weights.values()))
+    except Exception:
+        shards = None
+if shards is None:
+    # index.json 缺失/不可解析/weight_map 无效 → 保守口径，绝不宣称齐全
+    if has_any_shard():
+        emit("unverifiable", "index.json 缺失或不可解析，无法按分片名核实")
+    else:
+        emit("incomplete", "无有效 index.json，且目录内没有任何 *.safetensors 权重")
+    raise SystemExit(0)
+
+missing = []
+for name in shards:
+    ok = bool(name) and "/" not in name and not name.startswith(".")
+    if ok:
+        try:
+            ok = (entry / name).is_file() and (entry / name).stat().st_size > 0
+        except Exception:
+            ok = False
+    if not ok:
+        missing.append(name)
+if missing:
+    shown = ", ".join(missing[:3])
+    if len(missing) > 3:
+        shown += " 等共 %d 个" % len(missing)
+    emit("incomplete", "index.json 引用的权重分片缺失/为空：" + shown)
+else:
+    emit("complete", "config.json 与 index.json 引用的全部 %d 个权重分片齐全" % len(shards))
+PYEOF
+)"
+            if [[ -z "$verdict" || "$verdict" != *$'\t'* ]]; then
+              # python3 不可用（或校验输出异常）→ 降级为保守 shell 判据：config +
+              # 至少一个 *.safetensors 只能算「无法核实」，绝不按数量宣称齐全。
+              if [[ -f "$entry/config.json" ]] && ls "$entry"/*.safetensors >/dev/null 2>&1; then
+                verdict=$'unverifiable\tpython3 不可用，无法解析 index.json 按分片名核实'
+              else
+                verdict=$'incomplete\t缺 config.json 或权重分片（python3 不可用，无法进一步核实）'
+              fi
+            fi
+            state="${verdict%%$'\t'*}"
+            detail="${verdict#*$'\t'}"
+            case "$state" in
+              complete)
+                printf '         模型已在缓存：%s（%s），只是 vendor 链接/目录缺失——运行 cd %s && ./scripts/setup-qwen-asr.sh 重建链接即可，不重新下载\n' "$entry" "$detail" "$ROOT_DIR"
+                ;;
+              incomplete)
+                printf '         缓存存在但不完整：%s（%s）。重跑 cd %s && ./scripts/setup-qwen-asr.sh 可续装/补齐，已完成的分片不重复下载\n' "$entry" "$detail" "$ROOT_DIR"
+                ;;
+              *)
+                printf '         缓存存在但无法核实完整性：%s（%s）。重跑 cd %s && ./scripts/setup-qwen-asr.sh 会校验并补齐缺失分片\n' "$entry" "$detail" "$ROOT_DIR"
+                ;;
+            esac
+          }
+          if [[ -L "$qwen_vendor" && ! -e "$qwen_vendor" ]]; then
+            # 分流 3：vendor 是符号链接但目标不存在 → 断链 + 缓存实况。完整性
+            # 判据与「分档存在」分支共用同一函数：只有核实完整才承诺「重建
+            # 链接，不重新下载」，不完整/无法核实只说「重跑会续装/校验补齐」。
+            printf '         符号链接断链：%s -> %s（目标已不存在）\n' "$qwen_vendor" "$(readlink "$qwen_vendor" 2>/dev/null || echo '?')"
+            _doctor_qwen_cache_brief "$qwen_cache" "$qwen_entry" "$qwen_size" "$qwen_gb"
+          else
+            # 分流 2（分档不存在）与「分档存在但缺链接/不完整」：同一报告函数
+            # 统一输出缓存实况（中断残留 → 从未下载 → 三态完整性）。
+            _doctor_qwen_cache_brief "$qwen_cache" "$qwen_entry" "$qwen_size" "$qwen_gb"
           fi
         fi
+        # 三层事实快照（env MODEL_PATH/MODELS_DIR > config.json > 仓库默认）：
+        # 与解释器 FAIL 同款，模型存在性只用 test -e，不重复完整性探测。
+        _doctor_qwen_resolution_brief model "$model_dir"
         have_model=0
       fi
       if [[ $have_venv -eq 1 ]]; then
