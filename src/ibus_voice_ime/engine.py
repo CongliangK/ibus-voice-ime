@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import traceback
+import weakref
 from pathlib import Path
 
 try:
@@ -149,6 +150,49 @@ def log_error(message: str) -> None:
 
 
 _FOCUSED_ENGINE = None
+# 存活实例登记表与最近可用实例：Electron/Chromium（如 ChatGPT 桌面版）会频繁
+# 销毁输入上下文，daemon 随之拆掉引擎实例的总线连接，但 Python 对象仍被
+# _FOCUSED_ENGINE/_VOICE_OWNER 引用成"僵尸"——IPC 热键投给它后录音链路照跑、
+# commit/弹窗信号全部 connection==NULL 失败（2026-10-15 报障）。分发时优先
+# 选择连接仍存活的实例；_FOCUSED_ENGINE 保留为兜底，避免重蹈历史上对
+# get_connection()==None 误杀浏览器提交路径的覆辙。
+_ENGINE_INSTANCES: "weakref.WeakSet" = weakref.WeakSet()
+# 被 daemon 销毁的实例墓园（强引用）：系统 librime 1.14 的 ConcreteEngine
+# 析构在 IBus 引擎退出路径上会 SEGV（2026-10-15 coredump 实证），GC 回收
+# 僵尸实例会连带拆除其 Rime 会话并崩掉整个引擎进程。墓园只阻止 GC 回收，
+# 实例仍从 WeakSet/路由全局中移除，不再接收任何投递。
+_ENGINE_GRAVEYARD: "list[VoiceCustomEngine]" = []
+_LAST_LIVE_ENGINE: "VoiceCustomEngine | None" = None
+
+
+def _engine_has_live_connection(engine: "VoiceCustomEngine | None") -> bool:
+    try:
+        return engine is not None and engine.get_connection() is not None
+    except Exception:
+        return False
+
+
+def _pick_ipc_target() -> "VoiceCustomEngine | None":
+    """Choose the engine instance an IPC command should be routed to.
+
+    Prefer the focused instance when its bus connection is alive; otherwise
+    fall back to the most recently seen live instance (focus churn may leave
+    _FOCUSED_ENGINE pointing at a daemon-destroyed zombie whose signals all
+    fail). As a last resort keep the legacy focused-instance behavior.
+    """
+    focused = _FOCUSED_ENGINE
+    if _engine_has_live_connection(focused):
+        return focused
+    live = _LAST_LIVE_ENGINE if _engine_has_live_connection(_LAST_LIVE_ENGINE) else None
+    if live is None:
+        for candidate in list(_ENGINE_INSTANCES):
+            if _engine_has_live_connection(candidate):
+                live = candidate
+                break
+    if live is not None:
+        log_error("IPC 分发：焦点引擎连接已断（疑似被销毁的僵尸实例），改投到存活引擎实例")
+        return live
+    return focused
 # 进程级语音录音所有权：IBus 为每个输入上下文创建独立引擎实例，而语音状态
 # （_voice_state/_audio_session）存在实例上。焦点切换（悬浮窗抢焦点、应用切换）
 # 会让停止热键落在一个新建的空闲实例上——它不知道有录音在跑，会把"停止"误判
@@ -267,7 +311,7 @@ def _serve_ipc_connection(conn) -> None:
     # 注意：此处的局部变量 raw 是接收到的 IPC 命令文本，与「原文语音输入」
     # （raw 模式）只是同名；raw 模式命令是下面的 "toggle-raw" / "voice-raw"。
     raw = conn.recv(128).decode("utf-8", "ignore").strip().lower()
-    target = _FOCUSED_ENGINE
+    target = _pick_ipc_target()
     if raw in {"", "toggle", "hotkey", "voice"}:
         if not _engine_can_receive_ipc(target):
             log_error(f"IPC 语音请求失败：没有可用焦点引擎 command={raw!r}")
@@ -380,6 +424,7 @@ class VoiceCustomEngine(IBus.Engine):
         if hasattr(IBus.Engine.props, "has_focus_id"):
             kwargs["has_focus_id"] = True
         super().__init__(**kwargs)
+        _ENGINE_INSTANCES.add(self)
         # 不在此设置 _FOCUSED_ENGINE：新实例未必持有焦点，无条件劫持会让 IPC
         # 热键分发给"最新的空闲实例"而不是真正有焦点的实例（配合悬浮窗抢焦点
         # 的实例切换，曾把 toggle 停止变成叠新录音）。焦点归属由 do_focus_in /
@@ -618,8 +663,29 @@ class VoiceCustomEngine(IBus.Engine):
         self._clear()
 
     def do_focus_in(self) -> None:
-        global _FOCUSED_ENGINE
+        global _FOCUSED_ENGINE, _LAST_LIVE_ENGINE
         _FOCUSED_ENGINE = self
+        if _engine_has_live_connection(self):
+            _LAST_LIVE_ENGINE = self
+
+    def do_destroy(self) -> None:
+        # ibus-daemon 销毁本实例（如 Electron 应用拆除输入上下文）时清理全局
+        # 引用，避免 _FOCUSED_ENGINE/_VOICE_OWNER 长期指向信号必失败的僵尸。
+        global _FOCUSED_ENGINE, _VOICE_OWNER, _LAST_LIVE_ENGINE
+        if _FOCUSED_ENGINE is self:
+            _FOCUSED_ENGINE = None
+        if _VOICE_OWNER is self:
+            _VOICE_OWNER = None
+        if _LAST_LIVE_ENGINE is self:
+            _LAST_LIVE_ENGINE = None
+        _ENGINE_INSTANCES.discard(self)
+        # 持有强引用阻止 GC 回收：librime 会话析构链在该路径上会段错误
+        # （见墓园注释），宁可泄漏少量内存也不能崩引擎进程。
+        _ENGINE_GRAVEYARD.append(self)
+        try:
+            IBus.Engine.do_destroy(self)
+        except Exception:
+            pass
 
     def do_focus_out(self) -> None:
         # Keep _FOCUSED_ENGINE as the last active engine.  The GNOME custom
@@ -1661,7 +1727,13 @@ def main() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, sig, lambda *_: (app.loop.quit(), False)[1])
     app.run()
-    return 0
+    # 系统 librime 1.14 在 libc exit handlers 里的 Service 全局清理会段错误
+    # （2026-10-15 两次 coredump：进程退出路径 ConcreteEngine/Filter 析构
+    # SEGV）。引擎进程退出时没有需要善后的持久状态，直接 _exit 跳过所有
+    # 全局析构，避免每次退出都产生 coredump。
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
