@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ibus_voice_ime import config
-from ibus_voice_ime.log_trim import trim_to_last_lines
+from ibus_voice_ime.log_trim import keep_lines_from_env
 from ibus_voice_ime.memory import voice_terms
 from ibus_voice_ime.asr.qwen_diagnostics import classify_error, error_detail
 
@@ -219,7 +219,12 @@ def _log(message: str) -> None:
 def _log_tail(log_file: Path, lines: int = 15) -> str:
     """最后几行日志，用于把失败原因带进用户可见的错误信息。"""
     try:
-        content = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        # A native dependency can emit an arbitrarily long unterminated line.
+        # Failure reporting must not load that entire file into the engine.
+        with log_file.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - 65536))
+            content = source.read(65536).decode("utf-8", errors="replace").splitlines()
         return "\n".join(content[-lines:]).strip()
     except Exception:
         return ""
@@ -384,7 +389,6 @@ def _ensure_server_locked() -> str:
             "请运行 ./scripts/setup-qwen-asr.sh 重建隔离环境；不会回退系统 Python。"
         )
     log_dir.mkdir(parents=True, exist_ok=True)
-    trim_to_last_lines(log_file)  # 日志保留：spawn 前裁剪到最近 N 行
     cmd = [
         _python(),
         str(Path(__file__).resolve().parent / "qwen_asr_server.py"),
@@ -393,18 +397,18 @@ def _ensure_server_locked() -> str:
         "--port", str(_port()),
     ]
     _log("ASR starting Qwen3-ASR sidecar: " + " ".join(shlex.quote(x) for x in cmd))
-    log = log_file.open("a", encoding="utf-8")
-    try:
-        _PROCESS = subprocess.Popen(  # noqa: S603 - local sidecar command
-            cmd,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            cwd=str(ROOT_DIR),
-            env=os.environ.copy(),
-            start_new_session=True,
-        )
-    finally:
-        log.close()  # 子进程持有 dup 出的 fd；父进程及时关闭，防反复 spawn 泄漏
+    # A detached supervisor owns the pipe and retention, so abrupt engine exit
+    # does not break the surviving sidecar's stdout. Its PID is our owned
+    # lifecycle handle; it forwards termination only to the child it started.
+    capture = Path(__file__).resolve().parent / "sidecar_capture.py"
+    _PROCESS = subprocess.Popen(  # noqa: S603 - local sidecar command
+        [_python(), str(capture), str(log_file), str(keep_lines_from_env()), *cmd],
+        stdout=subprocess.DEVNULL,
+        stderr=None,
+        cwd=str(ROOT_DIR),
+        env=os.environ.copy(),
+        start_new_session=True,
+    )
     _PROCESS_KEY = key
 
     deadline = time.monotonic() + timeout
@@ -479,10 +483,6 @@ def transcribe(wav_path: str) -> str:
         raise RuntimeError(_humanize_transcribe_error(500, body))
     if not isinstance(result.get("text"), str):
         raise RuntimeError("Qwen3-ASR 响应缺少有效 text 字段，不能当作空识别结果。")
-    # 日志保留：sidecar 常驻进程的日志只在 spawn 时裁剪，重负载长会话期间
-    # 由识别路径顺手兜底（廉价 stat，超阈值才重写）。
-    log_dir = Path(config.env_str("VOICE_IME_LOG_DIR", "~/.local/share/ibus-voice-ime")).expanduser()
-    trim_to_last_lines(log_dir / "qwen-asr-server.log")
     return str(result.get("text") or "").strip()
 
 
