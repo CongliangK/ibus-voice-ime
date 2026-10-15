@@ -152,17 +152,22 @@ if a[:2] == ['-m', 'pip']:
         # Index visibility probe; per-URL injection so the official-index probe
         # (fallback condition 3) can be failed independently of the mirror.
         versions = os.environ.get('FAKE_PIP_INDEX_VERSIONS_PYPI' if pypi else 'FAKE_PIP_INDEX_VERSIONS', '')
-        if os.environ.get('FAKE_PIP_INDEX_RC_PYPI' if pypi else 'FAKE_PIP_INDEX_RC') == '1':
+        if 'aliyun.com' in url:
+            versions = os.environ.get('FAKE_PIP_INDEX_VERSIONS_ALI', '0.0.1')
+        rc_key = ('FAKE_PIP_INDEX_RC_ALI' if 'aliyun.com' in url else
+                  'FAKE_PIP_INDEX_RC_PYPI' if pypi else 'FAKE_PIP_INDEX_RC')
+        if os.environ.get(rc_key) == '1':
             key = 'FAKE_PIP_INDEX_STDERR_PYPI' if pypi else 'FAKE_PIP_INDEX_STDERR'
             fallback_msg = 'ERROR: Could not fetch URL ' + url + ': connection error'
             print(os.environ.get(key, fallback_msg), file=sys.stderr)
             rc = 1
     elif '-r' in rest:
         fail_url = os.environ.get('FAKE_PIP_FAIL_URL', '')
-        if fail_url and fail_url in url:
+        if (fail_url and fail_url in url) or ('aliyun.com' in url and os.environ.get('FAKE_PIP_FAIL_ALI') == '1'):
             default = ('ERROR: Could not find a version that satisfies the requirement '
                        'qwen-asr=={V} (from versions: 0.0.1, 0.0.5)')
-            print(os.environ.get('FAKE_PIP_FAIL_STDERR', default), file=sys.stderr)
+            key = 'FAKE_PIP_FAIL_STDERR_ALI' if 'aliyun.com' in url else 'FAKE_PIP_FAIL_STDERR'
+            print(os.environ.get(key, os.environ.get('FAKE_PIP_FAIL_STDERR', default)), file=sys.stderr)
             rc = 1
     elif '--upgrade' in rest:
         if os.environ.get('FAKE_PIP_UPGRADE_FAIL') == '1':
@@ -322,6 +327,227 @@ if a == ['-V']: print('Python 3.{minor}.0')
         threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
 
+    def test_tuna_403_recovers_with_aliyun(self):
+        result = self.run_setup(
+            FAKE_PIP_FAIL_URL='tuna',
+            FAKE_PIP_FAIL_STDERR=f'ERROR: No matching distribution found for qwen-asr=={V} (from versions: none)',
+            FAKE_PIP_INDEX_RC='1',
+            FAKE_PIP_INDEX_STDERR='ERROR: No matching distribution found',
+            FAKE_URL_PROBE_KIND='http-error', FAKE_URL_PROBE_CODE='403',
+            FAKE_PIP_INDEX_VERSIONS_ALI=V)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installs = self.install_events()
+        self.assertEqual(len(installs), 2, installs)
+        self.assertIn(TUNA, installs[0])
+        self.assertIn('mirrors.aliyun.com', installs[1])
+        self.assertIn('换源重试成功', result.stdout)
+        self.assertNotIn('换源无效', result.stdout + result.stderr)
+        self.assertFalse(any(PYPI in e for e in self.events()))
+
+    def test_aliyun_install_failure_continues_to_official_once(self):
+        result = self.run_setup(
+            FAKE_PIP_FAIL_URL='tuna', FAKE_PIP_FAIL_ALI='1',
+            FAKE_PIP_INDEX_VERSIONS='0.0.1',
+            FAKE_PIP_INDEX_VERSIONS_ALI=V,
+            FAKE_PIP_INDEX_VERSIONS_PYPI=V)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        installs = self.install_events()
+        self.assertEqual(len(installs), 3, installs)
+        for entry, host in zip(installs, ('tuna.tsinghua.edu.cn', 'mirrors.aliyun.com', 'pypi.org')):
+            self.assertIn(host, entry)
+            self.assertIn('--index-url', entry)
+            self.assertNotIn('--extra-index-url', entry)
+        self.assertIn('pypi.org/simple', result.stdout)
+
+    def test_postrelease_not_accepted_as_exact_pinned_candidate(self):
+        result = self.run_setup(FAKE_PIP_FAIL_URL='tuna',
+                                FAKE_PIP_INDEX_VERSIONS_ALI=V + '.post1',
+                                FAKE_PIP_INDEX_VERSIONS_PYPI=V)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.install_events()), 2)
+        self.assertIn(PYPI, self.install_events()[-1])
+
+    def test_urllib_page_cannot_authorize_candidate_install(self):
+        # Both candidate pip calls return success with no version list. The fake
+        # raw-page probe advertises a link; this is diagnostic, not authorization.
+        result = self.run_setup(FAKE_PIP_FAIL_URL='tuna',
+                                FAKE_PIP_INDEX_VERSIONS_ALI='',
+                                FAKE_PIP_INDEX_VERSIONS_PYPI='',
+                                FAKE_URL_PROBE_KIND='visible')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.install_events()), 1)
+        self.assertIn('须 pip 同栈确认', result.stderr)
+
+    def test_candidate_hash_error_stops_before_official(self):
+        result = self.run_setup(
+            FAKE_PIP_FAIL_URL='tuna', FAKE_PIP_FAIL_ALI='1',
+            FAKE_PIP_INDEX_VERSIONS_ALI=V, FAKE_PIP_INDEX_VERSIONS_PYPI=V,
+            FAKE_PIP_FAIL_STDERR_ALI='ERROR: THESE PACKAGES DO NOT MATCH THE HASHES')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.install_events()), 2)
+        self.assertNotIn('activate', self.events())
+        self.assertFalse(any(PYPI in e for e in self.events()))
+        self.assertIn('停止自动换源', result.stderr)
+        self.assertIn('THESE PACKAGES DO NOT MATCH THE HASHES', result.stderr)
+
+    def test_download_403_or_timeout_recovers_even_when_index_visible(self):
+        for error in ('ERROR: HTTP error 403 while getting torch wheel',
+                      'ERROR: ReadTimeoutError: timed out downloading torch'):
+            with self.subTest(error=error):
+                before = len(self.install_events())
+                result = self.run_setup(FAKE_REUSE_RC='3', FAKE_PIP_FAIL_URL='tuna',
+                                        FAKE_PIP_FAIL_STDERR=error,
+                                        FAKE_PIP_INDEX_VERSIONS=V,
+                                        FAKE_PIP_INDEX_VERSIONS_ALI=V)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(self.install_events()) - before, 2)
+
+    def test_normal_python_filter_notice_does_not_block_recovery(self):
+        class MixedIndex(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = (b'<a href="/qwen_asr-0.0.1-py3-none-any.whl">old</a>'
+                        b'<a href="/qwen_asr-99.0-py3-none-any.whl" '
+                        b'data-requires-python="&gt;=99">future</a>')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        server = self.start_http(MixedIndex)
+        self.addCleanup(server.shutdown)
+        failure = subprocess.run(
+            [sys.executable, '-m', 'pip', '--isolated', '--disable-pip-version-check',
+             'install', '--dry-run', '--ignore-installed', '--no-deps', '--no-cache-dir',
+             '--retries', '0', '--index-url',
+             f'http://127.0.0.1:{server.server_port}/simple', f'qwen-asr=={V}'],
+            env=dict(self.env, PIP_CONFIG_FILE=os.devnull),
+            capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(failure.returncode, 0)
+        self.assertIn('Requires-Python', failure.stderr)
+        self.assertIn('No matching distribution', failure.stderr)
+        result = self.run_setup(
+            FAKE_PIP_FAIL_URL='tuna', FAKE_PIP_INDEX_VERSIONS_ALI=V,
+            FAKE_PIP_FAIL_STDERR=failure.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.install_events()), 2)
+
+    def test_real_pip_http_429_and_503_retry_exhaustion_recover(self):
+        # Real pip hits only a loopback index; the wheel GET returns a retryable
+        # status. Feed its unmodified stderr into the real installer state machine.
+        state = {'status': 503, 'wheel_hits': 0}
+        class RetryableWheel(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path.startswith('/simple/'):
+                    body = f'<a href="/qwen_asr-{V}-py3-none-any.whl">wheel</a>'.encode()
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/html')
+                else:
+                    state['wheel_hits'] += 1
+                    body = b'retry later'
+                    self.send_response(state['status'])
+                    if state['status'] == 429:
+                        self.send_header('Retry-After', '0')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        server = self.start_http(RetryableWheel)
+        self.addCleanup(server.shutdown)
+        for status in (429, 503):
+            with self.subTest(status=status):
+                state['status'] = status
+                failure = subprocess.run(
+                    [sys.executable, '-m', 'pip', '--isolated', '--disable-pip-version-check',
+                     'install', '--dry-run', '--ignore-installed', '--no-deps', '--no-cache-dir',
+                     '--retries', '0', '--timeout', '2', '--index-url',
+                     f'http://127.0.0.1:{server.server_port}/simple', f'qwen-asr=={V}'],
+                    env=dict(self.env, PIP_CONFIG_FILE=os.devnull),
+                    capture_output=True, text=True, timeout=20)
+                self.assertNotEqual(failure.returncode, 0)
+                if status == 503:
+                    self.assertIn('ResponseError', failure.stderr)
+                    self.assertIn('too many 503 error responses', failure.stderr)
+                else:
+                    # pip versions differ in whether 429 is retryable with total=0.
+                    self.assertRegex(failure.stderr, r'HTTP error 429|too many 429 error responses')
+                before = len(self.install_events())
+                result = self.run_setup(FAKE_REUSE_RC='3', FAKE_PIP_FAIL_URL='tuna',
+                                        FAKE_PIP_FAIL_STDERR=failure.stderr,
+                                        FAKE_PIP_INDEX_VERSIONS_ALI=V)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(self.install_events()) - before, 2)
+        self.assertEqual(state['wheel_hits'], 2)
+
+    def test_all_index_installs_fail_without_loop_or_activation(self):
+        result = self.run_setup(
+            FAKE_PIP_FAIL_URL='https://', FAKE_PIP_INDEX_VERSIONS=V,
+            FAKE_PIP_INDEX_VERSIONS_ALI=V, FAKE_PIP_INDEX_VERSIONS_PYPI=V)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(self.install_events()), 3)
+        self.assertNotIn('activate', self.events())
+        self.assertNotIn('download', self.events())
+        self.assertIn('最后安装源 ' + PYPI, result.stderr)
+
+    def test_non_network_failures_never_try_other_indexes(self):
+        for error in (
+            'ERROR: THESE PACKAGES DO NOT MATCH THE HASHES',
+            'ERROR: ResolutionImpossible: conflicting dependencies',
+            'ERROR: No space left on device',
+            'ERROR: Failed building wheel for native-package',
+            'ERROR: CERTIFICATE_VERIFY_FAILED',
+            "ERROR: Package 'qwen-asr' requires a different Python: 3.12 not in '>=99'\nERROR: No matching distribution found",
+            'ERROR: Missing dependencies for SOCKS support',
+            'ERROR: ProxyError: Cannot connect to proxy',
+        ):
+            with self.subTest(error=error):
+                before = len(self.install_events())
+                result = self.run_setup(FAKE_REUSE_RC='3', FAKE_PIP_FAIL_URL='tuna',
+                                        FAKE_PIP_FAIL_STDERR=error,
+                                        FAKE_PIP_INDEX_VERSIONS_ALI=V)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(self.install_events()) - before, 1)
+                self.assertNotIn('[候选源]', result.stderr)
+
+    def test_explicit_aliyun_supported_without_overriding_choice(self):
+        ali = 'https://mirrors.aliyun.com/pypi/simple'
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL=ali)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(ali, self.install_events()[0])
+        result = self.run_setup(VOICE_IME_PIP_INDEX_URL=ali,
+                                FAKE_REUSE_RC='1', FAKE_PIP_FAIL_URL='aliyun.com')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('绝不静默切换', result.stderr)
+        self.assertNotIn('[候选源]', result.stderr)
+
+    def test_direct_403_not_misdiagnosed_as_proxy_or_hijack(self):
+        class Denied(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = '抱歉，您目前无法访问此页面：您所在的网段近期向本站发送过异常请求'.encode()
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+        server = self.start_http(Denied)
+        self.addCleanup(server.shutdown)
+        err = self.root / 'stderr.txt'
+        err.write_text(f'ERROR: No matching distribution found for qwen-asr=={V} (from versions: none)')
+        result = subprocess.run(['bash', str(ROOT / 'scripts/net-probe.sh'),
+                                 '--analyze', str(err), '--index-url',
+                                 f'http://127.0.0.1:{server.server_port}/simple',
+                                 '--package', 'qwen-asr', '--version', V],
+                                env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('分类：索引访问异常', result.stdout)
+        self.assertIn('镜像风控/访问控制', result.stdout)
+        self.assertNotIn('分类：代理类', result.stdout)
+
     # ================================================================ scenario 1
     def test_s1_mirror_has_pinned_version_no_fallback(self):
         # 清华镜像（fake 索引 = fake venv pip 探测）正常且指定版本存在：
@@ -370,10 +596,10 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertIn(PYPI, installs[1])
         combined = result.stdout + result.stderr
         self.assertIn('受控回退', combined)
-        self.assertIn('决策原因', combined)
-        self.assertIn('探测确认索引页有效但缺该版本', combined)
+        self.assertIn('自动换源检查', combined)
+        self.assertIn('索引页有效但缺', combined)
         self.assertIn('重试一次', combined)
-        self.assertIn('官方源重试成功', combined)
+        self.assertIn('换源重试成功', combined)
 
     # ================================================================ scenario 4
     def test_s4a_mirror_and_official_unreachable_network_class_no_fallback(self):
@@ -386,12 +612,14 @@ if a == ['-V']: print('Python 3.{minor}.0')
         result = self.run_setup(
             FAKE_PIP_FAIL_URL='tuna',
             FAKE_PIP_FAIL_STDERR=conn + f'\nERROR: No matching distribution found for qwen-asr=={V} (from versions: none)',
-            FAKE_PIP_INDEX_RC='1', FAKE_PIP_INDEX_STDERR=conn)
+            FAKE_PIP_INDEX_RC='1', FAKE_PIP_INDEX_STDERR=conn,
+            FAKE_PIP_INDEX_RC_PYPI='1', FAKE_PIP_INDEX_STDERR_PYPI=conn)
         self.assertNotEqual(result.returncode, 0)
         combined = result.stdout + result.stderr
         self.assertEqual(len(self.install_events()), 1)
-        self.assertIn('未回退官方源', combined)
-        self.assertIn('换源无效', combined)
+        self.assertIn('自动恢复未完成', combined)
+        self.assertIn('未确认钉定版本可见', combined)
+        self.assertNotIn('换源无效', combined)
         self.assertIn('▶ 分类：网络连接类', combined)
         self.assertNotIn('受控回退：', combined)
 
@@ -410,8 +638,8 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertNotEqual(result.returncode, 0)
         combined = result.stdout + result.stderr
         self.assertEqual(len(self.install_events()), 1)
-        self.assertIn('官方源探测未确认', combined)
-        self.assertIn('回退无意义', combined)
+        self.assertIn('[候选源] ' + PYPI, combined)
+        self.assertIn('未确认钉定版本可见', combined)
         self.assertNotIn('受控回退：', combined)
 
     # ================================================================ scenario 5
@@ -457,7 +685,7 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.assertIn('不是包不存在，而是所有请求都经过这个不可用的代理', combined)
         self.assertIn('▶ 分类：代理类', combined)
         self.assertEqual(len(self.install_events()), 1)
-        self.assertIn('未回退官方源', combined)
+        self.assertIn('未自动换源', combined)
         self.assertNotIn('受控回退：', combined)
 
     # ================================================================ scenario 7
@@ -744,6 +972,46 @@ class NetProbeNetworkTest(unittest.TestCase):
         path.write_text(text)
         return str(path)
 
+    def test_standalone_proxy_403_not_asserted_as_hijack(self):
+        index = self.start_index(f'<a href="/qwen_asr-{V}-py3-none-any.whl">wheel</a>')
+        self.addCleanup(index.shutdown)
+        proxy = self.start_mock_proxy(403)
+        self.addCleanup(proxy.shutdown)
+        result = self.run_probe('--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V,
+                                http_proxy=f'http://127.0.0.1:{proxy.server_port}')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('代理路径响应不同', result.stdout)
+        self.assertIn('不能据此证明内容劫持', result.stdout)
+        self.assertNotIn('换镜像无效', result.stdout)
+
+    def test_proxy_comparison_not_silently_bypassed_by_no_proxy(self):
+        index = self.start_index(f'<a href="/qwen_asr-{V}-py3-none-any.whl">wheel</a>')
+        self.addCleanup(index.shutdown)
+        proxy = self.start_mock_proxy(403)
+        self.addCleanup(proxy.shutdown)
+        result = self.run_probe('--index-url', f'http://127.0.0.1:{index.server_port}/simple',
+                                '--package', 'qwen-asr', '--version', V,
+                                http_proxy=f'http://127.0.0.1:{proxy.server_port}', no_proxy='*')
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('HTTP 403', result.stdout)
+        self.assertIn('pip 实际可能绕过', result.stdout)
+        self.assertIn("--noproxy '' -x", result.stdout)
+
+    def test_ignored_python_and_yanked_notices_do_not_prove_incompatibility(self):
+        index = self.start_index(f'<a href="/qwen_asr-{V}-py3-none-any.whl">wheel</a>')
+        self.addCleanup(index.shutdown)
+        for notice in ('Ignored the following versions that require a different python version: 99 Requires-Python >=99',
+                       'Ignored the following yanked versions: 0.0.1'):
+            with self.subTest(notice=notice):
+                err = self.write_stderr(f'ERROR: {notice}\nERROR: No matching distribution found for qwen-asr=={V} (from versions: none)')
+                result = self.run_probe('--analyze', err, '--index-url',
+                                        f'http://127.0.0.1:{index.server_port}/simple',
+                                        '--package', 'qwen-asr', '--version', V)
+                self.assertEqual(result.returncode, 0)
+                self.assertNotIn('分类：兼容性类', result.stdout)
+                self.assertNotIn('忽略了全部候选', result.stdout)
+
     def test_s2_analyze_reachable_mirror_missing_version_classified(self):
         # 镜像可达（有效 simple 页）但缺指定版本：versions:none 主动探测确认
         # 后分类“包或版本不可用”（页面有效但缺目标版本，实证），建议换官方源。
@@ -824,8 +1092,9 @@ class NetProbeNetworkTest(unittest.TestCase):
                                 http_proxy=f'http://127.0.0.1:{proxy.server_port}')
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
-        self.assertIn('▶ 分类：代理类 —— 内容劫持（实证）', out)
-        self.assertIn('内容级', out)
+        self.assertIn('▶ 分类：索引访问异常 —— 代理路径响应不同（实证）', out)
+        self.assertIn('不能据此证明内容劫持', out)
+        self.assertIn('镜像拒绝代理出口 IP', out)
         self.assertNotIn('代理不可达/连接失败', out)
 
     def test_s13_via_proxy_5xx_gateway_error_not_content_hijack(self):
@@ -872,9 +1141,9 @@ class NetProbeNetworkTest(unittest.TestCase):
                                 http_proxy=f'http://127.0.0.1:{proxy.server_port}')
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
-        self.assertIn('代理网关错误/上游不可达', out)
+        self.assertIn('代理路径网关/上游错误', out)
         self.assertIn('HTTP 503', out)
-        self.assertIn('不是内容级吞掉', out)
+        self.assertIn('不能仅凭状态码定位故障方', out)
         self.assertNotIn('内容劫持', out)
 
     def test_s14_garbage_direct_with_dead_proxy_reports_proxy_facts(self):
@@ -893,11 +1162,11 @@ class NetProbeNetworkTest(unittest.TestCase):
                                 all_proxy='socks5://127.0.0.1:1')
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
-        self.assertIn('▶ 分类：代理类 —— 内容异常', out)
+        self.assertIn('▶ 分类：索引访问异常', out)
         self.assertIn('配置的代理（协议 socks5，来源 $all_proxy）', out)
         self.assertIn('经代理探测得 HTTP 000 / network-error', out)
-        self.assertIn('可能是透明劫持，也可能是代理故障', out)
-        self.assertIn('直连/经代理两条命令', out)
+        self.assertIn('可能是镜像访问控制/风控', out)
+        self.assertIn('不能仅凭状态码确定原因', out)
         self.assertNotIn('当前无代理变量', out)
 
     def test_s15_garbage_direct_without_proxy_keeps_original_wording(self):
@@ -914,9 +1183,10 @@ class NetProbeNetworkTest(unittest.TestCase):
                                 '--package', 'qwen-asr', '--version', V, '--stage', 'deps')
         self.assertEqual(result.returncode, 0, result.stderr)
         out = result.stdout
-        self.assertIn('▶ 分类：代理类 —— 内容异常', out)
-        self.assertIn('当前无代理变量——疑似透明劫持/网关拦截/captive portal', out)
-        self.assertIn('换网络或加可信代理后重跑', out)
+        self.assertIn('▶ 分类：索引访问异常', out)
+        self.assertIn('当前无代理变量', out)
+        self.assertIn('不能直接归因代理或劫持', out)
+        self.assertIn('mirrors.aliyun.com', out)
 
     def test_s10_netprobe_documents_pip_conf_isolation(self):
         # 代理来源是 pip.conf/PIP_PROXY 而非环境变量：net-probe 必须说明这些

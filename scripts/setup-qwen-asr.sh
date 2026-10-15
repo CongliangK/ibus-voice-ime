@@ -158,6 +158,7 @@ DEFAULT_MODEL_DIR="$MODELS_DIR/Qwen3-ASR-$( [[ "$DEFAULT_MODEL" == "1.7b" ]] && 
 # Single writer: init/doctor/manual installation must not mutate the same venv
 # concurrently. Kernel lock is released even on interruption; no stale PID file.
 command -v flock >/dev/null || { echo "缺少 flock（util-linux），无法安全串行安装。" >&2; exit 1; }
+command -v timeout >/dev/null || { echo "缺少 timeout（coreutils），无法限制包源探测耗时。" >&2; exit 1; }
 [[ ! -L "$ROOT_DIR/.qwen-asr-setup.lock" ]] || { echo "拒绝使用符号链接安装锁" >&2; exit 1; }
 exec 9>"$ROOT_DIR/.qwen-asr-setup.lock"
 flock -n 9 || { echo "另一个 Qwen 安装/修复正在运行，请等待完成。" >&2; exit 1; }
@@ -400,16 +401,20 @@ probe_result_label() {
 
 probe_index_visibility() {  # <index_url>
   local index_url="$1" out="" rc=0 pip_no_versions=0
-  PROBE_RESULT="unparseable"; PROBE_CERTAINTY="推断"; PROBE_NOTE=""
+  PROBE_RESULT="unparseable"; PROBE_CERTAINTY="推断"; PROBE_NOTE=""; PROBE_PIP_CONFIRMED=0
   # --retries 1 + timeout：探测要快，安装仍有自己的 --timeout 30 --retries 2。
-  out="$("$PY" -m pip --isolated index versions "$QWEN_ASR_PKG" --index-url "$index_url" --timeout 15 --retries 1 2>&1)" || rc=$?
+  out="$(timeout --kill-after=5s 45s "$PY" -m pip --isolated index versions "$QWEN_ASR_PKG" --index-url "$index_url" --timeout 15 --retries 1 2>&1)" || rc=$?
+  if [[ "$rc" == 124 || "$rc" == 137 ]]; then
+    PROBE_RESULT="conn-error"; PROBE_CERTAINTY="实证"; PROBE_NOTE="pip 元数据探测超过 45 秒总预算，已回收进程"; return 0
+  fi
   if [[ $rc -eq 0 ]]; then
     local versions_list
     versions_list="$(printf '%s\n' "$out" | sed -n 's/^Available versions: //p' | head -n1)"
     if [[ -n "$versions_list" ]]; then
       PROBE_CERTAINTY="实证"
-      if grep -qw "$QWEN_ASR_VERSION" <<<"$versions_list"; then
-        PROBE_RESULT="visible"
+      # Comma-delimited exact tokens: grep -w also matches 0.0.6.post1 for 0.0.6.
+      if [[ ",${versions_list// /}," == *",$QWEN_ASR_VERSION,"* ]]; then
+        PROBE_RESULT="visible"; PROBE_PIP_CONFIRMED=1
       else
         PROBE_RESULT="page-missing-version"
         PROBE_NOTE="索引可见版本：$versions_list"
@@ -434,7 +439,7 @@ probe_index_visibility() {  # <index_url>
   # simple 页原始响应。urllib 与 pip 同样 trust_env（getproxies 会带上 all_proxy），
   # 分类只描述“页面原始响应长什么样”，不冒充 pip 的解析结论。
   local probe_out="" kind="" code="" note=""
-  probe_out="$("$PY" - "$index_url" "$QWEN_ASR_PKG" "$QWEN_ASR_VERSION" <<'PY'
+  probe_out="$(timeout --kill-after=5s 20s "$PY" - "$index_url" "$QWEN_ASR_PKG" "$QWEN_ASR_VERSION" <<'PY'
 import re, sys, urllib.error, urllib.request
 index, pkg, ver = sys.argv[1], sys.argv[2], sys.argv[3]
 url = index.rstrip('/') + '/' + pkg + '/'
@@ -489,16 +494,11 @@ PY
 }
 
 FALLBACK_DECISION=""
-should_fallback_to_official() {
-  # 受控回退官方源的三条件（缺一不可，单次重试、不无限）：
-  # ① 本次索引是程序默认（VOICE_IME_PIP_INDEX_URL 未设置）——用户显式指定包源时
-  #    绝不静默切换，只打印建议命令；
-  # ② pip 失败签名为“版本不可用”：stderr 列出旧版本（真·镜像滞后专属签名），或
-  #    versions: none 且主动探测确认“页面有效缺版本 / 包不存在(404)”；
-  # ③ 官方 https://pypi.org/simple 探测确认目标版本可见。
-  # 探测为劫持/网络/SOCKS/TLS 类时不回退——那是代理问题，不是镜像问题，换源无效。
-  # VOICE_IME_PIP_INDEX_FALLBACK=0|off 可禁用（默认 auto）。模型权重下载源
-  # （modelscope）保持独立，不受此开关影响。
+should_try_next_index() {
+  # 仅程序默认源允许自动恢复：清华 → 阿里云 → 官方 PyPI。
+  # 每个候选源须独立确认钉定版本可见，且最多安装一次；不混用 extra-index。
+  # HTTP 拒绝/缺版本/连接失败可能只影响一个源，不能推断“换源无效”。
+  # 明确的代理配置、证书、哈希、解析、构建及本地环境错误不靠换源掩盖。
   FALLBACK_DECISION=""
   case "${VOICE_IME_PIP_INDEX_FALLBACK:-auto}" in
     0|off|no) FALLBACK_DECISION="回退已被 VOICE_IME_PIP_INDEX_FALLBACK=${VOICE_IME_PIP_INDEX_FALLBACK} 禁用"; return 1 ;;
@@ -510,26 +510,18 @@ should_fallback_to_official() {
   if [[ -z "$QWEN_ASR_VERSION" ]]; then
     FALLBACK_DECISION="未能从 requirements 解析钉定版本，无法做版本可见性判定"; return 1
   fi
-  local sig=""
-  if grep -qE 'from versions: *[0-9]' "$PIP_STDERR_FILE" 2>/dev/null; then
-    sig="stderr 列出旧版本（真·镜像滞后签名）"
-  elif grep -qiE 'No matching distribution|from versions: none' "$PIP_STDERR_FILE" 2>/dev/null; then
-    # versions: none 与“代理内容劫持/包不存在”同形：必须主动探测确认，不许猜。
-    probe_index_visibility "$PIP_INDEX_URL"
-    case "$PROBE_RESULT" in
-      page-missing-version) sig="versions: none + 探测确认索引页有效但缺该版本（$PROBE_CERTAINTY）" ;;
-      not-found)            sig="versions: none + 探测确认包不存在 404（$PROBE_CERTAINTY）" ;;
-      *) FALLBACK_DECISION="当前索引探测结论：“$(probe_result_label "$PROBE_RESULT")”（$PROBE_CERTAINTY）——属代理/网络/索引内容问题而非镜像缺版本，换源无效，不回退"; return 1 ;;
-    esac
-  else
-    FALLBACK_DECISION="pip 失败签名不是“版本不可用”类（网络/代理/解析等其他失败）"; return 1
+  if grep -qiE 'Missing dependencies for SOCKS support|ProxyError|Cannot connect to proxy|Tunnel connection failed|SSLError|CERTIFICATE_VERIFY_FAILED|certificate verify failed|THESE PACKAGES DO NOT MATCH THE HASHES|ResolutionImpossible|conflicting dependencies|No space left|Permission denied|Failed building wheel|subprocess-exited-with-error|ERROR: Package .+ requires a different Python|not a supported wheel' "$PIP_STDERR_FILE"; then
+    FALLBACK_DECISION="明确的代理/证书/完整性/兼容性/构建或本地环境错误，停止自动换源"; return 1
   fi
-  probe_index_visibility "$OFFICIAL_PIP_INDEX_URL"
-  if [[ "$PROBE_RESULT" != "visible" ]]; then
-    FALLBACK_DECISION="官方源探测未确认 $QWEN_ASR_PKG $QWEN_ASR_VERSION 可见（$(probe_result_label "$PROBE_RESULT")）——回退无意义，不回退"
-    return 1
+  if ! grep -qiE 'No matching distribution|from versions:|HTTP error (403|404|429|5[0-9][0-9])|403 (Client Error|Forbidden)|429 (Client Error|Too Many)|ConnectionError|NewConnectionError|ReadTimeout|ConnectTimeout|timed out|Could not fetch URL|Connection reset|Temporary failure in name resolution|ResponseError.*too many (429|5[0-9][0-9]) error responses' "$PIP_STDERR_FILE"; then
+    FALLBACK_DECISION="pip 失败未显示可换源恢复的索引/下载错误，保留原错误"; return 1
   fi
-  FALLBACK_DECISION="版本不可用（$sig）且官方源实证可见 $QWEN_ASR_PKG $QWEN_ASR_VERSION"
+  probe_index_visibility "$PIP_INDEX_URL"
+  case "$PROBE_RESULT" in
+    tls-error|socks-error)
+      FALLBACK_DECISION="当前索引探测为 $(probe_result_label "$PROBE_RESULT")，先修复安全连接/代理支持"; return 1 ;;
+  esac
+  FALLBACK_DECISION="当前源安装失败；探测结果：$(probe_result_label "$PROBE_RESULT")（$PROBE_CERTAINTY）；独立检查下一包源，不推断网络故障原因"
   return 0
 }
 
@@ -837,42 +829,50 @@ if [[ $REUSE -eq 0 ]]; then
     cat "$PIP_STDERR_FILE" >&2
     rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
   fi
-  # 依赖安装：失败时按“stderr 签名 + 主动探测”决定是否受控回退官方源重试一次。
+  # 依赖安装：默认清华失败时按“stderr 签名 + 候选源独立探测”顺序恢复。
   # 不放松版本约束、不忽略 pip 非零退出码；用户显式指定包源时绝不静默切换。
   PIP_STDERR_FILE="$(mktemp /tmp/qwen-asr-pip-stderr.XXXXXX)"
   if ! "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" --index-url "$PIP_INDEX_URL" --timeout 30 --retries 2 2>"$PIP_STDERR_FILE"; then
     cat "$PIP_STDERR_FILE" >&2
-    if should_fallback_to_official; then
-      echo "════════ 受控回退：当前镜像看不到目标版本，官方 PyPI 已实证可见 ════════" >&2
-      echo "  决策原因：$FALLBACK_DECISION" >&2
-      echo "  $PIP_INDEX_URL → $OFFICIAL_PIP_INDEX_URL（仅重试一次；版本约束不变）" >&2
-      echo "══════════════════════════════════════════════════════════════════════" >&2
-      rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
-      PIP_STDERR_FILE="$(mktemp /tmp/qwen-asr-pip-stderr.XXXXXX)"
-      if ! "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" --index-url "$OFFICIAL_PIP_INDEX_URL" --timeout 30 --retries 2 2>"$PIP_STDERR_FILE"; then
+    DEPS_RECOVERED=0
+    # 保留最后一次安装的 stderr；候选探测不能覆盖它。各候选最多安装一次。
+    if should_try_next_index; then
+      echo "自动换源检查：$FALLBACK_DECISION" >&2
+      for NEXT_INDEX in "https://mirrors.aliyun.com/pypi/simple" "$OFFICIAL_PIP_INDEX_URL"; do
+        probe_index_visibility "$NEXT_INDEX"
+        echo "[候选源] $NEXT_INDEX → $(probe_result_label "$PROBE_RESULT")（$PROBE_CERTAINTY${PROBE_NOTE:+；$PROBE_NOTE}）" >&2
+        if [[ "$PROBE_RESULT" != "visible" || "$PROBE_PIP_CONFIRMED" != 1 ]]; then
+          echo "  跳过：未确认钉定版本可见（须 pip 同栈确认；urllib 原始页面仅供诊断）；这不代表此源永久不可用。" >&2
+          continue
+        fi
+        echo "受控回退：$PIP_INDEX_URL → $NEXT_INDEX（每源仅重试一次；版本约束不变）" >&2
+        PIP_INDEX_URL="$NEXT_INDEX"
+        export PIP_INDEX_URL
+        if "$PY" -m pip --isolated install -r "$ROOT_DIR/requirements-qwen-asr.txt" --index-url "$PIP_INDEX_URL" --timeout 30 --retries 2 2>"$PIP_STDERR_FILE"; then
+          cat "$PIP_STDERR_FILE" >&2
+          DEPS_RECOVERED=1
+          echo "换源重试成功：依赖安装完成；本次生效源 $PIP_INDEX_URL（不持久化修改用户选源）。"
+          break
+        fi
         cat "$PIP_STDERR_FILE" >&2
-        NETPROBE_ARGS=(--analyze "$PIP_STDERR_FILE" --index-url "$OFFICIAL_PIP_INDEX_URL" --package "$QWEN_ASR_PKG" --stage deps)
-        if [[ -n "$QWEN_ASR_VERSION" ]]; then NETPROBE_ARGS+=(--version "$QWEN_ASR_VERSION"); fi
-        bash "$ROOT_DIR/scripts/net-probe.sh" "${NETPROBE_ARGS[@]}" >&2 || true
-        rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
-        echo "依赖安装失败（官方源重试仍未通过）：检查上方 pip 错误与网络诊断（scripts/net-probe.sh 可独立运行复测）。旧环境如有备份会恢复。" >&2
-        exit 1
-      fi
-      cat "$PIP_STDERR_FILE" >&2
-      rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
-      echo "官方源重试成功：依赖安装完成（镜像侧缺版本，官方源有）。"
+        if ! should_try_next_index; then
+          echo "停止自动换源：$FALLBACK_DECISION" >&2
+          break
+        fi
+      done
     else
-      echo "未回退官方源：$FALLBACK_DECISION" >&2
-      if [[ -n "${VOICE_IME_PIP_INDEX_URL:-}" ]]; then
-        echo "建议（不自动切换你显式指定的包源）：VOICE_IME_PIP_INDEX_URL=default ./scripts/setup-qwen-asr.sh（官方 PyPI）" >&2
-      fi
+      echo "未自动换源：$FALLBACK_DECISION" >&2
+    fi
+    if [[ "$DEPS_RECOVERED" != 1 ]]; then
+      echo "依赖安装失败：自动恢复未完成；最后安装源 $PIP_INDEX_URL。旧环境如有备份会恢复。" >&2
+      echo "可显式选择其他源（不会自动覆盖）：VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple ./scripts/setup-qwen-asr.sh；或 VOICE_IME_PIP_INDEX_URL=default 使用官方 PyPI。" >&2
       NETPROBE_ARGS=(--analyze "$PIP_STDERR_FILE" --index-url "$PIP_INDEX_URL" --package "$QWEN_ASR_PKG" --stage deps)
       if [[ -n "$QWEN_ASR_VERSION" ]]; then NETPROBE_ARGS+=(--version "$QWEN_ASR_VERSION"); fi
       bash "$ROOT_DIR/scripts/net-probe.sh" "${NETPROBE_ARGS[@]}" >&2 || true
       rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
-      echo "依赖安装失败：检查上方 pip 错误与网络诊断（scripts/net-probe.sh 可独立运行复测）。旧环境如有备份会恢复。" >&2
       exit 1
     fi
+    rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true
   else
     cat "$PIP_STDERR_FILE" >&2
     rm -f -- "$PIP_STDERR_FILE" 2>/dev/null || true

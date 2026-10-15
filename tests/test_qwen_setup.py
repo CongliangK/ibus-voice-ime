@@ -126,6 +126,8 @@ if a[:2] == ['-m', 'pip']:
         # 供“官方源可见性”回退条件测试）。
         key = 'FAKE_PIP_INDEX_VERSIONS_PYPI' if 'pypi.org' in url else 'FAKE_PIP_INDEX_VERSIONS'
         versions = os.environ.get(key, '')
+        if 'aliyun.com' in url:
+            versions = '0.0.1'  # Legacy cases skip the new candidate; covered in network suite.
         if os.environ.get('FAKE_PIP_INDEX_RC') == '1' and 'pypi.org' not in url:
             print(os.environ.get('FAKE_PIP_INDEX_STDERR', 'ERROR: No matching distribution found for qwen-asr'), file=sys.stderr)
             rc = 1
@@ -521,6 +523,7 @@ if a == ['-V']: print('Python 3.{minor}.0')
         self.make_script(self.venv / 'bin/modelscope', '#!/bin/sh\nexit 1\n')
         self.seed_models()
         result = self.run_setup(FAKE_REUSE_RC='3', FAKE_PIP_FAIL_URL='tuna',
+                                VOICE_IME_PIP_INDEX_FALLBACK='off',
                                 FAKE_PIP_FAIL_STDERR='ERROR: Could not fetch URL http://127.0.0.1:1/simple/qwen-asr/: connection error')
         self.assertNotEqual(result.returncode, 0)
         self.assertTrue((self.venv / 'original-marker').exists())
@@ -547,7 +550,7 @@ if a == ['-V']: print('Python 3.{minor}.0')
         combined = result.stdout + result.stderr
         self.assertIn('受控回退', combined)
         self.assertIn('重试一次', combined)
-        self.assertIn('官方源重试成功', combined)
+        self.assertIn('换源重试成功', combined)
 
     def test_explicit_index_never_auto_switches(self):
         # 用户显式设置 VOICE_IME_PIP_INDEX_URL：即使满足其余回退条件也绝不静默
@@ -757,9 +760,8 @@ class NetProbeTest(unittest.TestCase):
         self.assertIn('包不存在', out)
         self.assertIn('实证', out)
 
-    def test_versions_none_mock_403_proxy_probed_as_hijack(self):
-        # 故障 A：代理对索引请求回 403 → pip 静默零候选（与包不存在同形）；
-        # 主动探测“直连可见版本 vs 经代理 403”后归类代理类·内容劫持。
+    def test_versions_none_mock_403_reports_path_difference(self):
+        # 直连可见、代理路径 403 只能证明路径响应不同，不能证明劫持。
         index = self.start_server(self.make_index_handler(
             '<a href="../../packages/qwen_asr-0.0.6-py3-none-any.whl#sha256=abc">qwen_asr-0.0.6-py3-none-any.whl</a>'))
         self.addCleanup(index.shutdown)
@@ -773,13 +775,13 @@ class NetProbeTest(unittest.TestCase):
                                 '--package', 'qwen-asr', '--version', '0.0.6', '--stage', 'deps',
                                 http_proxy=f'http://127.0.0.1:{proxy.server_port}')
         out = result.stdout
-        self.assertIn('▶ 分类：代理类', out)
-        self.assertIn('内容劫持', out)
+        self.assertIn('▶ 分类：索引访问异常', out)
+        self.assertIn('不能据此证明内容劫持', out)
         self.assertIn('实证', out)
         # 验证命令必须同时给直连与经代理两条对比命令
         self.assertIn("--noproxy '*'", out)
         self.assertIn('-x "$http_proxy"', out)
-        self.assertIn('换镜像无法解决', out)
+        self.assertIn('其他包源可能可用', out)
 
     def test_credentials_redacted_in_env_report(self):
         err = self.write_stderr('WARNING: Retrying (1/2) ... ProxyError(\'Cannot connect to proxy.\')\n')

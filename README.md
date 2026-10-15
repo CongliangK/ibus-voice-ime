@@ -123,6 +123,20 @@ tail -f ~/.local/share/ibus-voice-ime/engine.log
 - **无 NVIDIA GPU**：切换云端后端（见上文「切换语音后端」）
 - **Ctrl+Alt+V 在某些终端无效**：安装脚本已注册 GNOME 全局快捷键兜底
 
+### Python 依赖包源被拒绝（HTTP 403）
+
+403 可能是镜像的访问控制/风控，不等于包不存在，也不能直接断言用户代理有问题。默认清华源安装失败后，安装器对可恢复的索引/下载错误会依次探测 **阿里云 → 官方 PyPI**，确认目标版本可见才尝试安装；每源最多一次，全部失败则保留错误退出。证书、哈希、明确的代理配置、依赖冲突及本地环境错误不会靠换源掩盖。
+
+也可在仓库根目录显式选择阿里云续装（无需卸载或清缓存）：
+
+```bash
+VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple \
+VOICE_IME_QWEN_ASR_SIZES=1.7B VOICE_IME_QWEN_ASR_MODEL=1.7b \
+  ./scripts/setup-qwen-asr.sh
+```
+
+将包源值改为 `default` 即使用官方 PyPI。显式包源不会被自动覆盖；`VOICE_IME_PIP_INDEX_FALLBACK=off` 可禁用默认自动换源。包源回退仅影响 Qwen 的 pip 依赖，不改变 ModelScope 模型下载或 Python 下载源；完整依赖是否可用仍以实际安装和推理验收为准。
+
 完整排查指南（三处日志、环境变量、非 GNOME 桌面手工集成等）见 [AGENTS.md](AGENTS.md)。
 
 ## 卸载

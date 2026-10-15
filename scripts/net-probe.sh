@@ -106,6 +106,9 @@ report_env_context() {  # <index_url>
   if [[ -n "${PIP_PROXY:-}" ]]; then
     echo "      PIP_PROXY=$(redact_url "$PIP_PROXY")（提示：setup-qwen-asr.sh 的 pip 子进程带 --isolated，此变量对其无效；直接运行 pip 时会生效）"
   fi
+  if [[ -n "${no_proxy:-}${NO_PROXY:-}" ]]; then
+    echo "      ⚠ 已设置 no_proxy/NO_PROXY：上述代理仅为配置候选，pip 实际可能绕过；下方经代理对照强制清除绕过规则，不代表 pip 实际路径。"
+  fi
   echo "      PIP_PROXY 与各级 pip.conf：在 setup-qwen-asr.sh 场景已被 --isolated + PIP_CONFIG_FILE=/dev/null 隔离；独立运行 pip 时仍按本 shell 环境生效。"
 }
 
@@ -171,7 +174,9 @@ probe_index_page() {  # <index_url>：填充 PROBE_* 并打印探测过程
   resolve_effective_proxy "$index_url"
   if [[ -n "$EFFECTIVE_PROXY_URL" ]]; then
     # 用 -x 显式走有效代理（含 all_proxy 来源）；命令行里引用变量名而非明文，避免凭据进日志。
-    curl_fetch_classify VIA "$page_url" -x "$EFFECTIVE_PROXY_URL"
+    # Force the comparison through the proxy even if NO_PROXY bypasses this host.
+    # This is a diagnostic path, not a claim about pip's actual bypass selection.
+    curl_fetch_classify VIA "$page_url" --noproxy '' -x "$EFFECTIVE_PROXY_URL"
     echo "        经代理（-x \"\$$EFFECTIVE_PROXY_VAR\"=$(redact_url "$EFFECTIVE_PROXY_URL")）：HTTP ${PROBE_VIA_CODE:-000} / $PROBE_VIA_KIND"
   else
     echo "        经代理：无有效代理变量（与直连同路径；如需对比可先 export 代理再运行本脚本）"
@@ -184,7 +189,7 @@ print_compare_commands() {  # <index_url>：直连 vs 经代理两条对比命�
   echo "      直连：curl -sS --noproxy '*' -o /dev/null -w '%{http_code} %{size_download}\\n' '$page'"
   resolve_effective_proxy "$1"
   if [[ -n "$EFFECTIVE_PROXY_URL" ]]; then
-    echo "      经代理：curl -sS -x \"\$$EFFECTIVE_PROXY_VAR\" -o /dev/null -w '%{http_code} %{size_download}\\n' '$page'（当前来源 \$$EFFECTIVE_PROXY_VAR）"
+    echo "      经代理：curl -sS --noproxy '' -x \"\$$EFFECTIVE_PROXY_VAR\" -o /dev/null -w '%{http_code} %{size_download}\\n' '$page'（当前来源 \$$EFFECTIVE_PROXY_VAR）"
   else
     echo "      经代理：curl -sS -x \"\$https_proxy\" … '$page'（当前无代理变量，此条与直连等价，仅作对照）"
   fi
@@ -257,10 +262,12 @@ EOF
   fi
 
   # ---- 3) 兼容性类（Requires-Python / 平台不匹配）----
-  if printf '%s' "$text" | grep -qiE 'Requires-Python|Ignored the following versions'; then
+  # Ignored/Requires-Python notices can describe unrelated candidates, not the
+  # final failure. Only an explicit fatal incompatibility proves this class.
+  if printf '%s' "$text" | grep -qiE 'ERROR: Package .+ requires a different Python|not a supported wheel on this platform'; then
     cat <<'EOF'
   ▶ 分类：兼容性类 —— 目标包版本 requires-python / 平台标签与当前解释器不匹配，
-    pip 忽略了全部候选版本。确定性：实证（Ignored…Requires-Python 签名唯一）。
+    确定性：实证（pip 明确报告目标包 Python 要求或 wheel 平台不兼容）。
   [6] 最小修复建议：
       1) 安装器默认使用仓库内 CPython 3.12；若设置了 VOICE_IME_QWEN_ASR_SETUP_PYTHON
          指向其他版本，请核对该版本是否满足包的 requires-python；
@@ -355,7 +362,7 @@ EOF
     这是真实的镜像滞后/缺版本。确定性：实证（列出旧版本是镜像滞后专属签名）。
   [6] 最小修复建议：
       1) 换官方源重跑一次：VOICE_IME_PIP_INDEX_URL=default ./scripts/setup-qwen-asr.sh；
-         （安装器在“默认索引+版本不可用签名+官方源实证可见”时也会自动回退一次）
+         （默认源失败时，安装器会独立探测阿里云、官方 PyPI，版本可见才逐源尝试）
       2) 或等镜像同步后重跑同一命令（已下载资产会复用）。
 EOF
       print_compare_commands "$index_url"
@@ -367,13 +374,8 @@ EOF
       probe_index_page "$index_url"
       local verdict="" certainty="实证"
       if [[ -n "$PROBE_VIA_CODE" ]]; then
-        # 经代理探测失败分三层归因（红队 2026-10-14 P2/P2-A：连接层失败与
-        # 代理网关 5xx 都不是内容劫持）：连接层（HTTP 000/network-error/
-        # tls-error/超时）= 代理不可达/连接失败——请求根本没拿到内容；5xx
-        # （500/502/503/504…）= 代理网关错误/上游不可达——代理侧故障，拿到了
-        # 代理自身的错误状态码，同样不是内容级吞掉；内容层（403/401 等 4xx、
-        # 200 垃圾页、404/缺版本页）= 代理在内容级吞掉/改写响应（403 是经典
-        # 劫持形态）。各层都要求直连可见目标版本才构成实证。
+        # 对照记录连接失败、5xx 和内容差异；直连成功而代理路径 403 仍可能
+        # 是镜像拒绝代理出口 IP，不能把路径差异直接当成内容劫持证据。
         case "$PROBE_VIA_KIND" in
           network-error|tls-error)
             case "$PROBE_DIRECT_KIND" in
@@ -413,10 +415,10 @@ EOF
       case "$verdict" in
         hijack)
           cat <<EOF
-  ▶ 分类：代理类 —— 内容劫持（实证）：直连能拿到含目标版本的索引页，经代理
-    （\$$EFFECTIVE_PROXY_VAR）却得到 HTTP ${PROBE_VIA_CODE:-000} / $PROBE_VIA_KIND——代理在
-    “内容级”吞掉了索引请求，pip 因此静默得到零候选（from versions: none）。
-    这不是镜像缺包，也不是版本钉错；换镜像无法解决。
+  ▶ 分类：索引访问异常 —— 代理路径响应不同（实证）：直连能拿到含目标版本的索引页，经代理
+    （\$$EFFECTIVE_PROXY_VAR）却得到 HTTP ${PROBE_VIA_CODE:-000} / $PROBE_VIA_KIND。
+    可能是镜像拒绝代理出口 IP，也可能是代理/中间设备返回异常内容；不能据此证明内容劫持。
+    对照响应体及证书后判断；其他包源可能可用，不应断言换源无效。
   [6] 最小修复建议：
       1) 修代理规则放行包源域名，或彻底 unset 代理变量后重跑同一命令；
       2) 国内镜像通常无需代理：unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY；
@@ -499,19 +501,19 @@ EOF
             # 如实并列直连内容异常与经代理探测结果（可能是透明劫持，也可能是
             # 代理故障），让用户用直连/经代理两条命令分别对比定位。
             cat <<EOF
-  ▶ 分类：代理类 —— 内容异常（实证：直连即得 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
+  ▶ 分类：索引访问异常 —— 直连实测 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
     非索引内容；且配置的代理（协议 $(url_scheme "$EFFECTIVE_PROXY_URL")，来源 \$$EFFECTIVE_PROXY_VAR）
-    经代理探测${PROBE_VIA_CODE:+得 HTTP $PROBE_VIA_CODE / }$PROBE_VIA_KIND）。
-    可能是透明劫持，也可能是代理故障——建议用下方直连/经代理两条命令分别对比确认。
+    经代理探测${PROBE_VIA_CODE:+得 HTTP $PROBE_VIA_CODE / }$PROBE_VIA_KIND。
+    可能是镜像访问控制/风控、网络中间设备或代理路径问题；不能仅凭状态码确定原因。
   [6] 最小修复建议：
-      分别核对代理服务与网络出口（公共 WiFi 认证页？公司网关？）；换网络或换可信代理后重跑。
+      检查响应体及证书，并对照其他包源；可用 VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple 重跑。
 EOF
           else
             cat <<EOF
-  ▶ 分类：代理类 —— 内容异常（实证：直连即得 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
-    非索引内容；当前无代理变量——疑似透明劫持/网关拦截/captive portal）。
+  ▶ 分类：索引访问异常 —— 直连实测 HTTP $PROBE_DIRECT_CODE / $PROBE_DIRECT_KIND，
+    未取得有效索引；当前无代理变量。403 可能来自镜像风控/访问控制，不能直接归因代理或劫持。
   [6] 最小修复建议：
-      核对网络出口（公共 WiFi 认证页？公司网关？）；换网络或加可信代理后重跑。
+      检查响应体及证书，对照其他包源：VOICE_IME_PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple ./scripts/setup-qwen-asr.sh；也可用 default 选择官方 PyPI。
 EOF
           fi
           print_compare_commands "$index_url"
@@ -594,9 +596,9 @@ standalone_probe() {
     valid)    echo "结论（实证）：索引页有效（未指定版本，未做版本核对）。" ;;
     page-missing-version) echo "结论（实证）：索引页有效但不含 $PROBE_VERSION——镜像同步滞后；可 VOICE_IME_PIP_INDEX_URL=default 换官方源。" ;;
     not-found) echo "结论（实证）：404——索引上没有 $PROBE_PACKAGE；换官方源核实。" ;;
-    hijack)   echo "结论（实证）：代理内容劫持——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND。修代理或 unset 代理变量，换镜像无效。" ;;
+    hijack)   echo "结论（实证）：代理路径响应不同——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND。可能是镜像拒绝代理出口 IP 或中间设备异常，不能据此证明内容劫持；检查响应体及证书，其他包源可能可用。" ;;
     proxy-conn) echo "结论（实证）：代理不可达/连接失败——直连可见目标版本、经代理连接层失败（HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND），未拿到任何内容。确认代理进程/端口或 unset 代理变量，换镜像无效。" ;;
-    proxy-gateway) echo "结论（实证）：代理网关错误/上游不可达——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND（5xx 网关状态码）。这是代理侧故障，不是内容级吞掉；检查代理服务及其上游，换镜像无效。" ;;
+    proxy-gateway) echo "结论（实证）：代理路径网关/上游错误——直连可见目标版本、经代理得到 HTTP ${PROBE_VIA_CODE:-000}/$PROBE_VIA_KIND（5xx 状态码）。检查代理服务、网络路径及镜像上游；不能仅凭状态码定位故障方，其他包源可能可用。" ;;
     garbage)  echo "结论（实证）：索引响应不是 simple 页（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——劫持/网关拦截或镜像异常。" ;;
     *)        echo "结论（实证）：探测失败（HTTP $PROBE_DIRECT_CODE/$PROBE_DIRECT_KIND）——网络不可达或 TLS 异常。" ;;
   esac
@@ -654,7 +656,7 @@ case "$MODE" in
     net_probe_analyze "$ERR_FILE" "$INDEX_URL" "$STAGE"
     ;;
   standalone)
-    INDEX_URL="${VOICE_IME_PIP_INDEX_URL:-$DEFAULT_INDEX_URL}"
+    [[ $INDEX_URL_PROVIDED -eq 1 ]] || INDEX_URL="${VOICE_IME_PIP_INDEX_URL:-$DEFAULT_INDEX_URL}"
     [[ "$INDEX_URL" != "default" ]] || INDEX_URL="$OFFICIAL_INDEX_URL"
     standalone_probe "$INDEX_URL"
     ;;
