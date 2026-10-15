@@ -79,3 +79,27 @@ GitHub Actions（`ubuntu-latest`），push / PR / 手动触发均运行 **releas
 - **词库候选质量**：雾凇拼音体验属上游方案范畴。
 
 报 bug 时请附 `./scripts/check-environment.sh` 输出与三份日志（`engine.log` / `error.log` / `qwen-asr-server.log`，默认已自动裁剪到最近 1000 行）。
+
+### Qwen sidecar 日志生命周期（离线回归）
+
+`tests/test_sidecar_capture.py` 使用临时目录与真实 Python 子进程，不加载模型。
+Qwen runtime 启动脱离引擎会话的 capture supervisor；它持有 stdout/stderr 管道，
+串行执行追加和裁剪，子进程从不持有日志文件 inode。引擎异常退出后 capture 与
+sidecar 继续工作；正常 shutdown/超时恢复只终止自有 supervisor 和其直接子进程，
+不终止复用的外部服务。子进程已退出但后代仍持有管道时，最多额外排空 0.3 秒，
+不接管/终止这些后代。独立的停止 watchdog 在收到停止信号后每 25 ms 检查并发出
+TERM，给直接子进程 0.5 秒，随后升级 kill；即使日志扫描/复制缓慢也不延后
+子进程回收。扫描/复制的块边界同时检查取消并清理临时文件。
+
+同一路径的多个 capture 使用常驻 `.capture-lock` 文件互斥，锁文件不可在运行期间
+删除。每批追加都重新打开文件，持锁追加后再裁剪，避免丢掉并发写入。
+此协议只适用于 capture 管理的日志；不要让其他独立写入者或外部 logrotate
+同时修改该文件。外部管理的服务不由 runtime 裁剪日志。
+
+保留策略仍为默认最近 1000 行、`VOICE_IME_LOG_KEEP_LINES=0` 禁用：超过
+`keep*128` 字节且超过 `2*keep` 行时保留最后 `keep` 行。这里的行按原始字节 LF
+分隔，末尾未完行占一行，UTF-8 分片不解码、不改写。超长无换行输出用倍增间隔
+扫描，遇到新换行重新检查；capture 的缓冲区有界，单个无换行行的磁盘大小不受限。
+失败诊断仅读取文件末尾 64 KiB。磁盘写入/裁剪/锁失败会终止自有子进程，避免
+管道无人读取而让识别一直卡住；诊断尽力写入引擎 stderr 和可用的日志。
+没有承诺断电持久性或保留已按策略淘汰的历史。

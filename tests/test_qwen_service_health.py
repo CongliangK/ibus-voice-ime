@@ -65,7 +65,7 @@ class TranscribeResponseTest(unittest.TestCase):
     def call(self, response):
         with mock.patch.object(runtime, 'ensure_server', return_value='http://127.0.0.1:18081'), mock.patch.object(
             runtime.voice_terms, 'build_asr_context', return_value=''
-        ), mock.patch.object(runtime.urllib.request, 'urlopen', return_value=response), mock.patch.object(runtime, 'trim_to_last_lines'):
+        ), mock.patch.object(runtime.urllib.request, 'urlopen', return_value=response):
             return runtime.transcribe('/fixture.wav')
 
     def test_invalid_response_is_not_silent_empty_transcription(self):
