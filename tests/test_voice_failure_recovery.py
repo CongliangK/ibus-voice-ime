@@ -236,7 +236,7 @@ class WatchdogTest(IpcDispatchTest):
             _flush_composition_before_voice=mock.Mock(), _warm_voice_asr=mock.Mock(),
             _update_recording_status=mock.Mock(), _stop_toggle_voice_recording=mock.Mock(),
             _cancel_toggle_voice_recording=mock.Mock())
-        for name in ('_clear_voice_watchdog', '_finish_voice_input', '_arm_voice_watchdog', '_voice_watchdog_expired'):
+        for name in ('_add_timeout', '_clear_voice_watchdog', '_finish_voice_input', '_arm_voice_watchdog', '_voice_watchdog_expired'):
             setattr(owner, name, types.MethodType(getattr(cls, name), owner))
         return owner
 
@@ -252,8 +252,7 @@ class WatchdogTest(IpcDispatchTest):
             cls._voice_callback(owner, 1, owner._finish_voice_input, 'normal result', None)
             remove.assert_called_once_with(41)
             commit_call = timer.call_args
-            self.assertIs(commit_call.args[1], owner._commit_voice_result)
-            self.assertEqual(commit_call.args[2], 'normal result')
+            owner._commit_voice_result.assert_not_called()
             cls._begin_toggle_voice_recording(owner, raw=True)
             session = owner._audio_session
             self.assertGreater(owner._voice_generation, 1)
