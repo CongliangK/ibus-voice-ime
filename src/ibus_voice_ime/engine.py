@@ -424,6 +424,8 @@ class VoiceCustomEngine(IBus.Engine):
         if hasattr(IBus.Engine.props, "has_focus_id"):
             kwargs["has_focus_id"] = True
         super().__init__(**kwargs)
+        self._destroyed = False
+        self._timeout_sources: set[int] = set()
         _ENGINE_INSTANCES.add(self)
         # 不在此设置 _FOCUSED_ENGINE：新实例未必持有焦点，无条件劫持会让 IPC
         # 热键分发给"最新的空闲实例"而不是真正有焦点的实例（配合悬浮窗抢焦点
@@ -474,6 +476,8 @@ class VoiceCustomEngine(IBus.Engine):
 
     def do_process_key_event(self, keyval: int, keycode: int, state: int) -> bool:  # noqa: D401
         """IBus key event entry point."""
+        if getattr(self, "_destroyed", False):
+            return False
         global _FOCUSED_ENGINE
         _FOCUSED_ENGINE = self
         if state & IBus.ModifierType.RELEASE_MASK:
@@ -663,25 +667,59 @@ class VoiceCustomEngine(IBus.Engine):
         self._clear()
 
     def do_focus_in(self) -> None:
+        if getattr(self, "_destroyed", False):
+            return
         global _FOCUSED_ENGINE, _LAST_LIVE_ENGINE
         _FOCUSED_ENGINE = self
         if _engine_has_live_connection(self):
             _LAST_LIVE_ENGINE = self
 
     def do_destroy(self) -> None:
+        if getattr(self, "_destroyed", False):
+            return
+        # Invalidate queued IPC, worker and timer callbacks before releasing any
+        # resources. Do not use cancel's UI path on a disconnected IBus engine.
+        self._destroyed = True
+        self._voice_generation = getattr(self, "_voice_generation", 0) + 1
+        self._aux_generation = getattr(self, "_aux_generation", 0) + 1
+        self._voice_state = "idle"
+        self._voice_busy = False
+        self._voice_raw = False
+        session, self._audio_session = getattr(self, "_audio_session", None), None
+        overlay, self._overlay = getattr(self, "_overlay", None), None
         # ibus-daemon 销毁本实例（如 Electron 应用拆除输入上下文）时清理全局
         # 引用，避免 _FOCUSED_ENGINE/_VOICE_OWNER 长期指向信号必失败的僵尸。
-        global _FOCUSED_ENGINE, _VOICE_OWNER, _LAST_LIVE_ENGINE
+        global _FOCUSED_ENGINE, _LAST_LIVE_ENGINE
         if _FOCUSED_ENGINE is self:
             _FOCUSED_ENGINE = None
-        if _VOICE_OWNER is self:
-            _VOICE_OWNER = None
+        _release_voice_owner(self)
         if _LAST_LIVE_ENGINE is self:
             _LAST_LIVE_ENGINE = None
         _ENGINE_INSTANCES.discard(self)
         # 持有强引用阻止 GC 回收：librime 会话析构链在该路径上会段错误
         # （见墓园注释），宁可泄漏少量内存也不能崩引擎进程。
         _ENGINE_GRAVEYARD.append(self)
+        try:
+            self._clear_voice_watchdog()
+        except Exception as exc:
+            log_error(f"销毁引擎：清理语音 watchdog 失败：{exc}")
+        sources = getattr(self, "_timeout_sources", set())
+        for source in list(sources):
+            try:
+                GLib.source_remove(source)
+            except Exception as exc:
+                log_error(f"销毁引擎：清理计时器失败：{exc}")
+        sources.clear()
+        if session is not None:
+            try:
+                session.cancel()
+            except Exception as exc:
+                log_error(f"销毁引擎：取消录音失败：{exc}")
+        if overlay is not None:
+            try:
+                overlay.destroy()
+            except Exception as exc:
+                log_error(f"销毁引擎：关闭语音浮窗失败：{exc}")
         try:
             IBus.Engine.do_destroy(self)
         except Exception:
@@ -1259,7 +1297,31 @@ class VoiceCustomEngine(IBus.Engine):
         else:
             self.commit_text(text(commit))
 
+    def _add_timeout(self, millis: int, callback, *args) -> int | None:
+        """Track instance timers without retaining expired/reused GLib IDs."""
+        if getattr(self, "_destroyed", False):
+            return None
+        if not hasattr(self, "_timeout_sources"):
+            self._timeout_sources = set()
+        sources = self._timeout_sources
+
+        def dispatch() -> bool:
+            repeat = False
+            try:
+                if not getattr(self, "_destroyed", False):
+                    repeat = bool(callback(*args)) and not getattr(self, "_destroyed", False)
+                return repeat
+            finally:
+                if not repeat:
+                    sources.discard(source)
+
+        source = GLib.timeout_add(millis, dispatch)
+        sources.add(source)
+        return source
+
     def _show_aux(self, message: str, millis: int = 2500) -> None:
+        if getattr(self, "_destroyed", False):
+            return
         self._composition_aux_visible = False
         self._aux_generation += 1
         generation = self._aux_generation
@@ -1270,7 +1332,7 @@ class VoiceCustomEngine(IBus.Engine):
                 self.update_auxiliary_text(text(""), False)
             return False
 
-        GLib.timeout_add(millis, clear_if_current)
+        self._add_timeout(millis, clear_if_current)
 
     def _clipboard_prepare_delay_ms(self) -> int:
         # 300ms 与语音提交节奏一致；镜像方案下粘贴时刻已无焦点抖动，
@@ -1287,6 +1349,8 @@ class VoiceCustomEngine(IBus.Engine):
         ``delay_ms`` is a diagnostic override (scripts/diagnose-paste.sh) for
         bisecting the timing window; ``None`` keeps the configured default.
         """
+        if getattr(self, "_destroyed", False):
+            return False
         try:
             path = Path(path_text).expanduser()
             content = path.read_text(encoding="utf-8")
@@ -1318,12 +1382,14 @@ class VoiceCustomEngine(IBus.Engine):
         self._ascii_mode = False
         self._pending_shift_toggle = None
         if delay > 0:
-            GLib.timeout_add(delay, self._commit_clipboard_file_text, content, truncated)
+            self._add_timeout(delay, self._commit_clipboard_file_text, content, truncated)
         else:
             self._commit_clipboard_file_text(content, truncated)
         return False
 
     def _commit_clipboard_file_text(self, content: str, truncated: bool) -> bool:
+        if getattr(self, "_destroyed", False):
+            return False
         # 语音完成路径同款顺序：先清辅助提示再提交，避免合成提交周围的多余
         # IBus 信号干扰敏感客户端；代际 +1 同时取消未到期的自动清除。
         self._aux_generation += 1
@@ -1359,6 +1425,8 @@ class VoiceCustomEngine(IBus.Engine):
         录音进行中时，无论按的是主热键还是 raw 热键都只停止当前录音；
         空闲时才按 raw 标志以对应模式开始新的录音。
         """
+        if getattr(self, "_destroyed", False):
+            return
         log_error(f"语音热键触发：state={self._voice_state}, busy={self._voice_busy}, raw={raw}")
         # 本实例未持有录音时，热键语义（停止/提示处理中）只对持有实例成立：
         # 先转发，防止焦点切换后的空闲实例把"停止"当"开始"。
@@ -1379,6 +1447,8 @@ class VoiceCustomEngine(IBus.Engine):
         self._begin_toggle_voice_recording(raw=raw)
 
     def _begin_toggle_voice_recording(self, raw: bool = False) -> None:
+        if getattr(self, "_destroyed", False):
+            return
         if self._voice_busy:
             self._show_aux("🎙️ 正在处理上一段语音……")
             return
@@ -1421,7 +1491,7 @@ class VoiceCustomEngine(IBus.Engine):
             llm_enabled=not raw and llm_postprocess.enabled(),
             max_seconds=max_seconds,
         )
-        GLib.timeout_add(100, self._update_recording_status)
+        self._add_timeout(100, self._update_recording_status)
 
     def _warm_voice_asr(self) -> None:
         """Spawn a daemon thread to pre-load the ASR model onto the GPU.
@@ -1536,6 +1606,8 @@ class VoiceCustomEngine(IBus.Engine):
         threading.Thread(target=worker, daemon=True).start()
 
     def _cancel_toggle_voice_recording(self, message: str = "已取消语音输入") -> None:
+        if getattr(self, "_destroyed", False):
+            return
         self._clear_voice_watchdog()
         self._voice_generation = getattr(self, "_voice_generation", 0) + 1
         log_error("取消 toggle 语音录音：" + message)
@@ -1582,6 +1654,8 @@ class VoiceCustomEngine(IBus.Engine):
 
     def _start_voice_input(self, raw: bool = False) -> None:
         """Legacy fixed-duration recording mode (raw=True skips LLM post-processing)."""
+        if getattr(self, "_destroyed", False):
+            return
         if self._voice_busy:
             self._show_aux("🎙️ 正在识别上一段语音……")
             return
@@ -1626,13 +1700,15 @@ class VoiceCustomEngine(IBus.Engine):
         return token
 
     def _voice_callback(self, token: int, callback, *args) -> bool:
-        if token != getattr(self, "_voice_generation", 0) or not self._voice_busy:
+        if (getattr(self, "_destroyed", False)
+                or token != getattr(self, "_voice_generation", 0) or not self._voice_busy):
             return False  # discarded late completion; never commit into a new dictation
         callback(*args)
         return False
 
     def _voice_watchdog_expired(self, token: int, timeout: float) -> bool:
-        if (token != getattr(self, "_voice_generation", 0) or not self._voice_busy
+        if (getattr(self, "_destroyed", False)
+                or token != getattr(self, "_voice_generation", 0) or not self._voice_busy
                 or self._voice_state != "processing"):
             return False
         # This source is already dispatching and will return False; do not remove
@@ -1646,6 +1722,8 @@ class VoiceCustomEngine(IBus.Engine):
         return False
 
     def _finish_voice_input(self, result: str, error: str | None) -> bool:
+        if getattr(self, "_destroyed", False):
+            return False
         self._clear_voice_watchdog()
         self._voice_generation = getattr(self, "_voice_generation", 0) + 1
         # Accepted results keep their independent delayed commit below; advancing
@@ -1661,13 +1739,13 @@ class VoiceCustomEngine(IBus.Engine):
         if error:
             if self._overlay is not None:
                 self._overlay.show_error(error)
-                GLib.timeout_add(4000, lambda: (self._overlay.hide() if self._overlay else None, False)[1])
+                self._add_timeout(4000, lambda: (self._overlay.hide() if self._overlay else None, False)[1])
             self._show_aux("语音输入失败：" + error, 6000)
         elif result:
             if self._overlay is not None:
                 self._overlay.hide()
             delay = int(config.env_str("VOICE_IME_COMMIT_DELAY_MS", "200"))
-            GLib.timeout_add(max(0, delay), self._commit_voice_result, result)
+            self._add_timeout(max(0, delay), self._commit_voice_result, result)
         else:
             if self._overlay is not None:
                 self._overlay.hide()
@@ -1675,6 +1753,8 @@ class VoiceCustomEngine(IBus.Engine):
         return False
 
     def _commit_voice_result(self, result: str) -> bool:
+        if getattr(self, "_destroyed", False):
+            return False
         self.commit_text(text(result))
         return False
 
