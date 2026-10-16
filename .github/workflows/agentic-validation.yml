@@ -31,7 +31,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install test dependencies
-        # sox：audio_preprocess 相关测试缺了会整体 skip；
+        # sox：执行合成 WAV、陷波衰减与语音频段保真测试；
+        # RNNoise 集成测试另需 ffmpeg 和模型，缺失时如实 skip。
         # packaging：test_qwen_setup 用它从 requirements 动态推导版本基线
         # （setup-python 的独立 CPython 不自带该包）。
         run: |

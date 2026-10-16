@@ -22,7 +22,7 @@
 GitHub Actions（`ubuntu-latest`），push / PR / 手动触发均运行 **release 门禁**：
 
 - Python 矩阵 **3.10 / 3.12 / 3.13**（3.10 是代码语法下限——PEP 604 联合类型；3.12/3.13 抽样验证通用环境）
-- 额外安装 `sox`（否则 audio_preprocess 相关测试会在 runner 上整体 skip）
+- 额外安装 `sox`，执行确定性合成 WAV 的陷波衰减与语音频段保真等测试；档位选择测试不依赖音频工具。只有 RNNoise 集成测试另外依赖 `ffmpeg` 和模型，缺失时明确 skip，CI 不下载模型，也不宣称验证真实 RNNoise 效果
 - 工作流只读：不安装输入法、不启动 IBus、不接触任何 ASR/LLM 服务与密钥
 
 ## 验证门禁（gates）
