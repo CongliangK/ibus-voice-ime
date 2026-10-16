@@ -1,9 +1,9 @@
-"""Unit tests for audio_preprocess (requires the system `sox` binary).
+"""Unit tests for audio_preprocess with per-test optional audio dependencies.
 
 Synthesizes 16 kHz / mono / S16_LE test WAVs with sox, runs them through
 preprocess_wav, and verifies normalization, high-pass behavior, and the
-fail-safe fallbacks.  Tests skip themselves when sox is unavailable so they
-remain safe to run on any CI box.
+fail-safe fallbacks.  WAV tests require sox; only the RNNoise integration
+test also requires ffmpeg and its model.  Tier selection needs neither binary.
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ def _has_ffmpeg() -> bool:
 
 
 def _synth_wav(path: str, *, sine_hz: float, gain_db: float, seconds: float = 1.0) -> None:
-    """Create a 16k/mono/s16 WAV containing a sine tone at the given gain."""
+    """Create a 16k/mono/s16 tone; -R fixes SoX dithering for repeatability."""
     subprocess.run(
         [
-            "sox", "-n", "-r", str(SAMPLE_RATE), "-c", "1", "-b", "16", path,
+            "sox", "-R", "-n", "-r", str(SAMPLE_RATE), "-c", "1", "-b", "16", path,
             "synth", f"{seconds:.3f}", "sine", f"{sine_hz:g}",
             "gain", f"{gain_db:g}",
         ],
@@ -223,7 +223,6 @@ class SoxFallbackTest(unittest.TestCase):
         self.assertEqual(_peak_abs_sample(self.wav), before, "file must be untouched when sox missing")
 
 
-@unittest.skipUnless(_has_sox() and _has_ffmpeg(), "sox/ffmpeg not installed")
 class DenoiseTierTest(unittest.TestCase):
     """VOICE_IME_DENOISE_TIER 三档链（none/notch/rnnoise，2026-08-26 新增）。"""
 
@@ -264,6 +263,7 @@ class DenoiseTierTest(unittest.TestCase):
         os.environ["VOICE_IME_DENOISE_TIER"] = "bogus"
         self.assertEqual(audio_preprocess._denoise_tier(), "none")
 
+    @unittest.skipUnless(_has_sox(), "sox not installed")
     def test_notch_tier_attenuates_mains_hum(self) -> None:
         """50Hz 工频哼声在 notch 档应被深度压制（尾部 RMS 稳态口径，见 _tail_rms）。"""
         os.environ["VOICE_IME_AUDIO_HIGHPASS"] = "0"
@@ -276,6 +276,7 @@ class DenoiseTierTest(unittest.TestCase):
             1e-9, _tail_rms(str(Path(self.tmp) / "h_none.wav")))
         self.assertLess(ratio, 0.05, f"50Hz 陷波衰减不足: 稳态剩余比例 {ratio:.4f}")
 
+    @unittest.skipUnless(_has_sox(), "sox not installed")
     def test_notch_tier_spares_voice_band(self) -> None:
         """440Hz 语音频段在 notch 档应基本不受影响（稳态口径）。"""
         os.environ["VOICE_IME_AUDIO_HIGHPASS"] = "0"
@@ -288,6 +289,8 @@ class DenoiseTierTest(unittest.TestCase):
             1e-9, _tail_rms(str(Path(self.tmp) / "v_none.wav")))
         self.assertGreater(ratio, 0.9, f"语音频段受损: 稳态剩余比例 {ratio:.4f}")
 
+    @unittest.skipUnless(_has_sox(), "sox not installed")
+    @unittest.skipUnless(_has_ffmpeg(), "ffmpeg not installed")
     def test_rnnoise_tier_produces_valid_wav(self) -> None:
         """rnnoise 档端到端：ffmpeg(陷波+arnndn) + sox(normalize)。缺模型自动降级。"""
         model = audio_preprocess._rnnoise_model_path()
