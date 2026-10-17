@@ -41,8 +41,10 @@ class RemoteUninstallTest(unittest.TestCase):
         self.log = self.root / "events.log"
         self.env = {key: value for key, value in os.environ.items()
                     if not key.startswith(("IBUS_VOICE_IME_", "STUB_"))
+                    and key != "VOICE_IME_MODEL_CACHE"
                     and key.lower() not in ("https_proxy", "http_proxy", "all_proxy")}
         self.env.update(HOME=str(self.home),
+                        XDG_CACHE_HOME=str(self.cache),
                         IBUS_VOICE_IME_DIR=str(self.clone),
                         IBUS_VOICE_IME_REPO=str(self.root / "nowhere.git"),
                         IBUS_VOICE_IME_REF="main",
@@ -175,6 +177,20 @@ class RemoteUninstallTest(unittest.TestCase):
         self.assertTrue((outside / "w.bin").exists())
         self.assertIn("HOME 外", result.stdout + result.stderr)
 
+    def test_xdg_cache_outside_home_not_touched(self):
+        self.make_clone(stub=STUB_OLD)
+        outside = self.root / "outside-cache"
+        models = outside / "ibus-voice-ime" / "models"
+        models.mkdir(parents=True)
+        sentinel = models / "w.bin"
+        sentinel.write_bytes(b"w")
+        self.env["XDG_CACHE_HOME"] = str(outside)
+        result = self.run_script("--yes")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(sentinel.read_bytes(), b"w")
+        self.assertTrue(self.clone.exists())
+        self.assertIn("HOME 外", result.stdout + result.stderr)
+
     def test_dir_with_trailing_slash_normalized(self):
         self.make_clone(marker=False)  # 拒删路径下的警告分支
         self.env["IBUS_VOICE_IME_DIR"] = str(self.clone) + "/./"
@@ -198,13 +214,16 @@ class RemoteUninstallUpdateTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.home = self.root / "home"
-        self.home.mkdir()
+        self.cache = self.home / ".cache"
+        self.cache.mkdir(parents=True)
         self.remote = self.root / "remote.git"
         self.clone = self.root / "clone"
         self.log = self.root / "events.log"
         self.env = {key: value for key, value in os.environ.items()
-                    if not key.startswith(("IBUS_VOICE_IME_", "STUB_", "GIT_"))}
-        self.env.update(HOME=str(self.home), GIT_CONFIG_NOSYSTEM="1",
+                    if not key.startswith(("IBUS_VOICE_IME_", "STUB_", "GIT_"))
+                    and key != "VOICE_IME_MODEL_CACHE"}
+        self.env.update(HOME=str(self.home), XDG_CACHE_HOME=str(self.cache),
+                        GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
                         IBUS_VOICE_IME_DIR=str(self.clone),
                         IBUS_VOICE_IME_REPO=str(self.remote),
@@ -266,6 +285,46 @@ class RemoteUninstallUpdateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("更新失败", result.stdout)
         self.assertTrue(self.log.exists())
+
+
+@unittest.skipUnless(shutil.which("git") and shutil.which("bash"), "需要本地 git 与 bash，测试不联网")
+class RemoteUninstallEnvironmentIsolationTest(unittest.TestCase):
+    def test_fixtures_ignore_inherited_cache_paths(self):
+        # 在子进程中污染环境，重跑两个 fixture 的兜底路径及显式越界拒绝。
+        # 所有污染路径仍归测试所有；真实用户的缓存从不成为删除候选。
+        with tempfile.TemporaryDirectory(prefix="remote-uninstall-environment-") as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            home.mkdir()
+            temp = root / "tmp"
+            temp.mkdir()
+            external_cache = root / "external-cache"
+            external_models = root / "external-models"
+            sentinels = [external_cache / "ibus-voice-ime" / "models" / "w.bin",
+                         external_models / "w.bin"]
+            for sentinel in sentinels:
+                sentinel.parent.mkdir(parents=True)
+                sentinel.write_bytes(b"keep")
+            for pollution in ("xdg", "model", "both"):
+                with self.subTest(pollution=pollution):
+                    env = dict(os.environ, HOME=str(home), TMPDIR=str(temp),
+                               XDG_CACHE_HOME=str(home / ".cache"))
+                    env.pop("VOICE_IME_MODEL_CACHE", None)
+                    if pollution in ("xdg", "both"):
+                        env["XDG_CACHE_HOME"] = str(external_cache)
+                    if pollution in ("model", "both"):
+                        env["VOICE_IME_MODEL_CACHE"] = str(external_models)
+                    result = subprocess.run(
+                        [sys.executable, str(Path(__file__).resolve()),
+                         "RemoteUninstallTest.test_old_script_still_gets_full_purge",
+                         "RemoteUninstallUpdateTest.test_update_failure_falls_back_to_local",
+                         "RemoteUninstallTest.test_model_cache_outside_home_not_touched",
+                         "RemoteUninstallTest.test_xdg_cache_outside_home_not_touched"],
+                        env=env, capture_output=True, text=True, timeout=30,
+                        stdin=subprocess.DEVNULL, start_new_session=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    for sentinel in sentinels:
+                        self.assertEqual(sentinel.read_bytes(), b"keep")
 
 
 if __name__ == "__main__":
